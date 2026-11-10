@@ -470,3 +470,51 @@ def test_allowlisted_selector_requires_nontransparent_visible_combobox(extract, 
         </div></main>''')
     assert not result["fields"]
     assert "SYNTHETIC_CONCEALED_OFFICE" not in json.dumps(result)
+
+
+def test_observed_room_dialog_preserves_repeated_ids_by_room_scope(extract):
+    result = extract('''
+      <main aria-hidden="true"><input id="floor_area" value="SYNTHETIC_HIDDEN_MAIN"></main>
+      <div role="dialog" aria-labelledby="title"><h2 id="title">Set bedrooms options</h2>
+      <div class="MuiDialogContent-root">
+        <div><h6>Bedroom 1</h6><label>Carpets<input id="has_carpets" name="has_carpets" type="checkbox" checked></label>
+          <textarea name="description">First synthetic room</textarea>
+          <textarea aria-hidden="true" readonly tabindex="-1">SYNTHETIC_HIDDEN_MEASURE</textarea></div>
+        <div><h6>Bedroom 2</h6><label>Carpets<input id="has_carpets" name="has_carpets" type="checkbox"></label>
+          <textarea name="description">Second synthetic room</textarea></div>
+      </div></div>''')
+    groups = result['dialogs'][0]['room_groups']
+    assert [g['title'] for g in groups] == ['Bedroom 1', 'Bedroom 2']
+    assert [g['index'] for g in groups] == [1, 2]
+    assert [g['fields'][0]['checked'] for g in groups] == [True, False]
+    assert [g['fields'][1]['value'] for g in groups] == ['First synthetic room', 'Second synthetic room']
+    assert all(g['mapping_verified'] is False for g in groups)
+    assert 'SYNTHETIC_HIDDEN' not in json.dumps(result)
+
+
+def test_unknown_or_ambiguous_room_group_structure_is_not_guessed(extract):
+    result = extract('''<main><div role="dialog" aria-label="Set bathrooms options">
+      <div class="MuiDialogContent-root"><div><h6>Bathroom 1</h6><input name="description" value="First"></div>
+        <div><h6>Bathroom 1</h6><input name="description" value="Duplicate"></div>
+        <div><h6>Bathroom pending</h6><input value="Unnumbered"></div></div>
+      </div><div role="dialog" aria-label="Unknown room options"><div class="MuiDialogContent-root">
+        <div><h6>Bedroom 1</h6><input value="Unverified structure"></div></div></div></main>''')
+    assert len(result['dialogs'][0]['room_groups']) == 1
+    assert result['dialogs'][1]['room_groups'] == []
+    assert 'room_group_structure_unresolved' in result['limitations']
+    # Unmapped fields remain in the raw dialog; only semantic grouping is refused.
+    assert any(f['value'] == 'Duplicate' for f in result['dialogs'][0]['fields'])
+
+
+@pytest.mark.parametrize('title,room', [
+    ('Set bathrooms options', 'Bathroom'), ('Set kitchens options', 'Kitchen'),
+    ('Set parkings options', 'Parking'), ('Set lounges options', 'Lounge'),
+])
+def test_verified_room_categories_keep_independent_option_names(extract, title, room):
+    result = extract(f'''<main><div role="dialog" aria-label="{title}"><div class="MuiDialogContent-root">
+      <div><h6>{room} 1</h6><label>Specific open plan<input type="checkbox" name="is_open_plan" checked></label>
+      <label>General open plan<input type="checkbox" name="has_open_plan"></label>
+      <textarea name="description">Synthetic description</textarea></div></div></div></main>''')
+    group = result['dialogs'][0]['room_groups'][0]
+    assert group['title'] == room + ' 1'
+    assert [(f['name'], f['checked']) for f in group['fields'][:2]] == [('is_open_plan', True), ('has_open_plan', False)]

@@ -13,6 +13,10 @@ The desktop shell has experimental read-only Hub navigation, but the safety mode
 
 Unverified selectors, completeness rules and actual portal outcomes must fail closed. These observations contain no real listing data.
 
+The copied-field inventory validates capture integrity, expected local-job reference, per-page guards and observation ordering before mapping the latest page observations. It preserves original field objects and paths, distinguishes missing/ambiguous/unresolved controls, and retains unmapped controls and related dialog records. It does not infer required fields or sale/rental branches, normalize prices/dates, invent selected suburb IDs, or turn historical observations into a verified backup.
+
+Observed existing room dialogs use caption spans such as Set bedrooms options, not native buttons. Room inputs repeat names and IDs across groups. Each group must stay scoped to its direct DIV under the visible MuiDialogContent-root, with its own numbered H6 heading, checkbox states and description. Hidden measuring textareas must be excluded. Bedroom, bathroom, kitchen, parking and lounge dialog schemas were inspected without changing fields; Escape closes them asynchronously. Zero-count captions may still look enabled and produce no dialog. Add option, Done and remove controls are not read-only capture actions.
+
 Live connector qualification must also demonstrate an atomic server-side expected-revision precondition for each destructive operation. A read followed by a click is not an atomic concurrency safeguard. Hub support for this is unknown; do not set the connector ready or enable live writes until the requirement is met and independently verified. Required address values and suburb selection must be validated against the actual Hub form, not inferred from a partial inspection.
 
 The read-only editor opener checks a unique RXCU row, its controlled Select menu, the numeric editor URL and both visible reference headings. Account ownership, result completeness and capture fidelity remain unverified.

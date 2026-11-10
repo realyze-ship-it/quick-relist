@@ -1315,3 +1315,164 @@ def test_browser_matched_zip_byte_mismatch_stays_unassigned(draft_window, applic
     assert draft_window.test_errors
     assert source.is_file()
     assert list(draft_window.media_root.glob("*/source.zip"))
+
+
+def _synthetic_source_inventory():
+    return {"status": "partial", "complete": False, "entries": [
+        {"key": "selling_price", "label": "Selling price", "page": "details", "kind": "text",
+         "status": "observed", "value": " 123.00 ",
+         "observations": [{"path": "pages/0/fields/0", "field": {"name": "selling_price", "value": " 123.00 "}}], "issues": []},
+        {"key": "country_id", "label": "Country", "page": "details", "status": "observed", "value": "Synthetic country",
+         "selected_options": [{"text": "Synthetic country", "value": "ZZ"}], "observations": [], "issues": []},
+        {"key": "suburb", "label": "Suburb", "page": "details", "status": "unresolved",
+         "value": "<b>SYNTHETIC plain text</b>", "observations": [], "issues": ["entity_id_unverified"]},
+        {"key": "rates", "label": "Rates", "page": "details", "status": "missing", "observations": [], "issues": []}],
+        "unknowns": [{"path": "pages/0/fields/9", "page_key": "details", "field": {"name": "synthetic_flag", "type": "checkbox", "checked": False}, "reason": "unmapped_control"}],
+        "issues": []}
+
+
+def test_source_field_review_preserves_values_and_plain_text_provenance(application):
+    inventory = _synthetic_source_inventory()
+    before = deepcopy(inventory)
+    dialog = ui.SourceFieldReviewDialog(inventory)
+    try:
+        dialog.show()
+        application.processEvents()
+        assert dialog.table.editTriggers() == QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        assert dialog.detail.isReadOnly()
+        assert dialog.table.rowCount() == 5
+        assert dialog.table.item(0, 2).text() == " 123.00 "
+        assert dialog.table.item(4, 2).text() == "false"
+        dialog.table.selectRow(1)
+        assert '"value": "ZZ"' in dialog.detail.toPlainText()
+        dialog.table.selectRow(2)
+        assert "<b>SYNTHETIC plain text</b>" in dialog.detail.toPlainText()
+        assert "2 uniquely observed" in dialog.summary.text()
+        assert inventory == before
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_source_field_review_filters_without_revealing_hidden_selection(application):
+    dialog = ui.SourceFieldReviewDialog(_synthetic_source_inventory())
+    try:
+        dialog.table.selectRow(0)
+        assert "selling_price" in dialog.detail.toPlainText()
+        dialog.gaps_only.setChecked(True)
+        assert dialog.table.isRowHidden(0)
+        assert dialog.table.isRowHidden(1)
+        assert not dialog.table.isRowHidden(2)
+        assert dialog.detail.toPlainText() == ""
+        dialog.filter_input.setText("suburb")
+        assert not dialog.table.isRowHidden(2)
+        assert dialog.table.isRowHidden(3)
+        dialog.table.selectRow(2)
+        assert "SYNTHETIC" in dialog.detail.toPlainText()
+        dialog.filter_input.setText("no matching field")
+        assert dialog.detail.toPlainText() == ""
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_source_field_review_rejected_inventory_never_displays_supplied_values(application):
+    inventory = _synthetic_source_inventory()
+    inventory["status"] = "rejected"
+    inventory["issues"] = ["capture_integrity_invalid"]
+    dialog = ui.SourceFieldReviewDialog(inventory)
+    try:
+        assert dialog.table.rowCount() == 0
+        assert "could not be safely mapped" in dialog.summary.text()
+        assert "capture_integrity_invalid" in dialog.detail.toPlainText()
+        assert "Synthetic country" not in dialog.detail.toPlainText()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_source_field_review_keeps_room_options_separately_scoped(application):
+    inventory = _synthetic_source_inventory()
+    inventory['related_records'] = [{'path': 'pages/0/dialogs/0', 'page_key': 'details', 'issues': ['dialog_record_mapping_unverified'],
+        'record': {'title': 'Set bedrooms options', 'source': {'close_verified': True}, 'room_groups': [
+            {'title': 'Bedroom 1', 'index': 1, 'fields': [{'name': 'has_carpets', 'type': 'checkbox', 'checked': True}]},
+            {'title': 'Bedroom 2', 'index': 2, 'fields': [{'name': 'has_carpets', 'type': 'checkbox', 'checked': False}]}]}}]
+    dialog = ui.SourceFieldReviewDialog(inventory)
+    try:
+        assert dialog.table.item(4, 0).text() == 'Bedroom 1 options'
+        assert dialog.table.item(5, 0).text() == 'Bedroom 2 options'
+        assert '1 checked options' in dialog.table.item(4, 2).text()
+        assert '0 checked options' in dialog.table.item(5, 2).text()
+        dialog.table.selectRow(5)
+        assert 'room_groups/1' in dialog.detail.toPlainText()
+        assert '"checked": false' in dialog.detail.toPlainText()
+        assert dialog.table.item(5, 3).text() == 'unresolved'
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_saved_observation_opens_source_review_bound_to_local_job(draft_window, application, monkeypatch):
+    from quick_relist import source_fields
+    _add_batch(draft_window, 'RXCU000123')
+    capture = _synthetic_partial_capture()
+    capture['identity'] = {'reference_verified': True}
+    draft_window.drafts.save_capture(draft_window.selected_job['id'], capture)
+    calls = []
+    inventory = _synthetic_source_inventory()
+    def extract(value, **options):
+        calls.append((value, options))
+        return deepcopy(inventory)
+    monkeypatch.setattr(source_fields, 'extract_source_fields', extract)
+    shown = []
+    monkeypatch.setattr(ui.SourceFieldReviewDialog, 'exec', lambda self: shown.append(deepcopy(self.inventory)))
+    dialog = ui.CapturedObservationsDialog(draft_window.selected_job, draft_window.drafts.list_captures(draft_window.selected_job['id']), draft_window.drafts)
+    try:
+        assert dialog.source_fields_button.isEnabled()
+        dialog._review_source_fields()
+        assert calls == [(capture, {'expected_rxcu': 'RXCU000123'})]
+        assert shown == [inventory]
+        assert draft_window.selected_job['snapshot'] is None
+        assert not draft_window.advance_button.isEnabled()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_source_review_mapping_error_is_generic_and_original_unchanged(draft_window, application, monkeypatch):
+    from quick_relist import source_fields
+    _add_batch(draft_window, 'RXCU000123')
+    capture = _synthetic_partial_capture()
+    capture['identity'] = {'reference_verified': True}
+    ident = draft_window.drafts.save_capture(draft_window.selected_job['id'], capture)
+    def fail(*args, **kwargs): raise ValueError('SYNTHETIC_PRIVATE_ERROR')
+    monkeypatch.setattr(source_fields, 'extract_source_fields', fail)
+    dialog = ui.CapturedObservationsDialog(draft_window.selected_job, draft_window.drafts.list_captures(draft_window.selected_job['id']), draft_window.drafts)
+    try:
+        dialog._review_source_fields()
+        assert 'could not be prepared' in dialog.saved_hint.text()
+        assert 'SYNTHETIC_PRIVATE_ERROR' not in dialog.saved_hint.text()
+        assert draft_window.drafts.get_capture(ident)['capture'] == capture
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_source_review_surfaces_interruption_pending_dialogs_and_capture_limits(application):
+    inventory = _synthetic_source_inventory()
+    inventory.update(capture_status='cancelled', pending_room_observation_count=2,
+                     capture_limitations=['room_dialog_close_or_identity_unverified'],
+                     gaps=[{'code': 'pending_room_observations_excluded', 'count': 2}, {'code': 'capture_interrupted'}])
+    dialog = ui.SourceFieldReviewDialog(inventory)
+    try:
+        assert 'interrupted' in dialog.scope_warning.text()
+        assert '2 uncertain room observation(s)' in dialog.scope_warning.text()
+        assert 'limitations' in dialog.scope_warning.text()
+        dialog._show_capture_gaps()
+        details = dialog.detail.toPlainText()
+        assert 'pending_room_observations_excluded' in details
+        assert 'room_dialog_close_or_identity_unverified' in details
+        assert 'cancelled' in details
+    finally:
+        dialog.close()
+        dialog.deleteLater()

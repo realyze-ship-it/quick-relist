@@ -12,8 +12,10 @@ tab, but only to query-free same-listing editor links actually observed in DOM.
 It never clicks a button, opens a dialog, downloads a URL, or submits a form.
 
 Returned business data may be private. Keep it in memory or protected local
-storage; do not log it. No browser storage, cookies, network payloads, hidden
-fields, password fields, OTP fields or unsanitized rich HTML are inspected.
+storage; do not log it. No browser storage, cookies, network payloads, arbitrary
+hidden fields, password fields, OTP fields or unsanitized rich HTML are inspected.
+Only allowlisted business-selector codes paired with visible controls are read
+from the observed hidden native selection inputs.
 There is deliberately no persistence, telemetry, or credential handling here.
 """
 from __future__ import annotations
@@ -249,14 +251,44 @@ return (() => {
         label: labelFor(el), section: scopeFor(el), text: textOf(el),
         sanitized_html: richHTML(el), format_fidelity_verified: false}));
   };
+  const roomGroups = (dialog, title) => {
+    // Repeated room checkbox IDs are only meaningful inside their own room.
+    // These titles and direct content-child blocks were observed in Hub.
+    const roomLabels = {'Set bedrooms options': 'Bedroom', 'Set bathrooms options': 'Bathroom',
+      'Set kitchens options': 'Kitchen', 'Set parkings options': 'Parking', 'Set lounges options': 'Lounge'};
+    const label = roomLabels[title];
+    if (!label) return [];
+    const contents = Array.from(dialog.querySelectorAll('.MuiDialogContent-root')).filter(visible);
+    if (contents.length !== 1) { limitations.add('room_group_structure_unresolved'); return []; }
+    const seen = new Set();
+    const groups = [];
+    for (const block of limited(contents[0].children, 200)) {
+      if (block.tagName !== 'DIV' || !visible(block)) continue;
+      const headings = Array.from(block.children).filter(el => el.tagName === 'H6' && visible(el));
+      if (headings.length !== 1) continue;
+      const heading = textOf(headings[0]);
+      const match = heading.match(new RegExp('^' + label + ' ([1-9][0-9]*)$'));
+      if (!match || !Number.isSafeInteger(Number(match[1])) || seen.has(match[1])) {
+        limitations.add('room_group_structure_unresolved'); continue;
+      }
+      seen.add(match[1]);
+      groups.push({title: heading, index: Number(match[1]), fields: fieldsFor(block),
+        rich_text: richFor(block), mapping_verified: false});
+    }
+    if (!groups.length) limitations.add('room_group_structure_unresolved');
+    return groups;
+  };
   // Main/form scoping avoids unrelated account menus where the page exposes it.
   const mains = Array.from(document.querySelectorAll('main,[role="main"]')).filter(visible);
   const root = mains.length === 1 ? mains[0] : document.body;
   if (root === document.body) limitations.add('main_content_scope_unverified');
   if (!root) return {href, ready_state: document.readyState, unavailable: true};
   const dialogs = limited(document.querySelectorAll('[role="dialog"],[aria-modal="true"],dialog[open]'), 100)
-    .filter(el => visible(el) && !sensitiveContext(el)).map((el, index) => ({dom_order: index, title: labelFor(el) || textOf(el.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]')),
-      fields: fieldsFor(el), rich_text: richFor(el), text: textOf(el)}));
+    .filter(el => visible(el) && !sensitiveContext(el)).map((el, index) => {
+      const title = labelFor(el) || textOf(el.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'));
+      return {dom_order: index, title, fields: fieldsFor(el), rich_text: richFor(el),
+        text: textOf(el), room_groups: roomGroups(el, title)};
+    });
   const groups = new Set(root.querySelectorAll('fieldset,section,article,[role="group"]'));
   root.querySelectorAll('h1,h2,h3,h4,h5,h6,legend,[role="heading"]').forEach(h => { if (visible(h) && h.parentElement) groups.add(h.parentElement); });
   const sections = limited(groups, 400).filter(el => visible(el) && !sensitiveContext(el)).map((el, index) => ({dom_order: index,
@@ -374,6 +406,15 @@ def _validate_observation(raw: Any, expected_url: str) -> dict:
         dialog["fields"] = clean_fields(dialog.get("fields"))
         if not isinstance(dialog.get("rich_text"), list):
             raise CaptureReadError("The editor returned malformed dialog entries.")
+        if "room_groups" in dialog:
+            groups = dialog["room_groups"]
+            if not isinstance(groups, list) or any(not isinstance(group, dict) for group in groups):
+                raise CaptureReadError("The editor returned malformed room groups.")
+            for group in groups:
+                if (not isinstance(group.get("title"), str) or type(group.get("index")) is not int
+                        or group["index"] <= 0 or not isinstance(group.get("rich_text"), list)):
+                    raise CaptureReadError("The editor returned malformed room groups.")
+                group["fields"] = clean_fields(group.get("fields"))
     def scrub_string(value):
         def redact(match):
             raw = match.group(0)

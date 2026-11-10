@@ -1,7 +1,8 @@
 """Guarded, read-only traversal of a previously matched Hub editor.
 
-No listing writes, network/storage reads, dialog opening or guessed routes.
-Only the four directly observed, verified native editor tab buttons may be clicked.
+No listing writes, network/storage reads or guessed routes. The four directly
+observed native editor tabs may be clicked. Optional existing-room capture opens
+only verified room-option captions and closes their dialogs with Escape.
 The returned JSON is persistable even after interruption: only fully guarded
 observations are retained. Stability is a bounded DOM heuristic, not proof of
 hydration, account ownership, exact fidelity or a complete source backup.
@@ -61,7 +62,7 @@ class MatchedHubCapture(PartialHubCapture):
     """
 
     def __init__(self, hub, rxcu, *, timeout=15.0, poll_interval=0.2,
-                 stable_for=1.0, cancelled=None):
+                 stable_for=1.0, cancelled=None, include_room_options=False):
         super().__init__(hub.driver)
         self.hub = hub
         self.reference = normalize_rxcu(rxcu)
@@ -69,6 +70,11 @@ class MatchedHubCapture(PartialHubCapture):
             raise ValueError("Invalid capture wait limits")
         self.timeout, self.poll_interval, self.stable_for = timeout, poll_interval, stable_for
         self.cancelled = cancelled or (lambda: False)
+        if type(include_room_options) is not bool:
+            raise ValueError("Room capture mode must be explicit")
+        self.include_room_options = include_room_options
+        self._room_results = []
+        self._pending_rooms = []
         self._binding = None
         self._started = False
         self._cancelled = False
@@ -238,6 +244,33 @@ class MatchedHubCapture(PartialHubCapture):
             time.sleep(min(self.poll_interval, max(0, deadline - time.monotonic())))
         raise CaptureReadError("The editor tab navigation did not become verifiable. Inspect Hub before trying again.")
 
+    def _capture_rooms(self, sample, url):
+        from .room_capture import capture_existing_room_options
+        result = capture_existing_room_options(self.hub, self.reference,
+            expected_listing_id=self._listing_id, expected_url=url, timeout=self.timeout,
+            expected_main_fingerprint=_digest({key: sample[key] for key in ('fields', 'rich_text')}),
+            poll_interval=self.poll_interval, stable_for=self.stable_for, cancelled=self.cancelled)
+        self._pending_rooms.extend(deepcopy(result.get('pending_dialogs', [])))
+        self._room_results.append({key: deepcopy(result.get(key)) for key in
+            ('status', 'stop_reason', 'stop_code', 'observations', 'complete', 'server_writes_verified')})
+        accepted = []
+        for dialog in result.get('dialogs', []):
+            source = dialog.get('source', {})
+            if (source.get('rxcu') != self.reference or source.get('listing_id') != self._listing_id
+                    or any(source.get(key) is not True for key in ('reference_checked_before_and_after',
+                        'pinned_tab_checked', 'main_fields_unchanged_verified', 'close_verified'))):
+                self._pending_rooms.append(deepcopy(dialog))
+                continue
+            accepted.append(deepcopy(dialog))
+        sample['dialogs'].extend(accepted)
+        sample['room_options_observed'] = len(accepted)
+        sample.pop('integrity')
+        sample['integrity'] = {'algorithm': 'sha256', 'sha256': _digest(sample)}
+        if result.get('status') != 'partial' or self._pending_rooms:
+            self._cancelled = result.get('status') == 'cancelled'
+            raise CaptureReadError('Room-option capture stopped. Earlier guarded pages and dialogs were retained. Check the current editor before continuing; uncertain dialog data remains separate and unverified.')
+        self._identity(url)
+
     def capture(self):
         """Return partial JSON on success, safety stop, read failure or cancel.
 
@@ -268,6 +301,8 @@ class MatchedHubCapture(PartialHubCapture):
                 self._pages.append(sample)
                 self._last_url = url
                 visited.add(sample['page_key'])
+                if self.include_room_options and sample['page_key'] == 'details':
+                    self._capture_rooms(sample, url)
                 tabs, ready = self._tabs(url)
                 tab_candidates = [key for key in TAB_PAGES.values() if key in tabs and key not in visited]
                 if tab_candidates:
@@ -316,7 +351,11 @@ class MatchedHubCapture(PartialHubCapture):
             'fidelity_verified': False, 'nested_dialogs_verified': False}
         result['status'] = 'cancelled' if self._cancelled else result['status']
         result['stop_reason'] = self._reason
+        result['room_option_capture'] = deepcopy(self._room_results)
+        result['pending_room_observations'] = deepcopy(self._pending_rooms)
         result['limitations'] = sorted(set(result['limitations']) | {'bounded_dom_stability_not_complete_hydration'})
+        if self._pending_rooms:
+            result['limitations'].append('room_dialog_close_or_identity_unverified')
         result['warning'] = 'Matched partial observations only. Not a complete source backup and not safe to use for relisting.'
         result['integrity'] = {'algorithm': 'sha256', 'sha256': _digest(result)}
         return result

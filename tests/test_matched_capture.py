@@ -440,3 +440,77 @@ def test_native_missing_tabs_are_not_synthesized(setup):
     assert result['coverage']['observed_pages'] == ['details', 'media']
     assert [c[1] for c in driver.calls if c[0] == 'tab_click'] == ['media']
     assert_partial(result)
+
+
+def _room_dialog(**source_updates):
+    source = {'rxcu': REF, 'listing_id': '123456', 'page_key': 'details',
+              'opener': 'Set bedrooms options', 'title': 'Set bedrooms options', 'feature_count': 1,
+              'reference_checked_before_and_after': True, 'pinned_tab_checked': True,
+              'main_fields_unchanged_verified': True, 'close_verified': True,
+              'complete': False, 'server_writes_verified': False}
+    source.update(source_updates)
+    return {'title': 'Set bedrooms options', 'fields': [{'name': 'has_carpets', 'value': 'on', 'type': 'checkbox', 'checked': True}],
+            'rich_text': [], 'room_groups': [{'title': 'Bedroom 1', 'index': 1, 'fields': [], 'rich_text': []}], 'source': source}
+
+
+def test_optional_room_capture_merges_only_guarded_dialogs_and_rehashes(setup, monkeypatch):
+    from quick_relist import room_capture
+    hub, driver, _ = setup
+    calls = []
+    def rooms(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {'status': 'partial', 'dialogs': [_room_dialog()], 'pending_dialogs': [], 'observations': [],
+                'stop_reason': None, 'stop_code': None, 'complete': False, 'server_writes_verified': False}
+    monkeypatch.setattr(room_capture, 'capture_existing_room_options', rooms)
+    result = capture(hub, include_room_options=True)
+    assert len(calls) == 1 and calls[0][0] == (hub, REF)
+    assert calls[0][1]['expected_listing_id'] == '123456'
+    assert calls[0][1]['expected_url'] == BASE
+    assert result['pages'][0]['dialogs'] == [_room_dialog()]
+    assert result['pages'][0]['room_options_observed'] == 1
+    assert result['pending_room_observations'] == []
+    assert result['coverage']['observed_pages'] == list(EDITOR_PAGES)
+    assert_partial(result)
+
+
+@pytest.mark.parametrize('status', ['stopped', 'cancelled'])
+def test_uncertain_room_dialog_stays_separate_and_stops_tab_navigation(setup, monkeypatch, status):
+    from quick_relist import room_capture
+    hub, driver, _ = setup
+    pending = _room_dialog(reference_checked_before_and_after=False, close_verified=False)
+    monkeypatch.setattr(room_capture, 'capture_existing_room_options', lambda *a, **kw: {
+        'status': status, 'dialogs': [_room_dialog()], 'pending_dialogs': [pending], 'observations': [],
+        'stop_reason': 'Synthetic stop', 'stop_code': 'close_unverified', 'complete': False, 'server_writes_verified': False})
+    result = capture(hub, include_room_options=True)
+    assert result['status'] == status
+    assert len(result['pages']) == 1
+    assert result['pages'][0]['fields'][0]['value'] == 'hydrated'
+    assert result['pages'][0]['dialogs'] == [_room_dialog()]
+    assert result['pending_room_observations'] == [pending]
+    assert 'room_dialog_close_or_identity_unverified' in result['limitations']
+    assert not any(call[0] == 'get' for call in driver.calls)
+    assert_partial(result)
+
+
+def test_room_dialog_guard_mismatch_is_not_promoted_to_accepted_page(setup, monkeypatch):
+    from quick_relist import room_capture
+    hub, driver, _ = setup
+    conflicting = _room_dialog(listing_id='999999')
+    monkeypatch.setattr(room_capture, 'capture_existing_room_options', lambda *a, **kw: {
+        'status': 'partial', 'dialogs': [conflicting], 'pending_dialogs': [], 'observations': []})
+    result = capture(hub, include_room_options=True)
+    assert result['status'] == 'stopped'
+    assert result['pages'][0]['dialogs'] == []
+    assert result['pending_room_observations'] == [conflicting]
+    assert_partial(result)
+
+
+def test_room_capture_not_enabled_implicitly(setup, monkeypatch):
+    from quick_relist import room_capture
+    hub, driver, _ = setup
+    def forbidden(*args, **kwargs): raise AssertionError('Room capture was not requested')
+    monkeypatch.setattr(room_capture, 'capture_existing_room_options', forbidden)
+    result = capture(hub)
+    assert result['status'] == 'partial'
+    assert result['room_option_capture'] == []
+    assert result['pending_room_observations'] == []

@@ -537,11 +537,137 @@ class TentativeAddressDialog(QDialog):
         return corrected
 
 
+class SourceFieldReviewDialog(QDialog):
+    """Read-only structured copy inventory; never a relist approval."""
+
+    def __init__(self, inventory: dict[str, Any], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.inventory = deepcopy(inventory)
+        self.setWindowTitle("Copied listing fields · review required")
+        self.setStyleSheet(STYLE)
+        self.resize(1020, 760)
+        self.setMinimumSize(740, 560)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(23, 22, 23, 20)
+        root.addWidget(_label("Review copied listing fields", "pageTitle"))
+        self.summary = _label("", "noticeBody", True)
+        root.addWidget(self.summary)
+        self.scope_warning = _label("", "noticeBody", True)
+        root.addWidget(self.scope_warning)
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText("Find a field, page, value or status…")
+        self.filter_input.setAccessibleName("Filter copied listing fields")
+        root.addWidget(self.filter_input)
+        self.gaps_only = QCheckBox("Show only fields needing review")
+        root.addWidget(self.gaps_only)
+        self.capture_gaps_button = _button("Show capture gaps and interruptions", self._show_capture_gaps)
+        root.addWidget(self.capture_gaps_button)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Field", "Page", "Observed value", "Status"])
+        self.table.setAccessibleName("Read-only source field inventory")
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(0, 245)
+        self.table.setColumnWidth(1, 130)
+        self.table.setColumnWidth(3, 115)
+        root.addWidget(self.table, 2)
+        root.addWidget(_label("Original control and capture location", "smallTitle"))
+        self.detail = QPlainTextEdit()
+        self.detail.setReadOnly(True)
+        self.detail.setAccessibleName("Original field provenance, plain text only")
+        root.addWidget(self.detail, 1)
+        root.addWidget(_label("This is a historical local copy, not a verified backup. Missing fields may not apply to this listing. Suburb selection, nested records, formatting, account ownership and complete source coverage still need verification. Nothing here edits Hub or enables relisting.", "muted", True))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+        self.rows = []
+        if inventory.get("status") == "partial":
+            self.rows = deepcopy(inventory.get("entries", []))
+            for related in inventory.get("related_records", []):
+                record = related.get("record", {})
+                for group_index, group in enumerate(record.get("room_groups", [])):
+                    fields = group.get("fields", [])
+                    checked = sum(field.get("type") == "checkbox" and field.get("checked") is True for field in fields)
+                    self.rows.append({"key": f"{related.get('path', '')}/room_groups/{group_index}",
+                        "label": str(group.get("title") or "Room") + " options", "page": related.get("page_key", "details"),
+                        "status": "unresolved", "kind": "room_group",
+                        "display_value": f"{len(fields)} captured controls; {checked} checked options",
+                        "observations": [{"path": f"{related.get('path', '')}/room_groups/{group_index}",
+                            "field": deepcopy(group), "dialog_source": deepcopy(record.get("source", {}))}],
+                        "issues": deepcopy(related.get("issues", []))})
+            for item in inventory.get("unknowns", []):
+                field = item.get("field", {})
+                self.rows.append({"key": item.get("path", ""),
+                    "label": field.get("label") or field.get("name") or field.get("id") or "Unmapped control",
+                    "page": item.get("page_key", ""), "status": "unmapped",
+                    "observations": [deepcopy(item)], "issues": [item.get("reason", "unmapped_control")]})
+            observed = sum(row.get("status") == "observed" for row in self.rows)
+            self.summary.setText(f"{observed} uniquely observed field(s); {len(self.rows) - observed} items missing, ambiguous, unresolved or unmapped. Select a row to inspect its original control and exact source location. Values are never invented or taken from older pages to fill a gap.")
+            warnings = []
+            if inventory.get('capture_status') in ('stopped', 'cancelled'):
+                warnings.append('Capture was interrupted before completion.')
+            pending = inventory.get('pending_room_observation_count', 0)
+            if type(pending) is int and pending > 0:
+                warnings.append(f'{pending} uncertain room observation(s) are excluded from this inventory; inspect the original record and current browser.')
+            if inventory.get('capture_limitations'):
+                warnings.append('The collector recorded limitations that may affect copied values.')
+            if inventory.get('gaps'):
+                warnings.append('Open capture gaps to review the remaining checks, including missing pages and unverified records.')
+            self.scope_warning.setText(' '.join(warnings))
+        else:
+            self.summary.setText("This observation could not be safely mapped to the selected listing. The original record remains unchanged. Capture the exact matched editor again before using a copied field inventory.")
+            self.detail.setPlainText(json.dumps({"issues": inventory.get("issues", [])}, ensure_ascii=False, indent=2))
+        self.scope_warning.setVisible(bool(self.scope_warning.text()))
+        self.table.setRowCount(len(self.rows))
+        for index, row in enumerate(self.rows):
+            value = row.get("display_value", row.get("value"))
+            if value is None and row.get("status") == "unmapped":
+                original = row["observations"][0].get("field", {})
+                value = original.get("checked") if original.get("type") in ("checkbox", "radio") else original.get("value", original.get("text"))
+            rendered = "" if value is None else value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+            values = (row.get("label") or row.get("key", ""), row.get("page", ""), rendered, row.get("status", ""))
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
+                self.table.setItem(index, column, item)
+        self.table.itemSelectionChanged.connect(self._show_field)
+        self.filter_input.textChanged.connect(self._filter_fields)
+        self.gaps_only.toggled.connect(self._filter_fields)
+        if self.rows:
+            self.table.selectRow(0)
+
+    def _show_capture_gaps(self):
+        self.table.clearSelection()
+        self.detail.setPlainText(json.dumps({key: self.inventory.get(key) for key in
+            ('capture_status', 'pending_room_observation_count', 'gaps', 'capture_limitations', 'issues', 'warning')},
+            ensure_ascii=False, indent=2))
+
+    def _show_field(self):
+        row = self.table.currentRow()
+        if 0 <= row < len(self.rows) and not self.table.isRowHidden(row):
+            self.detail.setPlainText(json.dumps(self.rows[row], ensure_ascii=False, indent=2))
+        else:
+            self.detail.clear()
+
+    def _filter_fields(self, *_args):
+        query = self.filter_input.text().casefold().strip()
+        for index, row in enumerate(self.rows):
+            text = " ".join(self.table.item(index, column).text() for column in range(4)).casefold()
+            hidden = bool(query and query not in text) or (self.gaps_only.isChecked() and row.get("status") == "observed")
+            self.table.setRowHidden(index, hidden)
+        self._show_field()
+
+
 class CapturedObservationsDialog(QDialog):
     """Read private immutable observations and save separate tentative revisions."""
 
     def __init__(self, job: dict[str, Any], records: list[dict[str, Any]], drafts: Any, parent: QWidget | None = None):
         super().__init__(parent)
+        self.job = deepcopy(job)
         self.records = deepcopy(records)
         self.drafts = drafts
         self.setWindowTitle("Saved observations · incomplete")
@@ -562,6 +688,8 @@ class CapturedObservationsDialog(QDialog):
         self.source_text.setReadOnly(True)
         self.source_text.setAccessibleName("Saved original observation, plain text only")
         root.addWidget(self.source_text, 1)
+        self.source_fields_button = _button("Review copied listing fields", self._review_source_fields)
+        root.addWidget(self.source_fields_button)
         self.revision_combo = QComboBox()
         self.revision_combo.setAccessibleName("Choose a tentative address revision")
         root.addWidget(self.revision_combo)
@@ -579,6 +707,7 @@ class CapturedObservationsDialog(QDialog):
         index = self.capture_combo.currentIndex()
         if not 0 <= index < len(self.records):
             self.edit_button.setEnabled(False)
+            self.source_fields_button.setEnabled(False)
             self.source_text.clear()
             return
         record = self.records[index]
@@ -590,6 +719,7 @@ class CapturedObservationsDialog(QDialog):
         page_note = f"{len(pages)} observed page(s). " if isinstance(pages, list) and pages else ""
         missing_note = f"Missing pages: {', '.join(str(item) for item in missing)}. " if isinstance(missing, list) and missing else ""
         matched = capture.get("identity", {}).get("reference_verified") is True
+        self.source_fields_button.setEnabled(matched and bool(pages))
         source_note = "RXCU headings matched for each accepted page. " if matched else "RXCU association unverified. "
         stopped_note = str(capture.get("stop_reason") or "")
         self.coverage.setText(f"INCOMPLETE · {page_note}{missing_note}{source_note}A full source backup and media completeness are not verified. {stopped_note}")
@@ -606,6 +736,24 @@ class CapturedObservationsDialog(QDialog):
         if revisions:
             self.revision_combo.setCurrentIndex(1)
         self.edit_button.setEnabled(bool(_capture_fields(capture)))
+
+    def _review_source_fields(self):
+        index = self.capture_combo.currentIndex()
+        if not self.source_fields_button.isEnabled() or not 0 <= index < len(self.records):
+            return
+        dialog = None
+        try:
+            from .source_fields import extract_source_fields
+            inventory = extract_source_fields(self.records[index]["capture"], expected_rxcu=self.job.get("rxcu"))
+            dialog = SourceFieldReviewDialog(inventory, self)
+            dialog.exec()
+        except Exception:
+            self.saved_hint.setText("The copied field inventory could not be prepared. The original observation is unchanged and no Hub action was taken.")
+        finally:
+            if dialog is not None:
+                dialog.detail.clear()
+                dialog.table.clearContents()
+                dialog.deleteLater()
 
     def _edit_address(self) -> None:
         index = self.capture_combo.currentIndex()
@@ -1418,7 +1566,7 @@ class MainWindow(QMainWindow):
         confirmation.setTextFormat(Qt.TextFormat.PlainText)
         confirmation.setWindowTitle("Capture matched editor tabs locally?")
         confirmation.setText(f"Read the observed editor tabs for {reference} and save the visible source details on this computer?")
-        confirmation.setInformativeText("The exact RXCU headings and browser tab will be checked before and after every accepted page. The browser follows only the observed editor tabs or links for this listing and stays on its last inspected tab. Finish or discard any unsaved edits yourself before continuing. Do not use the browser during capture.\n\nPrivate property and contact details are stored locally without encryption. Nested dialogs, account ownership, originals and complete field coverage remain unverified. No Hub fields will be changed or saved. You may stop after the current browser read.")
+        confirmation.setInformativeText("The exact RXCU headings and browser tab will be checked before and after accepted pages. Existing bedroom, bathroom, kitchen, parking and lounge options with supported positive counts will be opened and closed with Escape, without changing their controls. Other nested records remain unverified. The browser stays on its last inspected tab. Finish or discard any unsaved edits yourself first, and do not use the browser during capture.\n\nPrivate property and contact details are stored locally without encryption. Account ownership, originals and complete field coverage remain unverified. No Hub fields will be changed or saved. You may stop after the current browser read.")
         confirmation.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
         confirmation.button(QMessageBox.StandardButton.Yes).setText("Capture locally")
         confirmation.setDefaultButton(QMessageBox.StandardButton.Cancel)
@@ -1429,7 +1577,7 @@ class MainWindow(QMainWindow):
         def capture_and_save():
             from .matched_capture import capture_matched_listing
             try:
-                capture = capture_matched_listing(self.hub, reference, cancelled=cancel_event.is_set)
+                capture = capture_matched_listing(self.hub, reference, cancelled=cancel_event.is_set, include_room_options=True)
                 record_id = self.drafts.save_capture(job_id, capture)
                 return {"record_id": record_id, "page_count": len(capture.get("pages", [])),
                         "status": capture.get("status"), "stop_reason": capture.get("stop_reason")}
