@@ -1,0 +1,32 @@
+<!doctype html><meta charset="utf-8"><title>Synthetic media transfer only</title>
+<main id="synthetic-media" data-synthetic="true" data-ready="true" data-nonce="@@NONCE@@" data-context="@@CONTEXT@@" data-request="@@REQUEST@@">
+<div class="MuiBox-root"><h6>Listing images</h6><div class="rh__fileInput"><input type="file" multiple accept="image/png,image/jpg,image/jpeg,image/svg,image/gif,image/tif"></div><div>Drag &amp; drop files or click to upload files</div></div>
+<div class="MuiBox-root"><h6>Floor plan images</h6><div class="rh__fileInput"><input type="file" multiple accept="image/png,image/jpg,image/jpeg,image/svg,image/gif,image/tif"></div><div>Drag &amp; drop files or click to upload files</div></div>
+<div data-shared-grid></div><div id="receipts"></div>
+</main>
+<script>
+const config=@@CONFIG@@;
+window.fixtureStats={changes:0,trusted:0,posts:0};
+const root=document.querySelector('main'),inputs=[...document.querySelectorAll('input')];
+for(const [i,input] of inputs.entries())input.addEventListener('change',async event=>{
+ window.fixtureStats.changes++;if(event.isTrusted)window.fixtureStats.trusted++;
+ for(const file of input.files){
+  window.fixtureStats.posts++;
+  const response=await fetch(location.pathname+'/upload/'+(i===0?'photo':'floorplan'),{method:'POST',body:await file.arrayBuffer()});
+  if(!response.ok)continue;
+  const receipt=await response.json();
+  if(config.scenario==='no-receipt')continue;
+  if(config.scenario==='wrong-receipt')receipt.sha256='0'.repeat(64);
+  const node=document.createElement('span');node.dataset.modeledReceipt='true';node.textContent=JSON.stringify(receipt);document.querySelector('#receipts').append(node);
+  const grid=document.querySelector('[data-shared-grid]'),img=document.createElement('img');img.alt='preview';img.id='image-'+receipt.upload_id;
+  img.setAttribute('pos',String(grid.children.length));img.dataset.fullSrc='synthetic:'+receipt.upload_id;grid.append(img);
+ }
+});
+if(config.scenario==='disabled')inputs[1].disabled=true;
+if(config.scenario==='unknown'){const x=document.createElement('input');x.type='password';root.append(x);}
+if(config.scenario==='ambiguous'){const x=inputs[0].parentElement.parentElement.cloneNode(true);root.append(x);}
+if(config.scenario==='fallback-role'){const x=document.createElement('div');x.setAttribute('role','  unknown switch ');root.append(x);}
+if(config.scenario==='aria-widget'){const x=document.createElement('div');x.setAttribute('aria-pressed','false');root.append(x);}
+if(config.scenario==='disabled-fieldset'){const x=document.createElement('fieldset');x.disabled=true;root.append(x);x.append(inputs[1].parentElement.parentElement);}
+if(config.scenario==='wrong-context')root.dataset.context='{}';
+</script>
