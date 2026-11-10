@@ -18,12 +18,14 @@ class Driver:
         self.calls.append("quit")
 
 
-def test_editor_inspection_is_explicitly_partial():
+def test_editor_inspection_uses_filtered_partial_collector(monkeypatch):
     driver = Driver("https://hub.remax.co.za/app/listings/edit/example/media")
+    class Collector:
+        def __init__(self, passed): assert passed is driver
+        def capture_current_page(self): return {"complete": False, "pages": []}
+    monkeypatch.setattr("quick_relist.capture.PartialHubCapture", Collector)
     result = ReadOnlyHub(driver).inspect_current_editor_page()
-    assert result["complete"] is False
-    assert result["fields"][0]["value"] == "example"
-    assert len(driver.calls) == 1
+    assert result == {"complete": False, "pages": []}
 
 
 @pytest.mark.parametrize("url", [

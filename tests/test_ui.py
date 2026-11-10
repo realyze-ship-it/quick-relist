@@ -545,3 +545,412 @@ def test_blocked_job_with_write_history_cannot_be_cancelled(window, monkeypatch,
     window._cancel_job()
     assert not window._is_busy
     assert window.store.get_job(job_id)["state"] == "blocked"
+
+
+@pytest.fixture
+def draft_window(window, tmp_path):
+    from quick_relist.drafts import DraftStore
+    drafts = DraftStore(tmp_path / "synthetic-observations.sqlite3")
+    window.drafts = drafts
+    window.media_root = tmp_path / "synthetic-media"
+    yield window
+    drafts.close()
+
+
+def _synthetic_partial_capture():
+    return {
+        "capture_kind": "partial_visible_dom", "complete": False, "live_ready": False,
+        "listing_id": "SYNTHETIC-UNVERIFIED-ID",
+        "identity": {"route_verified": True, "reference_verified": False, "account_verified": False},
+        "pages": [{
+            "page_key": "details", "page_path": "/synthetic-editor", "complete": False,
+            "fields": [
+                {"label": "Street name", "name": "street", "id": "synthetic-street", "type": "text", "value": "  SYNTHETIC original street  ", "checked": None},
+                {"label": "Show address", "name": "show", "type": "checkbox", "value": "on", "checked": False},
+                {"label": "Null field", "name": "null", "type": "text", "value": None},
+                {"label": "Unknown structure", "name": "nested", "type": "custom", "value": {"synthetic": [1, True]}},
+                {"label": "Suburb", "name": "suburb", "tag": "select", "type": "select-one", "value": "synthetic-1", "selected_options": [{"value": "synthetic-1", "text": "Synthetic original suburb"}]},
+                {"label": "Observed number", "name": "number", "value": 1.5},
+            ],
+            "dialogs": [{"title": "Synthetic address details", "fields": [{"label": "Unit number", "name": "unit", "type": "text", "value": "1"}]}],
+        }],
+        "coverage": {"missing_pages": ["media", "portals"]},
+        "blindspots": [{"code": "source_incomplete", "message": "Synthetic incomplete fixture"}],
+    }
+
+
+def _seed_partial(window):
+    _add_batch(window, "RXCU000123")
+    capture = _synthetic_partial_capture()
+    capture_id = window.drafts.save_capture(window.selected_job["id"], capture)
+    window.refresh()
+    return capture_id, capture
+
+
+def test_partial_observation_controls_are_separate_from_live_approval(draft_window):
+    window = draft_window
+    capture_id, capture = _seed_partial(window)
+    assert window.saved_captures_button.isEnabled()
+    assert "incomplete" in window.observation_status.text().lower()
+    assert "unverified" in window.observation_status.text().lower()
+    assert not window.review_button.isEnabled()
+    assert not window.capture_button.isEnabled()
+    assert not window.advance_button.isEnabled()
+    assert window.import_media_button.isEnabled()
+    assert not window.capture_page_button.isEnabled()  # No browser is connected.
+    assert window.drafts.get_capture(capture_id)["capture"] == capture
+    job = window.store.get_job(window.selected_job["id"])
+    assert job["snapshot"] is None and job["original_address"] is None
+    assert job["approved"] is False and job["state"] == "queued"
+    assert window.stat_values["reviewed"].text() == "0"
+
+
+def test_tentative_editor_uses_exact_captured_controls_and_preserves_all_metadata(application):
+    capture = _synthetic_partial_capture()
+    untouched = deepcopy(capture)
+    dialog = ui.TentativeAddressDialog(capture)
+    try:
+        assert not dialog.save_button.isEnabled()
+        assert dialog.original_address() == {}
+        for include in dialog.included.values():
+            include.setChecked(True)
+        assert dialog.save_button.isEnabled()
+        original = dialog.original_address()
+        assert original["pages/0/fields/0"] == capture["pages"][0]["fields"][0]
+        assert original["pages/0/dialogs/0/fields/0"]["value"] == "1"
+        assert dialog.corrected_address() == original
+        dialog.fields["pages/0/fields/0"].setPlainText("  SYNTHETIC changed street  ")
+        dialog.fields["pages/0/fields/1"].setChecked(True)
+        dialog.fields["pages/0/fields/4"].setPlainText("tentative-option-not-resolved")
+        edited = dialog.corrected_address()
+        assert edited["pages/0/fields/0"]["value"] == "  SYNTHETIC changed street  "
+        assert edited["pages/0/fields/1"]["checked"] is True
+        assert edited["pages/0/fields/1"]["value"] == "on"
+        assert edited["pages/0/fields/2"]["value"] is None
+        assert edited["pages/0/fields/3"]["value"] == {"synthetic": [1, True]}
+        assert edited["pages/0/fields/4"]["selected_options"] == original["pages/0/fields/4"]["selected_options"]
+        assert edited["pages/0/fields/5"]["value"] == 1.5
+        assert dialog.fields["pages/0/fields/3"].isReadOnly()
+        assert dialog.fields["pages/0/fields/5"].isReadOnly()
+        assert capture == untouched
+    finally:
+        dialog.deleteLater()
+
+
+def test_tentative_field_filter_does_not_drop_hidden_selected_fields(application):
+    dialog = ui.TentativeAddressDialog(_synthetic_partial_capture())
+    try:
+        path = "pages/0/fields/0"
+        dialog.included[path].setChecked(True)
+        dialog.filter_input.setText("Unit number")
+        assert dialog.field_rows[path].isHidden()
+        assert not dialog.field_rows["pages/0/dialogs/0/fields/0"].isHidden()
+        assert set(dialog.original_address()) == {path}
+        assert dialog.save_button.isEnabled()
+        dialog.included[path].setChecked(False)
+        assert not dialog.save_button.isEnabled()
+    finally:
+        dialog.deleteLater()
+
+
+def test_saved_tentative_revision_reopens_without_changing_original(draft_window, application):
+    capture_id, capture = _seed_partial(draft_window)
+    dialog = ui.TentativeAddressDialog(capture)
+    path = "pages/0/fields/0"
+    dialog.included[path].setChecked(True)
+    dialog.fields[path].setPlainText("Synthetic tentative street")
+    original = dialog.original_address()
+    edited = dialog.corrected_address()
+    revision_id = draft_window.drafts.save_address(capture_id, original, edited)
+    dialog.deleteLater()
+    revision = draft_window.drafts.get_address(revision_id)
+    reopened = ui.TentativeAddressDialog(capture, revision)
+    try:
+        assert reopened.included[path].isChecked()
+        assert reopened.fields[path].toPlainText() == "Synthetic tentative street"
+        assert reopened.original_address() == original
+        assert reopened.corrected_address() == edited
+        assert revision["approved"] is False
+        assert draft_window.drafts.get_capture(capture_id)["capture"] == capture
+        assert not draft_window.store.get_job(draft_window.selected_job["id"])["approved"]
+    finally:
+        reopened.deleteLater()
+
+
+def test_saved_observations_render_plaintext_and_unknown_media(draft_window, monkeypatch):
+    capture_id, capture = _seed_partial(draft_window)
+    capture["pages"][0]["fields"][0]["value"] = "<b>SYNTHETIC plain text</b>"
+    draft_window.drafts.save_capture(draft_window.selected_job["id"], capture)
+    dialog = ui.CapturedObservationsDialog(draft_window.selected_job, draft_window.drafts.list_captures(draft_window.selected_job["id"]), draft_window.drafts)
+    try:
+        assert dialog.capture_combo.count() == 2
+        assert dialog.source_text.isReadOnly()
+        assert "<b>SYNTHETIC plain text</b>" in dialog.source_text.toPlainText()
+        assert "INCOMPLETE" in dialog.coverage.text()
+        assert "media, portals" in dialog.coverage.text()
+        assert "not verified" in dialog.saved_hint.text()
+        assert dialog.edit_button.isEnabled()
+    finally:
+        dialog.deleteLater()
+
+
+def test_cancelled_tentative_dialog_does_not_save_revision(draft_window, monkeypatch):
+    capture_id, _ = _seed_partial(draft_window)
+    dialog = ui.CapturedObservationsDialog(draft_window.selected_job, draft_window.drafts.list_captures(draft_window.selected_job["id"]), draft_window.drafts)
+    monkeypatch.setattr(ui.TentativeAddressDialog, "exec", lambda *_: QtWidgets.QDialog.DialogCode.Rejected)
+    dialog._edit_address()
+    assert draft_window.drafts.list_addresses(capture_id) == []
+    dialog.deleteLater()
+
+
+def test_tentative_save_adds_revision_but_never_calls_engine_approval(draft_window, monkeypatch):
+    capture_id, _ = _seed_partial(draft_window)
+    path = "pages/0/fields/0"
+
+    def edit(dialog):
+        dialog.included[path].setChecked(True)
+        dialog.fields[path].setPlainText("Synthetic tentative revision")
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    def forbidden(*_):
+        raise AssertionError("Partial observations must never call engine approval")
+
+    monkeypatch.setattr(ui.TentativeAddressDialog, "exec", edit)
+    monkeypatch.setattr(draft_window.engine, "approve_address", forbidden)
+    dialog = ui.CapturedObservationsDialog(draft_window.selected_job, draft_window.drafts.list_captures(draft_window.selected_job["id"]), draft_window.drafts)
+    dialog._edit_address()
+    dialog._edit_address()
+    revisions = draft_window.drafts.list_addresses(capture_id)
+    assert len(revisions) == 2
+    assert all(revision["approved"] is False for revision in revisions)
+    assert revisions[0]["original"][path]["value"] == "  SYNTHETIC original street  "
+    assert revisions[0]["edited"][path]["value"] == "Synthetic tentative revision"
+    assert "approval remains blocked" in dialog.saved_hint.text()
+    dialog.deleteLater()
+
+
+def test_capture_current_page_is_saved_once_and_keeps_live_workflow_blocked(draft_window, application, monkeypatch):
+    from quick_relist import capture as capture_module
+    window = draft_window
+    _add_batch(window, "RXCU000123")
+    calls = []
+    capture = _synthetic_partial_capture()
+    window.hub = SimpleNamespace(driver=object(), select_editor_tab=lambda: calls.append("select"))
+
+    class SyntheticCollector:
+        def __init__(self, driver):
+            calls.append("new collector")
+
+        def capture_current_page(self):
+            calls.append("read")
+            return deepcopy(capture)
+
+    monkeypatch.setattr(capture_module, "PartialHubCapture", SyntheticCollector)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(window, "_show_saved_captures", lambda: calls.append("review"))
+    window.refresh()
+    journal = window.store.journal(window.selected_job["id"])
+    window._capture_current_page()
+    window._capture_current_page()
+    _finish_worker(application, window)
+    assert calls == ["select", "new collector", "read", "review"]
+    assert len(window.drafts.list_captures(window.selected_job["id"])) == 1
+    assert window.store.journal(window.selected_job["id"]) == journal
+    assert not window.review_button.isEnabled() and not window.advance_button.isEnabled()
+    window._capture_current_page()
+    _finish_worker(application, window)
+    assert calls.count("select") == 1 and calls.count("new collector") == 1
+    assert calls.count("read") == 2
+    assert len(window.drafts.list_captures(window.selected_job["id"])) == 2
+    assert window.store.get_job(window.selected_job["id"])["snapshot"] is None
+
+
+def test_declined_page_capture_has_no_browser_or_storage_action(draft_window, monkeypatch):
+    _add_batch(draft_window, "RXCU000123")
+    calls = []
+    draft_window.hub = SimpleNamespace(driver=object(), select_editor_tab=lambda: calls.append("select"))
+    draft_window.refresh()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Cancel)
+    draft_window._capture_current_page()
+    assert calls == []
+    assert not draft_window._is_busy
+    assert draft_window.drafts.list_captures(draft_window.selected_job["id"]) == []
+
+
+def test_capture_failure_is_redacted_and_does_not_claim_saved(draft_window, application, monkeypatch, capfd):
+    from quick_relist import capture as capture_module
+    _add_batch(draft_window, "RXCU000123")
+    secret_fixture = "SYNTHETIC PRIVATE VALUE - NEVER LOG"
+    draft_window.hub = SimpleNamespace(driver=object(), select_editor_tab=lambda: None)
+
+    class FailingCollector:
+        def __init__(self, driver):
+            pass
+
+        def capture_current_page(self):
+            raise RuntimeError(secret_fixture)
+
+    monkeypatch.setattr(capture_module, "PartialHubCapture", FailingCollector)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    draft_window.refresh()
+    draft_window._capture_current_page()
+    _finish_worker(application, draft_window)
+    assert draft_window.drafts.list_captures(draft_window.selected_job["id"]) == []
+    assert secret_fixture not in str(draft_window.test_errors)
+    assert secret_fixture not in str(capfd.readouterr())
+    assert "stopped" in draft_window.statusBar().currentMessage().lower()
+    assert not draft_window.review_button.isEnabled()
+
+
+def test_local_media_import_is_incomplete_and_never_grants_address_approval(draft_window, application, monkeypatch):
+    from quick_relist import media
+    _add_batch(draft_window, "RXCU000123")
+    calls = []
+    manifest = {"complete": False, "media_count": 1, "media_manifest": [{"id": "synthetic", "kind": None, "position": None, "caption": None}], "unresolved": ["Synthetic media identity and completeness are unknown"]}
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName", lambda *_: ("synthetic.zip", ""))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(media, "import_media_zip", lambda path, root: (calls.append((path, root)), manifest)[1])
+    monkeypatch.setattr(draft_window, "_show_saved_captures", lambda: None)
+    draft_window.refresh()
+    draft_window._import_media()
+    draft_window._import_media()
+    _finish_worker(application, draft_window)
+    assert len(calls) == 1
+    records = draft_window.drafts.list_captures(draft_window.selected_job["id"])
+    assert len(records) == 1 and records[0]["capture"] == manifest
+    dialog = ui.CapturedObservationsDialog(draft_window.selected_job, records, draft_window.drafts)
+    assert not dialog.edit_button.isEnabled()
+    assert "completeness unknown" in dialog.capture_combo.currentText()
+    assert "Synthetic media identity" in dialog.source_text.toPlainText()
+    assert not draft_window.advance_button.isEnabled()
+    assert not draft_window.review_button.isEnabled()
+    dialog.deleteLater()
+
+
+def test_declining_media_selection_does_not_import(draft_window, monkeypatch):
+    _add_batch(draft_window, "RXCU000123")
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName", lambda *_: ("", ""))
+    draft_window._import_media()
+    assert not draft_window._is_busy
+    assert draft_window.drafts.list_captures(draft_window.selected_job["id"]) == []
+
+
+def test_capture_confirmation_explicitly_covers_editor_selection_and_unverified_identity(draft_window, monkeypatch):
+    _add_batch(draft_window, "RXCU000123")
+    seen = []
+
+    def decline(box):
+        assert box.defaultButton() == box.button(QtWidgets.QMessageBox.StandardButton.Cancel)
+        seen.append(box.informativeText())
+        return QtWidgets.QMessageBox.StandardButton.Cancel
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", decline)
+    assert draft_window._confirm_local_observation("Read a partial page") is False
+    assert "first page capture selects the sole open Hub editor" in seen[0]
+    assert "later captures stay pinned" in seen[0]
+    assert "not automatically matched" in seen[0]
+    assert "without encryption" in seen[0]
+
+
+def test_real_capture_collector_pins_first_editor_and_rejects_changed_listing(draft_window, application, monkeypatch):
+    from quick_relist import capture as capture_module
+    _add_batch(draft_window, "RXCU000123")
+    calls = []
+
+    class SyntheticDriver:
+        current_window_handle = "manage"
+        window_handles = ["manage", "editor"]
+        current_url = "https://hub.remax.co.za/app/listings"
+
+        def execute_script(self, script):
+            assert script == capture_module.READ_PAGE_SCRIPT
+            calls.append("read")
+            raw = {key: [] for key in capture_module._PAYLOAD_LISTS}
+            raw.update({"href": self.current_url, "ready_state": "complete", "unavailable": False})
+            raw["fields"] = _synthetic_partial_capture()["pages"][0]["fields"]
+            return raw
+
+    driver = SyntheticDriver()
+
+    def select():
+        calls.append("select")
+        driver.current_window_handle = "editor"
+        driver.current_url = "https://hub.remax.co.za/app/listings/edit/synthetic-original"
+
+    draft_window.hub = SimpleNamespace(driver=driver, select_editor_tab=select)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(draft_window, "_show_saved_captures", lambda: None)
+    draft_window.refresh()
+    draft_window._capture_current_page()
+    _finish_worker(application, draft_window)
+    records = draft_window.drafts.list_captures(draft_window.selected_job["id"])
+    assert len(records) == 1
+    assert capture_module.verify_capture_integrity(records[0]["capture"])
+    assert records[0]["capture"]["identity"]["reference_verified"] is False
+    driver.current_url = "https://hub.remax.co.za/app/listings/edit/synthetic-different"
+    draft_window._capture_current_page()
+    _finish_worker(application, draft_window)
+    assert calls == ["select", "read"]  # No second selection or read after identity changes.
+    assert len(draft_window.drafts.list_captures(draft_window.selected_job["id"])) == 1
+    assert "stopped" in draft_window.statusBar().currentMessage().lower()
+    assert draft_window.store.get_job(draft_window.selected_job["id"])["snapshot"] is None
+
+
+def test_ui_saved_revision_error_is_redacted_without_losing_original(draft_window, monkeypatch, capfd):
+    capture_id, capture = _seed_partial(draft_window)
+    secret_fixture = "SYNTHETIC PRIVATE ADDRESS - NEVER LOG"
+
+    def edit(dialog):
+        dialog.included["pages/0/fields/0"].setChecked(True)
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    def fail(*_):
+        raise RuntimeError(secret_fixture)
+
+    dialog = ui.CapturedObservationsDialog(draft_window.selected_job, draft_window.drafts.list_captures(draft_window.selected_job["id"]), draft_window.drafts)
+    monkeypatch.setattr(ui.TentativeAddressDialog, "exec", edit)
+    monkeypatch.setattr(draft_window.drafts, "save_address", fail)
+    dialog._edit_address()
+    assert "could not be saved" in dialog.saved_hint.text()
+    assert secret_fixture not in dialog.saved_hint.text()
+    assert secret_fixture not in str(capfd.readouterr())
+    assert draft_window.drafts.get_capture(capture_id)["capture"] == capture
+    assert draft_window.drafts.list_addresses(capture_id) == []
+    dialog.deleteLater()
+
+
+def test_cancelled_job_retains_observation_review_but_disables_new_capture(draft_window):
+    _seed_partial(draft_window)
+    job_id = draft_window.selected_job["id"]
+    draft_window.hub = SimpleNamespace(driver=object())
+    draft_window.engine.cancel_job(job_id)
+    draft_window.refresh()
+    assert draft_window.saved_captures_button.isEnabled()
+    assert not draft_window.capture_page_button.isEnabled()
+    assert not draft_window.import_media_button.isEnabled()
+    assert not draft_window.advance_button.isEnabled()
+
+
+def test_new_observation_buttons_fit_small_window(draft_window, application):
+    _seed_partial(draft_window)
+    draft_window.resize(1060, 720)
+    application.processEvents()
+    for button in (draft_window.capture_page_button, draft_window.saved_captures_button, draft_window.import_media_button):
+        assert button.height() >= 35
+        assert button.width() >= button.minimumSizeHint().width()
+    scroll = draft_window.stack.widget(0)
+    assert scroll.verticalScrollBar().maximum() > 0
+    assert not draft_window.grab().isNull()
+
+
+def test_noncheckbox_boolean_value_is_preserved_readonly(application):
+    capture = _synthetic_partial_capture()
+    capture["pages"][0]["fields"].append({"label": "Synthetic boolean metadata", "value": True})
+    dialog = ui.TentativeAddressDialog(capture)
+    try:
+        path = "pages/0/fields/6"
+        dialog.included[path].setChecked(True)
+        assert dialog.fields[path].isReadOnly()
+        assert dialog.corrected_address()[path]["value"] is True
+    finally:
+        dialog.deleteLater()

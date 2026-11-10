@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -364,14 +365,269 @@ class AddressReviewDialog(QDialog):
         return corrected
 
 
+def _capture_fields(capture: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Index observed controls without claiming a semantic address mapping."""
+    result = {}
+    pages = capture.get("pages", [])
+    if not isinstance(pages, list):
+        return result
+    for page_index, page in enumerate(pages):
+        if not isinstance(page, dict):
+            continue
+        groups = [(f"pages/{page_index}/fields", page.get("fields", []))]
+        dialogs = page.get("dialogs", [])
+        if isinstance(dialogs, list):
+            for dialog_index, dialog in enumerate(dialogs):
+                if isinstance(dialog, dict):
+                    groups.append((f"pages/{page_index}/dialogs/{dialog_index}/fields", dialog.get("fields", [])))
+        for prefix, fields in groups:
+            if not isinstance(fields, list):
+                continue
+            for field_index, field in enumerate(fields):
+                if isinstance(field, dict) and ("value" in field or (field.get("type") in ("checkbox", "radio") and isinstance(field.get("checked"), bool))):
+                    result[f"{prefix}/{field_index}"] = deepcopy(field)
+    return result
+
+
+def _capture_title(capture: dict[str, Any]) -> str:
+    if "media_manifest" in capture:
+        return "Local media ZIP · completeness unknown"
+    pages = capture.get("pages", [])
+    if not isinstance(pages, list):
+        return "Partial observation"
+    names = [str(page.get("page_key") or "editor") for page in pages if isinstance(page, dict)]
+    return ", ".join(names) or "Partial observation"
+
+
+class TentativeAddressDialog(QDialog):
+    """Local field selection and edits, never an Engine address approval."""
+
+    def __init__(self, capture: dict[str, Any], revision: dict[str, Any] | None = None, parent: QWidget | None = None):
+        super().__init__(parent)
+        if not isinstance(capture, dict) or capture.get("complete") is not False:
+            raise ValueError("An explicitly incomplete observation is required.")
+        self.original = _capture_fields(capture)
+        if not self.original:
+            raise ValueError("This observation contains no editable field observations.")
+        self.fields: dict[str, QWidget] = {}
+        self.included: dict[str, QCheckBox] = {}
+        self.edit_values: dict[str, Any] = {}
+        self.value_keys: dict[str, str] = {}
+        previous_original = (revision or {}).get("original", {})
+        previous_edited = (revision or {}).get("edited", {})
+        self.setWindowTitle("Tentative address · not approved")
+        self.setStyleSheet(STYLE)
+        self.resize(800, 760)
+        self.setMinimumSize(620, 540)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(23, 22, 23, 20)
+        root.addWidget(_label("Prepare a tentative address", "pageTitle"))
+        root.addWidget(_label("Select the captured controls that belong to the address, then edit their copies. Field labels are observations, not a verified address mapping. The listing and account association are unverified.", "noticeBody", True))
+        root.addWidget(_label("These edits cannot approve the address or enable relisting. Typed option values are tentative and still need valid Hub option resolution. The incomplete source and every saved revision remain unchanged.", "muted", True))
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText("Find a captured field by label or name…")
+        self.filter_input.setAccessibleName("Filter observed address candidates")
+        root.addWidget(self.filter_input)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        editor = QWidget()
+        rows = QVBoxLayout(editor)
+        self.field_rows: dict[str, QWidget] = {}
+        self.field_search: dict[str, str] = {}
+        for path, original in self.original.items():
+            title = str(original.get("label") or original.get("name") or original.get("id") or "Unlabelled observed control")
+            card, box = _card()
+            box.setContentsMargins(14, 12, 14, 12)
+            box.setSpacing(6)
+            include = QCheckBox(title)
+            # A revision is only reusable when it belongs to these exact originals.
+            matches = path in previous_original and previous_original[path] == original
+            include.setChecked(matches)
+            include.setAccessibleName(f"Include observed field: {title}")
+            self.included[path] = include
+            box.addWidget(include)
+            box.addWidget(_label(path, "muted"))
+            value_key = "checked" if original.get("type") in ("checkbox", "radio") and isinstance(original.get("checked"), bool) else "value"
+            self.value_keys[path] = value_key
+            initial = previous_edited.get(path, original) if matches else original
+            if not isinstance(initial, dict):
+                initial = original
+            value = deepcopy(initial.get(value_key, original.get(value_key)))
+            self.edit_values[path] = value
+            source = QPlainTextEdit(json.dumps(original.get(value_key), ensure_ascii=False, indent=2))
+            source.setReadOnly(True)
+            source.setMaximumHeight(62)
+            source.setObjectName("sourceText")
+            source.setAccessibleName(f"Observed original {title}, read only")
+            box.addWidget(_label("OBSERVED ORIGINAL", "eyebrow"))
+            box.addWidget(source)
+            if isinstance(value, bool) and value_key == "checked":
+                field = QCheckBox("Yes")
+                field.setChecked(value)
+            elif isinstance(value, (dict, list, int, float)):
+                field = QLineEdit(json.dumps(value, ensure_ascii=False))
+                field.setReadOnly(True)
+                field.setToolTip("Structured and numeric observed values are preserved unchanged.")
+            else:
+                field = QPlainTextEdit("" if value is None else str(value))
+                field.setMaximumHeight(80)
+            field.setAccessibleName(f"Tentative edited {title}")
+            field.setEnabled(matches)
+            self.fields[path] = field
+            box.addWidget(_label("TENTATIVE COPY", "eyebrow"))
+            box.addWidget(field)
+            include.toggled.connect(field.setEnabled)
+            include.toggled.connect(self._validate)
+            self.field_rows[path] = card
+            self.field_search[path] = f"{title} {original.get('name', '')} {original.get('id', '')}".lower()
+            rows.addWidget(card)
+        rows.addStretch()
+        scroll.setWidget(editor)
+        root.addWidget(scroll, 1)
+        self.filter_input.textChanged.connect(self._filter_fields)
+        self.selection_hint = _label("Select at least one observed address field.", "muted", True)
+        root.addWidget(self.selection_hint)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self.save_button = buttons.addButton("Save tentative copy locally", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.save_button.setObjectName("primary")
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        root.addWidget(buttons)
+        self._validate()
+
+    def _filter_fields(self, query: str) -> None:
+        for path, row in self.field_rows.items():
+            row.setVisible(query.strip().lower() in self.field_search[path])
+
+    def _validate(self, *_args) -> None:
+        if not hasattr(self, "save_button"):
+            return
+        count = sum(widget.isChecked() for widget in self.included.values())
+        self.save_button.setEnabled(count > 0)
+        self.selection_hint.setText(f"{count} field(s) selected. No address approval will be granted.")
+
+    def original_address(self) -> dict[str, Any]:
+        return {path: deepcopy(self.original[path]) for path, include in self.included.items() if include.isChecked()}
+
+    def corrected_address(self) -> dict[str, Any]:
+        corrected = self.original_address()
+        for path, original in corrected.items():
+            widget = self.fields[path]
+            key = self.value_keys[path]
+            previous = self.edit_values[path]
+            value = deepcopy(previous)
+            if isinstance(widget, QCheckBox):
+                value = widget.isChecked()
+            elif isinstance(widget, QPlainTextEdit):
+                text = widget.toPlainText()
+                # Exact untouched values retain nulls, whitespace and numeric types.
+                if text != ("" if previous is None else str(previous)):
+                    value = text
+            original[key] = value
+        return corrected
+
+
+class CapturedObservationsDialog(QDialog):
+    """Read private immutable observations and save separate tentative revisions."""
+
+    def __init__(self, job: dict[str, Any], records: list[dict[str, Any]], drafts: Any, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.records = deepcopy(records)
+        self.drafts = drafts
+        self.setWindowTitle("Saved observations · incomplete")
+        self.setStyleSheet(STYLE)
+        self.resize(860, 730)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(23, 22, 23, 20)
+        root.addWidget(_label("Saved partial observations", "pageTitle"))
+        root.addWidget(_label(f"Filed locally under {job.get('rxcu', '')}. This does not verify that the captured editor or imported ZIP belongs to that reference or account. Nothing here approves or runs a relist.", "noticeBody", True))
+        self.capture_combo = QComboBox()
+        self.capture_combo.setAccessibleName("Choose an immutable partial observation")
+        for record in self.records:
+            self.capture_combo.addItem(f"{_timestamp(record.get('captured_at'))} · {_capture_title(record['capture'])}", record["id"])
+        root.addWidget(self.capture_combo)
+        self.coverage = _label("", "muted", True)
+        root.addWidget(self.coverage)
+        self.source_text = QPlainTextEdit()
+        self.source_text.setReadOnly(True)
+        self.source_text.setAccessibleName("Saved original observation, plain text only")
+        root.addWidget(self.source_text, 1)
+        self.revision_combo = QComboBox()
+        self.revision_combo.setAccessibleName("Choose a tentative address revision")
+        root.addWidget(self.revision_combo)
+        self.edit_button = _button("Prepare tentative address", self._edit_address)
+        root.addWidget(self.edit_button)
+        self.saved_hint = _label("Private local data. This app does not encrypt it. Media classification, order, captions and backup completeness are not verified.", "muted", True)
+        root.addWidget(self.saved_hint)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+        self.capture_combo.currentIndexChanged.connect(self._show_capture)
+        self._show_capture()
+
+    def _show_capture(self, *_args) -> None:
+        index = self.capture_combo.currentIndex()
+        if not 0 <= index < len(self.records):
+            self.edit_button.setEnabled(False)
+            self.source_text.clear()
+            return
+        record = self.records[index]
+        capture = record["capture"]
+        self.source_text.setPlainText(json.dumps(capture, ensure_ascii=False, indent=2))
+        pages = capture.get("pages", [])
+        coverage = capture.get("coverage", {})
+        missing = coverage.get("missing_pages") if isinstance(coverage, dict) else None
+        page_note = f"{len(pages)} observed page(s). " if isinstance(pages, list) and pages else ""
+        missing_note = f"Missing pages: {', '.join(str(item) for item in missing)}. " if isinstance(missing, list) and missing else ""
+        self.coverage.setText(f"INCOMPLETE · {page_note}{missing_note}A full source backup and media completeness are not verified.")
+        self.revision_combo.clear()
+        self.revision_combo.addItem("New tentative copy from this original", None)
+        try:
+            revisions = self.drafts.list_addresses(record["id"])
+        except Exception:
+            self.saved_hint.setText("Saved revisions could not be read. Editing is blocked until the local record can be checked.")
+            self.edit_button.setEnabled(False)
+            return
+        for revision in revisions:
+            self.revision_combo.addItem(f"Tentative revision · {_timestamp(revision.get('saved_at'))}", revision)
+        if revisions:
+            self.revision_combo.setCurrentIndex(1)
+        self.edit_button.setEnabled(bool(_capture_fields(capture)))
+
+    def _edit_address(self) -> None:
+        index = self.capture_combo.currentIndex()
+        if not self.edit_button.isEnabled() or not 0 <= index < len(self.records):
+            return
+        record = self.records[index]
+        dialog = None
+        try:
+            dialog = TentativeAddressDialog(record["capture"], self.revision_combo.currentData(), self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            original, edited = dialog.original_address(), dialog.corrected_address()
+            self.drafts.save_address(record["id"], original, edited)
+        except Exception:
+            # Exceptions from storage must never leak private field data into logs.
+            self.saved_hint.setText("The tentative revision could not be saved. The observed original is unchanged; no approval was granted.")
+            return
+        finally:
+            if dialog is not None:
+                dialog.deleteLater()
+        self._show_capture()
+        self.saved_hint.setText("Tentative revision saved locally. Original and earlier revisions preserved. Address approval remains blocked.")
+
+
 class MainWindow(QMainWindow):
     """Desktop shell over the safety-enforcing Engine/Store API."""
 
-    def __init__(self, engine: Any = None, store: Any = None, hub: Any = None):
+    def __init__(self, engine: Any = None, store: Any = None, hub: Any = None, drafts: Any = None, media_root: Any = None):
         super().__init__()
         self.engine = engine
         self.store = store if store is not None else getattr(engine, "store", None)
         self.hub = hub
+        self.drafts = drafts
+        self.media_root = media_root
+        self._capture_sessions: dict[str, tuple[Any, Any]] = {}
         self.batch_id: str | None = None
         self.jobs: list[dict[str, Any]] = []
         self.batches: list[dict[str, Any]] = []
@@ -474,7 +730,7 @@ class MainWindow(QMainWindow):
         notice_text = QVBoxLayout()
         notice_text.setSpacing(3)
         self.notice_title = _label("Live relisting is not available in this build", "noticeTitle")
-        self.notice_body = _label("Save a queue locally. Hub capture, portal removal, archiving, and publishing require a verified integration.", "noticeBody", True)
+        self.notice_body = _label("Save references and partial observations locally. Complete verified capture, portal removal, archiving and publishing require a verified integration.", "noticeBody", True)
         notice_text.addWidget(self.notice_title)
         notice_text.addWidget(self.notice_body)
         notice_layout.addLayout(notice_text, 1)
@@ -598,7 +854,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(queue_card)
 
         self.details_card, details = _card()
-        self.details_card.setMinimumWidth(300)
+        self.details_card.setMinimumWidth(310)
         self.details_card.setMaximumWidth(390)
         details.setSpacing(10)
         details.addWidget(_label("SELECTED LISTING", "eyebrow"))
@@ -616,6 +872,16 @@ class MainWindow(QMainWindow):
         self.search_hub_button = _button("Find RXCU in Hub (read only)", self._search_selected_reference)
         self.search_hub_button.setToolTip("Search Manage Listings in the dedicated Hub browser. Review results and filters manually.")
         details.addWidget(self.search_hub_button)
+        self.capture_page_button = _button("Save current page (incomplete)", self._capture_current_page)
+        self.capture_page_button.setToolTip("Read visible controls without changing Hub. Saves private observations under the selected local job; the RXCU association is not verified.")
+        details.addWidget(self.capture_page_button)
+        self.saved_captures_button = _button("Review partial observations", self._show_saved_captures)
+        details.addWidget(self.saved_captures_button)
+        self.import_media_button = _button("Import local media ZIP", self._import_media)
+        self.import_media_button.setToolTip("Preserve original downloaded ZIP and image bytes locally. This does not verify media identity, order, captions or completeness.")
+        details.addWidget(self.import_media_button)
+        self.observation_status = _label("No partial observations saved.", "muted", True)
+        details.addWidget(self.observation_status)
         self.capture_button = _button("1  Capture original listing", self._capture)
         self.capture_button.setToolTip("Reads the original listing through a verified Hub adapter. Unavailable in the unconnected build.")
         details.addWidget(self.capture_button)
@@ -703,7 +969,7 @@ class MainWindow(QMainWindow):
         browser_actions.addWidget(self.inspect_browser_button)
         browser_actions.addStretch()
         browser_layout.addLayout(browser_actions)
-        browser_layout.addWidget(_label("Inspection is partial and unverified. It does not capture all listing data or media, approve an address, or enable any live changes. Results are shown in memory only.", "noticeBody", True))
+        browser_layout.addWidget(_label("This preview is partial, unverified and shown in memory only. To preserve a page locally, select a queued reference in Batch workspace and use Save current page. Partial observations and tentative edits never approve an address or enable live changes.", "noticeBody", True))
         layout.addWidget(browser_card)
         connection, connection_layout = _card()
         connection_layout.addWidget(_label("Sign in to Hub yourself", "sectionTitle"))
@@ -930,6 +1196,10 @@ class MainWindow(QMainWindow):
         self.capture_button.setEnabled(False)
         self.search_hub_button.setEnabled(False)
         self.review_button.setEnabled(False)
+        self.capture_page_button.setEnabled(False)
+        self.saved_captures_button.setEnabled(False)
+        self.import_media_button.setEnabled(False)
+        self.observation_status.setText("No partial observations saved.")
         self.advance_button.setEnabled(False)
         self.reconcile_button.setEnabled(False)
         self.reconcile_button.hide()
@@ -943,6 +1213,17 @@ class MainWindow(QMainWindow):
             return
         state = str(job.get("state", "queued"))
         self.search_hub_button.setEnabled(self.hub is not None and not self._is_busy)
+        unstarted = state in ("queued", "awaiting_address", "ready", "blocked")
+        self.capture_page_button.setEnabled(self.hub is not None and self.drafts is not None and unstarted and not self._is_busy)
+        self.import_media_button.setEnabled(self.drafts is not None and self.media_root is not None and unstarted and not self._is_busy)
+        if self.drafts is not None:
+            try:
+                observations = self.drafts.list_captures(job["id"])
+                self.saved_captures_button.setEnabled(bool(observations) and not self._is_busy)
+                if observations:
+                    self.observation_status.setText(f"{len(observations)} incomplete observation(s). RXCU association and media completeness unverified.")
+            except Exception:
+                self.observation_status.setText("Local observations could not be read. No capture approval is available.")
         self.detail_title.setText(str(job.get("rxcu", "Listing")))
         self.detail_state.setText(_state_label(state))
         self.detail_address.setText(_address_summary(job.get("corrected_address") or job.get("original_address")))
@@ -950,7 +1231,7 @@ class MainWindow(QMainWindow):
             self.detail_error.setText(str(job["error"]))
             self.detail_error.show()
         elif not self.live_ready and state == "queued":
-            self.detail_error.setText("Hub capture is unavailable. This reference is saved locally only.")
+            self.detail_error.setText("A complete, verified Hub capture is unavailable. Partial observations and tentative edits cannot approve a relist.")
             self.detail_error.show()
         snapshot = job.get("snapshot")
         captured = bool(isinstance(snapshot, dict) and snapshot.get("complete") is True and isinstance(job.get("original_address"), dict) and job.get("original_address"))
@@ -968,6 +1249,84 @@ class MainWindow(QMainWindow):
                 # Do not offer cancellation when the operation history cannot be checked.
                 self.cancel_job_button.setEnabled(False)
         self.advance_button.setToolTip("A verified live Hub adapter and an approved address are required.")
+
+    def _confirm_local_observation(self, purpose: str) -> bool:
+        if not self.selected_job:
+            return False
+        confirmation = QMessageBox(self)
+        confirmation.setIcon(QMessageBox.Icon.Question)
+        confirmation.setTextFormat(Qt.TextFormat.PlainText)
+        confirmation.setWindowTitle("Save incomplete private data locally?")
+        confirmation.setText(f"{purpose} under {self.selected_job.get('rxcu', 'this local job')}?")
+        confirmation.setInformativeText("Check that you selected the intended local job. The editor or ZIP is not automatically matched to this RXCU or account. Private property and contact details may be saved on this computer without encryption. The first page capture selects the sole open Hub editor; later captures stay pinned to that editor and listing.\n\nNothing will be approved, uploaded or changed in Hub. A complete source backup and original-media coverage remain unverified.")
+        confirmation.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
+        confirmation.button(QMessageBox.StandardButton.Yes).setText("Save incomplete data locally")
+        confirmation.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        return confirmation.exec() == QMessageBox.StandardButton.Yes
+
+    @Slot()
+    def _capture_current_page(self) -> None:
+        if not self.selected_job or self.hub is None or self.drafts is None or self._is_busy or not self.capture_page_button.isEnabled():
+            return
+        if not self._confirm_local_observation("Save a partial page observation from the Hub editor"):
+            return
+        job_id = self.selected_job["id"]
+
+        def capture_and_save():
+            try:
+                from .capture import PartialHubCapture
+                session = self._capture_sessions.get(job_id)
+                if session is None or session[0] is not self.hub.driver:
+                    # The operator explicitly approved selecting the sole editor.
+                    # Never switch tabs after the capture collector has been pinned.
+                    self.hub.select_editor_tab()
+                    collector = PartialHubCapture(self.hub.driver)
+                else:
+                    collector = session[1]
+                capture = collector.capture_current_page()
+                self._capture_sessions[job_id] = (self.hub.driver, collector)
+                return self.drafts.save_capture(job_id, capture)
+            except Exception:
+                # Selenium/storage messages may contain values or private URLs.
+                raise RuntimeError("The current page could not be saved as a partial observation. Check that exactly one Hub editor is open and local storage is available. Existing collections stay pinned to their original tab and listing; reopen the app to start a new collection without removing saved records. No listing was changed or approved.") from None
+
+        self._run_operation("Reading the current page without changing Hub…", capture_and_save, "Incomplete page observation saved locally. Listing association and source completeness remain unverified.", lambda _result: self._show_saved_captures())
+
+    @Slot()
+    def _show_saved_captures(self) -> None:
+        if not self.selected_job or self.drafts is None or self._is_busy:
+            return
+        try:
+            records = self.drafts.list_captures(self.selected_job["id"])
+            if not records:
+                return
+            dialog = CapturedObservationsDialog(self.selected_job, records, self.drafts, self)
+        except Exception:
+            self._show_error("Local observations unavailable", "The saved observations could not be read. No address approval or Hub action is available from these records.")
+            return
+        dialog.exec()
+        dialog.source_text.clear()
+        dialog.deleteLater()
+        self.refresh()
+
+    @Slot()
+    def _import_media(self) -> None:
+        if not self.selected_job or self.drafts is None or self.media_root is None or self._is_busy or not self.import_media_button.isEnabled():
+            return
+        path, _selected_filter = QFileDialog.getOpenFileName(self, "Choose a downloaded original-media ZIP", "", "ZIP archives (*.zip)")
+        if not path or not self._confirm_local_observation("Preserve the selected media ZIP and image files"):
+            return
+        job_id = self.selected_job["id"]
+
+        def import_and_save():
+            try:
+                from .media import import_media_zip
+                result = import_media_zip(path, self.media_root)
+                return self.drafts.save_capture(job_id, result)
+            except Exception:
+                raise RuntimeError("The media import could not be recorded. No listing was changed or approved. If files were imported before recording stopped, they remain in the local media folder; check that folder before retrying.") from None
+
+        self._run_operation("Checking and preserving local media bytes…", import_and_save, "Local media import recorded. Image bytes are preserved; listing association, classification, order, captions and completeness remain unverified.", lambda _result: self._show_saved_captures())
 
     @Slot()
     def _capture(self) -> None:
@@ -1212,7 +1571,7 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
-def launch(engine: Any = None, store: Any = None, hub: Any = None) -> int:
+def launch(engine: Any = None, store: Any = None, hub: Any = None, drafts: Any = None, media_root: Any = None) -> int:
     """Run the desktop app. The caller owns the injected Engine and Store."""
     application = QApplication.instance()
     owns_application = application is None
@@ -1221,11 +1580,11 @@ def launch(engine: Any = None, store: Any = None, hub: Any = None) -> int:
     application.setApplicationName("Quick Relist")
     application.setOrganizationName("QuickRelist")
     application.setFont(QFont("Segoe UI", 10))
-    window = MainWindow(engine=engine, store=store, hub=hub)
+    window = MainWindow(engine=engine, store=store, hub=hub, drafts=drafts, media_root=media_root)
     window.show()
     # Keep the window alive when embedded in an existing QApplication.
     application._quick_relist_window = window  # type: ignore[attr-defined]
     return application.exec() if owns_application else 0
 
 
-__all__ = ["AddressReviewDialog", "MainWindow", "launch"]
+__all__ = ["AddressReviewDialog", "TentativeAddressDialog", "CapturedObservationsDialog", "MainWindow", "launch"]

@@ -11,31 +11,6 @@ import re
 MANAGE_URL = "https://hub.remax.co.za/app/listings"
 _EDITOR_PATH = re.compile(r"^/app/listings/edit/[^/]+(?:/(?:deal_particulars|media|portals))?/?$")
 
-# Extract visible form controls only. Avoid hidden inputs, password fields and
-# browser-stored secrets. These values can contain sensitive information: the
-# caller must not log, upload, or display them without the operator's intent.
-_INSPECT = r"""
-const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-const labelFor = el => {
-  const labelled = el.getAttribute('aria-label');
-  if (labelled) return labelled;
-  const ids = el.getAttribute('aria-labelledby');
-  if (ids) return ids.split(/\s+/).map(id => document.getElementById(id)?.innerText || '').join(' ').trim();
-  if (el.id) {
-    const l = [...document.querySelectorAll('label')].find(x => x.htmlFor === el.id);
-    if (l) return l.innerText.trim();
-  }
-  return el.closest('label')?.innerText?.trim() || '';
-};
-return [...document.querySelectorAll('input, select, textarea, [contenteditable="true"]')]
-  .filter(el => visible(el) && !['hidden', 'password', 'file'].includes((el.type || '').toLowerCase()))
-  .map(el => ({
-    tag: el.tagName.toLowerCase(), type: el.type || '', name: el.name || '',
-    label: labelFor(el), value: el.isContentEditable ? el.innerHTML : el.value,
-    checked: ['checkbox', 'radio'].includes(el.type) ? el.checked : null,
-    selected_text: el.tagName === 'SELECT' ? [...el.selectedOptions].map(o => o.textContent.trim()) : null
-  }));
-"""
 
 
 class ReadOnlyHub:
@@ -131,16 +106,10 @@ class ReadOnlyHub:
         if self.driver is None:
             raise RuntimeError("Open the Hub browser first")
         self.select_editor_tab()
-        parsed = urlsplit(self.driver.current_url)
-        if not self._is_editor_url(self.driver.current_url):
-            raise ValueError("Open a Hub listing editor tab before inspecting")
-        fields = self.driver.execute_script(_INSPECT)
-        if not isinstance(fields, list):
-            raise RuntimeError("Could not inspect this page")
-        # Never assert completeness: this omits other tabs, nested dialogs,
-        # documents, media bytes, portal status and potentially custom widgets.
-        return {"page_path": parsed.path, "fields": fields, "complete": False,
-                "warning": "One visible page only. Not a complete listing backup."}
+        # Reuse the stricter collector rather than a second, less-filtered DOM
+        # extraction path. The output remains incomplete and is not saved here.
+        from .capture import PartialHubCapture
+        return PartialHubCapture(self.driver).capture_current_page()
 
     def close(self):
         if self.driver is not None:
