@@ -408,3 +408,65 @@ def test_row_binding_rejects_changed_reference_and_unrelated_link():
     html = html.replace("<li><a id='link'>Edit Listing</a></li>", "</ul><a id='link'>Edit Listing</a><ul>")
     run = subprocess.run(["node", "-e", runner], input=json.dumps({"html": html, "url": BASE, "script": ROW_BINDING_SCRIPT, "ids": ["row", "combo", "menu", "link"], "ref": "RXCU12345"}), capture_output=True, text=True, timeout=10, check=True)
     assert json.loads(run.stdout) is False
+
+
+def test_observed_business_combos_preserve_only_allowlisted_structurally_bound_codes(extract):
+    result = extract('''<main>
+      <label id="property-label">Property type</label>
+      <div><div role="combobox" id="mui-component-select-property_type_id" aria-labelledby="property-label">Apartment</div><input id="property_type_id" name="property_type_id" aria-hidden="true" tabindex="-1" value="42"></div>
+      <div><div role="combobox" id="mui-component-select-office_id" aria-disabled="true">Synthetic office</div><input id="office_id" name="office_id" aria-hidden="true" disabled value="7"></div>
+      <div><div role="combobox" id="mui-component-select-unknown">Unlisted selector</div><input id="unknown" name="unknown" aria-hidden="true" value="SYNTHETIC_HIDDEN_SECRET"></div>
+      <div><div role="combobox" id="mui-component-select-mandate_type_id">Exclusive</div><span>Not adjacent</span><input id="mandate_type_id" name="mandate_type_id" aria-hidden="true" value="SYNTHETIC_UNBOUND_CODE"></div>
+    </main>''')
+    fields = {item['name']: item for item in result['fields']}
+    assert fields['property_type_id']['selected_options'] == [{'value': '42', 'text': 'Apartment'}]
+    assert fields['property_type_id']['label'] == 'Property type'
+    assert fields['office_id']['disabled'] is True
+    assert fields['office_id']['observed_business_selection_code'] is True
+    assert 'unknown' not in fields and 'mandate_type_id' not in fields
+    assert 'SYNTHETIC_HIDDEN_SECRET' not in json.dumps(result)
+    assert 'SYNTHETIC_UNBOUND_CODE' not in json.dumps(result)
+    assert 'business_selector_unresolved' in result['limitations']
+
+
+def test_observed_media_cards_capture_original_refs_and_global_positions_without_classifying(extract):
+    result = extract('''<main><div>
+      <div><h6>Listing images</h6><input type="file"></div>
+      <div><h6>Floor plan images</h6><input type="file"></div>
+      <div><div role="button" aria-roledescription="sortable"><figure>
+        <img alt="preview" id="image-123" pos="0" src="https://images.example.invalid/thumb.jpg" data-full-src="https://images.example.invalid/listings/999/original/photo.jpg?token=SYNTHETIC_QUERY">
+      </figure></div><div role="button" aria-roledescription="sortable"><figure>
+        <img alt="preview" id="image-456" pos="1" src="https://images.example.invalid/thumb2.jpg" data-full-src="https://images.example.invalid/listings/999/original/second.png">
+      </figure></div></div>
+    </div></main>''')
+    first, second = result['media']
+    assert first['observed_asset_id'] == '123' and first['observed_position'] == 0
+    assert second['observed_position'] == 1
+    assert first['original_source_ref'] == {'url': 'https://images.example.invalid/listings/999/original/photo.jpg', 'query_omitted': True, 'fragment_omitted': False}
+    assert first['kind_hint'] == second['kind_hint'] == 'img'
+    assert first['original_bytes_verified'] is False and first['order_verified'] is False
+    assert 'SYNTHETIC_QUERY' not in json.dumps(result)
+
+
+def test_unrecognized_image_metadata_does_not_claim_original_source(extract):
+    result = extract('''<main><img id="other" alt="preview" pos="0" src="https://example.invalid/thumb.jpg" data-full-src="https://example.invalid/private.jpg"></main>''')
+    assert result['media'][0]['original_source_ref'] is None
+    assert result['media'][0]['observed_asset_id'] is None
+
+
+def test_allowlisted_business_combo_hidden_by_ancestor_opacity_is_omitted(extract):
+    result = extract('''<main><div style="opacity:0"><div role="combobox" id="mui-component-select-office_id">Hidden office</div><input id="office_id" name="office_id" aria-hidden="true" value="SYNTHETIC_HIDDEN_CODE"></div></main>''')
+    assert not result['fields']
+    assert 'SYNTHETIC_HIDDEN_CODE' not in json.dumps(result)
+
+
+@pytest.mark.parametrize("hidden_on", ["ancestor", "combobox"])
+def test_allowlisted_selector_requires_nontransparent_visible_combobox(extract, hidden_on):
+    wrapper_style = ' style="opacity:0"' if hidden_on == "ancestor" else ''
+    combo_style = ' style="opacity:0"' if hidden_on == "combobox" else ''
+    result = extract(f'''<main><div{wrapper_style}>
+        <div role="combobox" id="mui-component-select-office_id"{combo_style}>SYNTHETIC_CONCEALED_OFFICE</div>
+        <input id="office_id" name="office_id" aria-hidden="true" type="text" value="123">
+        </div></main>''')
+    assert not result["fields"]
+    assert "SYNTHETIC_CONCEALED_OFFICE" not in json.dumps(result)

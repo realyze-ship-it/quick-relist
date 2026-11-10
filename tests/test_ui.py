@@ -1170,3 +1170,148 @@ def test_worker_callback_can_start_a_second_operation(window, application):
     window._run_operation("first", lambda: "first result", "first done", next_operation)
     _finish_worker(application, window)
     assert seen == ["first result", "second result"]
+
+
+def test_matched_tabs_capture_requires_binding_and_confirmation(draft_window, application, monkeypatch):
+    from quick_relist import matched_capture
+    _add_batch(draft_window, "RXCU000123")
+    draft_window.hub = SimpleNamespace(driver=object(), editor_bindings={})
+    draft_window.refresh()
+    assert not draft_window.capture_all_pages_button.isEnabled()
+    draft_window.hub.editor_bindings["RXCU000123"] = {"listing_id": "123", "handle": "synthetic"}
+    draft_window.refresh()
+    assert draft_window.capture_all_pages_button.isEnabled()
+    calls = []
+    capture = _synthetic_partial_capture()
+    capture.update(status="partial", stop_reason=None)
+    def run(hub, ref, **kwargs):
+        calls.append((hub, ref))
+        assert kwargs["cancelled"]() is False
+        return capture
+    monkeypatch.setattr(matched_capture, "capture_matched_listing", run)
+    monkeypatch.setattr(draft_window, "_show_saved_captures", lambda: None)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Cancel)
+    draft_window._capture_all_pages()
+    assert calls == []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    draft_window._capture_all_pages()
+    draft_window._capture_all_pages()
+    _finish_worker(application, draft_window)
+    assert calls == [(draft_window.hub, "RXCU000123")]
+    records = draft_window.drafts.list_captures(draft_window.selected_job["id"])
+    assert len(records) == 1 and records[0]["capture"] == capture
+    assert draft_window.selected_job["snapshot"] is None
+    assert not draft_window.advance_button.isEnabled()
+
+
+def test_stop_matched_capture_preserves_partial_progress(draft_window, application, monkeypatch):
+    from quick_relist import matched_capture
+    _add_batch(draft_window, "RXCU000123")
+    draft_window.hub = SimpleNamespace(driver=object(), editor_bindings={"RXCU000123": {"listing_id": "123", "handle": "synthetic"}})
+    draft_window.refresh()
+    capture = _synthetic_partial_capture()
+    capture.update(status="cancelled", stop_reason="Capture cancelled; earlier guarded pages kept.")
+    def run(hub, ref, **kwargs):
+        deadline = time.monotonic() + 3
+        while not kwargs["cancelled"]() and time.monotonic() < deadline:
+            time.sleep(.005)
+        assert kwargs["cancelled"]()
+        return capture
+    monkeypatch.setattr(matched_capture, "capture_matched_listing", run)
+    monkeypatch.setattr(draft_window, "_show_saved_captures", lambda: None)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    draft_window._capture_all_pages()
+    assert draft_window.stop_operation_button.isVisible()
+    assert draft_window.stop_operation_button.isEnabled()
+    draft_window._stop_operation()
+    assert not draft_window.stop_operation_button.isEnabled()
+    _finish_worker(application, draft_window)
+    records = draft_window.drafts.list_captures(draft_window.selected_job["id"])
+    assert len(records) == 1 and records[0]["capture"]["status"] == "cancelled"
+    assert not draft_window.stop_operation_button.isVisible()
+    assert "cancelled" in draft_window.statusBar().currentMessage()
+    assert not draft_window.advance_button.isEnabled()
+
+
+def test_matched_capture_error_does_not_leak_driver_values(draft_window, application, monkeypatch):
+    from quick_relist import matched_capture
+    _add_batch(draft_window, "RXCU000123")
+    draft_window.hub = SimpleNamespace(driver=object(), editor_bindings={"RXCU000123": {"listing_id": "123", "handle": "synthetic"}})
+    draft_window.refresh()
+    def fail(*args, **kwargs): raise RuntimeError("SYNTHETIC_PRIVATE_SOURCE")
+    monkeypatch.setattr(matched_capture, "capture_matched_listing", fail)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    draft_window._capture_all_pages()
+    _finish_worker(application, draft_window)
+    assert "SYNTHETIC_PRIVATE_SOURCE" not in draft_window.test_errors[-1][1]
+    assert not draft_window.drafts.list_captures(draft_window.selected_job["id"])
+    assert not draft_window.stop_operation_button.isVisible()
+
+
+def test_browser_matched_zip_import_is_bound_to_selected_job_only(draft_window, application, monkeypatch, tmp_path):
+    import zipfile
+    _add_batch(draft_window, "RXCU000123")
+    source = tmp_path / "synthetic.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("photos/01.jpg", b"\xff\xd8\xffsynthetic\xff\xd9")
+    evidence = {"method": "browser_frame_guid_and_reference", "rxcu": "RXCU000123", "listing_id": "123", "completion_observed": True, "account_verified": False, "exact_click_causality_verified": False}
+    import hashlib
+    evidence.update(archive_sha256=hashlib.sha256(source.read_bytes()).hexdigest(), archive_size=source.stat().st_size)
+    draft_window.hub = SimpleNamespace(editor_bindings={"RXCU000123": {"listing_id": "123", "handle": "synthetic"}}, download_photo_pack=lambda *args: {"candidate_path": str(source), "directory": str(tmp_path), "attribution_verified": True, "download_evidence": evidence, "complete": False})
+    draft_window.refresh()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(draft_window, "_show_saved_captures", lambda: None)
+    draft_window._download_media()
+    _finish_worker(application, draft_window)
+    records = draft_window.drafts.list_captures(draft_window.selected_job["id"])
+    assert len(records) == 1
+    imported = records[0]["capture"]
+    assert imported["download_evidence"] == evidence
+    assert imported["media_count"] == 1 and imported["complete"] is False
+    assert not draft_window.selected_job["approved"]
+    assert "Stored 1 image file" in draft_window.statusBar().currentMessage()
+
+
+def test_mismatched_download_evidence_never_auto_imports(draft_window, application, monkeypatch, tmp_path):
+    from quick_relist import media
+    _add_batch(draft_window, "RXCU000123")
+    result = {"candidate_path": str(tmp_path / "synthetic.zip"), "directory": str(tmp_path), "attribution_verified": True,
+              "download_evidence": {"method": "browser_frame_guid_and_reference", "rxcu": "RXCU999999", "listing_id": "123", "completion_observed": True}}
+    draft_window.hub = SimpleNamespace(editor_bindings={"RXCU000123": {"listing_id": "123", "handle": "synthetic"}}, download_photo_pack=lambda *args: result)
+    draft_window.refresh()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(media, "import_media_zip", lambda *args: pytest.fail("mismatched source must stay unassigned"))
+    draft_window._download_media()
+    _finish_worker(application, draft_window)
+    assert draft_window.drafts.list_captures(draft_window.selected_job["id"]) == []
+
+
+@pytest.mark.parametrize("mismatch", ["hash", "size"])
+def test_browser_matched_zip_byte_mismatch_stays_unassigned(draft_window, application, monkeypatch, tmp_path, mismatch):
+    import hashlib
+    import zipfile
+    _add_batch(draft_window, "RXCU000123")
+    source = tmp_path / "synthetic.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("photos/01.jpg", b"\xff\xd8\xffsynthetic\xff\xd9")
+    evidence = {"method": "browser_frame_guid_and_reference", "rxcu": "RXCU000123",
+                "listing_id": "123", "completion_observed": True,
+                "archive_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "archive_size": source.stat().st_size}
+    if mismatch == "hash":
+        evidence["archive_sha256"] = "0" * 64
+    else:
+        evidence["archive_size"] += 1
+    result = {"candidate_path": str(source), "directory": str(tmp_path),
+              "attribution_verified": True, "download_evidence": evidence, "complete": False}
+    draft_window.hub = SimpleNamespace(
+        editor_bindings={"RXCU000123": {"listing_id": "123", "handle": "synthetic"}},
+        download_photo_pack=lambda *args: result)
+    draft_window.refresh()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    draft_window._download_media()
+    _finish_worker(application, draft_window)
+    assert not draft_window.drafts.list_captures(draft_window.selected_job["id"])
+    assert draft_window.test_errors
+    assert source.is_file()
+    assert list(draft_window.media_root.glob("*/source.zip"))

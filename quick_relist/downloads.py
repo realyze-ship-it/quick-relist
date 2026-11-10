@@ -79,10 +79,14 @@ def _read_review(root: Path):
         raise DownloadReviewError("The download record is invalid. The pause was kept; preserve the folder for support.")
     fd = os.open(marker, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
     with os.fdopen(fd, "rb") as stream:
-        if _stamp(os.fstat(stream.fileno())) != _stamp(before):
+        opened = os.fstat(stream.fileno())
+        # Windows/Python can report different ctime meanings through path and
+        # handle APIs. Compare identity/size/mtime across APIs, then compare each
+        # API's complete stamp with itself to retain change detection.
+        if _stamp(opened)[:4] != _stamp(before)[:4]:
             raise DownloadReviewError("The download record changed. Review it again.")
         raw = stream.read(4097)
-        if _stamp(os.fstat(stream.fileno())) != _stamp(before) or _stamp(marker.lstat()) != _stamp(before):
+        if _stamp(os.fstat(stream.fileno())) != _stamp(opened) or _stamp(marker.lstat()) != _stamp(before):
             raise DownloadReviewError("The download record changed. Review it again.")
     try:
         record = json.loads(raw)

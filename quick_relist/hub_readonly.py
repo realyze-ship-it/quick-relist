@@ -9,9 +9,12 @@ from urllib.parse import urlsplit
 from pathlib import Path
 from uuid import uuid4
 import json
+import hashlib
 import os
 import re
 import stat
+import shutil
+import tempfile
 import time
 import zipfile
 
@@ -102,20 +105,37 @@ class ReadOnlyHub:
     def __init__(self, driver=None):
         self.driver = driver
         self.editor_bindings = {}
+        self._managed_default_driver = None
+        self._profile_path = None
+        self._profile_identity = None
+        self._browser_closed = False
 
     def open(self):
-        if self.driver is not None:
-            raise RuntimeError("A browser session is already open")
+        if self.driver is not None or self._profile_path is not None:
+            raise RuntimeError("A browser session is already open or awaiting cleanup")
         try:
             from selenium import webdriver
         except ImportError as exc:
             raise RuntimeError("Install the browser extra to open Chrome: pip install 'quick-relist[browser]'") from exc
+        from .media import _private_directory
+        profile = Path(tempfile.gettempdir()) / ("quick-relist-browser-" + uuid4().hex)
+        _private_directory(profile)
+        info = profile.lstat()
+        self._profile_path, self._profile_identity = profile, (info.st_dev, info.st_ino)
+        self._browser_closed = False
         options = webdriver.ChromeOptions()
-        options.add_argument("--incognito")
-        # Selenium starts a dedicated visible browser. No stored password or OTP
-        # is requested by or passed to this application.
-        self.driver = webdriver.Chrome(options=options)
-        self.driver.get(MANAGE_URL)
+        options.add_argument("--user-data-dir=" + str(profile))
+        options.add_experimental_option("prefs", {"credentials_enable_service": False,
+                                                   "profile.password_manager_enabled": False})
+        # A fresh owner-only disposable profile avoids the implicit incognito
+        # download-context failure observed on Windows. Never reuse the user's
+        # normal profile or saved credentials. Sign-in remains manual.
+        try:
+            self.driver = webdriver.Chrome(options=options)
+            self._managed_default_driver = self.driver
+            self.driver.get(MANAGE_URL)
+        except Exception:
+            raise RuntimeError("The dedicated Hub browser could not be opened. Close any new browser window and restart Quick Relist before trying again. Protected temporary session files may remain.") from None
 
     def search_reference(self, rxcu):
         """Submit a read-only Manage Listings search; do not infer a match.
@@ -359,7 +379,7 @@ class ReadOnlyHub:
             raise ValueError("Open the intended listing's Media editor first")
         buttons = [element for element in self.driver.find_elements(By.TAG_NAME, "button")
                    if element.is_displayed() and element.is_enabled()
-                   and element.text.strip() == "Download photo pack"
+                   and " ".join(element.text.split()).casefold() == "download photo pack"
                    and element.get_attribute("type") == "button"]
         if len(buttons) != 1:
             raise ValueError("The photo-pack button was not uniquely available")
@@ -375,76 +395,139 @@ class ReadOnlyHub:
                 raise PreviousDownloadExists(root)
             directory = root / ("download-" + uuid4().hex)
             _private_directory(directory)
-            try:
-                # A dedicated directory avoids mixing downloads or overwriting files.
-                self.driver.execute_cdp_cmd("Browser.setDownloadBehavior", {
-                    "behavior": "allow", "downloadPath": str(directory), "eventsEnabled": False})
-            except Exception:
-                raise RuntimeError("The browser could not prepare a private download folder; no click was made") from None
-            self.verify_editor_reference(reference, expected_listing_id)
-            if (self.driver.current_window_handle != handle or tuple(sorted(self.driver.window_handles)) != handles
-                    or self.driver.current_url != url):
-                raise ValueError("The editor changed before the download; no click was made")
-            try:
-                # A durable intention survives process exit and prevents any blind
-                # duplicate download until the operator reviews prior local files.
-                with _private_file(marker) as receipt:
-                    receipt.write(json.dumps({"version": 1, "directory": directory.name, "state": "attempted"}).encode("utf-8"))
-                    receipt.flush()
-                    os.fsync(receipt.fileno())
-                if os.name != "nt":
-                    descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            from .photo_downloads import PhotoDownloadEvents
+            managed_default = self.driver is self._managed_default_driver
+            with PhotoDownloadEvents(self.driver, directory, reference, use_default_context=managed_default) as events:
+                if not events.supported:
                     try:
-                        os.fsync(descriptor)
-                    finally:
-                        os.close(descriptor)
-            except FileExistsError:
-                raise PreviousDownloadExists(root) from None
-            except Exception:
-                raise RuntimeError("The download could not be recorded safely; no click was made") from None
-            try:
-                buttons[0].click()  # Exactly once; never retry an uncertain click.
-            except Exception:
-                raise DownloadOutcomeUnknown(directory) from None
-            deadline = time.monotonic() + timeout
-            stable = None
-            stable_count = 0
-            while time.monotonic() < deadline:
+                        # Only our own disposable profile is known to be the
+                        # dedicated default context. External sessions require
+                        # a verified explicit context; never guess one.
+                        settings = {"behavior": "allow", "downloadPath": str(directory), "eventsEnabled": False}
+                        target = self.driver.execute_cdp_cmd("Target.getTargetInfo", {}).get("targetInfo", {})
+                        context = target.get("browserContextId")
+                        if (target.get("type") != "page" or target.get("targetId") != handle
+                                or (not managed_default and (not isinstance(context, str) or not context))):
+                            raise ValueError("The private browser context could not be identified")
+                        if not managed_default:
+                            settings["browserContextId"] = context
+                        self.driver.execute_cdp_cmd("Browser.setDownloadBehavior", settings)
+                    except Exception:
+                        raise RuntimeError("The browser could not prepare a private download folder; no click was made") from None
+                self.verify_editor_reference(reference, expected_listing_id)
+                if (self.driver.current_window_handle != handle or tuple(sorted(self.driver.window_handles)) != handles
+                        or self.driver.current_url != url):
+                    raise ValueError("The editor changed before the download; no click was made")
                 try:
-                    if (self.driver.current_window_handle != handle or tuple(sorted(self.driver.window_handles)) != handles
-                            or self.driver.current_url != url):
-                        raise DownloadOutcomeUnknown(directory)
-                    entries = list(directory.iterdir())
-                    if len(entries) > 10:
-                        raise DownloadOutcomeUnknown(directory)
-                    partial = [entry for entry in entries if entry.name.lower().endswith(".crdownload")]
-                    finished = [entry for entry in entries if entry.suffix.lower() == ".zip"]
-                    if len(finished) > 1 or any(entry not in partial and entry not in finished for entry in entries):
-                        raise DownloadOutcomeUnknown(directory)
-                    if not partial and len(finished) == 1:
-                        info = finished[0].lstat()
-                        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_size <= 0:
-                            raise DownloadOutcomeUnknown(directory)
-                        marker = (finished[0].name, info.st_size, info.st_mtime_ns)
-                        stable_count = stable_count + 1 if marker == stable else 1
-                        stable = marker
-                        if stable_count >= 3:
-                            if not zipfile.is_zipfile(finished[0]):
-                                raise DownloadOutcomeUnknown(directory)
-                            # CDP events are not available here to bind a browser
-                            # download GUID/frame to this click. A lone ZIP is only a
-                            # candidate; never silently associate or import it.
-                            return {"candidate_path": str(finished[0]), "directory": str(directory), "complete": False,
-                                    "attribution_verified": False,
-                                    "warning": "A ZIP appeared, but it cannot be attributed to this listing. Manually inspect it before import. Further downloads are paused pending review."}
-                    else:
-                        stable, stable_count = None, 0
-                except DownloadOutcomeUnknown:
-                    raise
+                    # Durable intention prevents blind retries after restart.
+                    with _private_file(marker) as receipt:
+                        receipt.write(json.dumps({"version": 1, "directory": directory.name, "state": "attempted"}).encode("utf-8"))
+                        receipt.flush()
+                        os.fsync(receipt.fileno())
+                    from .downloads import _sync_directory
+                    _sync_directory(root)
+                except FileExistsError:
+                    raise PreviousDownloadExists(root) from None
+                except Exception:
+                    raise RuntimeError("The download could not be recorded safely; no click was made") from None
+                if events.supported and not events.arm():
+                    raise RuntimeError("The browser download state changed before the request. No click was made; review the download folder.")
+                try:
+                    buttons[0].click()  # Exactly once; never retry an uncertain click.
                 except Exception:
                     raise DownloadOutcomeUnknown(directory) from None
-                time.sleep(poll_interval)
-            raise DownloadOutcomeUnknown(directory)
+                result = self._wait_photo_pack(directory, reference, expected_listing_id, handle, handles, url,
+                                               events if events.supported else None, timeout, poll_interval)
+            # Cleanup/late callback uncertainty invalidates earlier attribution.
+            event_guid = result.pop("_event_guid", None)
+            archive_hash = result.pop("_archive_sha256", None)
+            archive_size = result.pop("_archive_size", None)
+            if event_guid and archive_hash and not events.failed:
+                result["attribution_verified"] = True
+                result["download_evidence"] = {"method": "browser_frame_guid_and_reference", "guid": event_guid,
+                    "rxcu": reference, "listing_id": expected_listing_id, "completion_observed": True,
+                    "archive_sha256": archive_hash, "archive_size": archive_size,
+                    "account_verified": False, "exact_click_causality_verified": False}
+                result["warning"] = "Browser events matched this completed ZIP to the selected editor frame and RXCU filename. Account, original resolution, contents, order and completeness remain unverified."
+            return result
+
+    def _wait_photo_pack(self, directory, reference, listing_id, handle, handles, url, events, timeout, poll_interval):
+        """Preserve an uncertain file; only matched completed GUIDs are assigned."""
+        from .media import _publish_no_replace
+        deadline = time.monotonic() + timeout
+        stable, stable_count, candidate = None, 0, None
+        guid_pattern = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
+        while time.monotonic() < deadline:
+            try:
+                if (self.driver.current_window_handle != handle or tuple(sorted(self.driver.window_handles)) != handles
+                        or self.driver.current_url != url):
+                    raise DownloadOutcomeUnknown(directory)
+                completion = events.poll() if events is not None else None
+                entries = list(directory.iterdir())
+                if len(entries) > 10:
+                    raise DownloadOutcomeUnknown(directory)
+                partial = [entry for entry in entries if entry.name.lower().endswith(".crdownload")]
+                finished = [entry for entry in entries if entry.suffix.lower() == ".zip"
+                            or (events is not None and guid_pattern.fullmatch(entry.name))]
+                if len(finished) > 1 or any(entry not in partial and entry not in finished for entry in entries):
+                    raise DownloadOutcomeUnknown(directory)
+                if not partial and len(finished) == 1:
+                    path = finished[0]
+                    info = path.lstat()
+                    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_nlink != 1
+                            or getattr(info, "st_file_attributes", 0) & 0x400 or not 0 < info.st_size <= 256 * 1024 * 1024):
+                        raise DownloadOutcomeUnknown(directory)
+                    signature = (path.name, info.st_size, info.st_mtime_ns)
+                    stable_count = stable_count + 1 if signature == stable else 1
+                    stable = signature
+                    if stable_count >= 3:
+                        if not zipfile.is_zipfile(path):
+                            raise DownloadOutcomeUnknown(directory)
+                        candidate = {"candidate_path": str(path), "directory": str(directory), "complete": False,
+                                     "attribution_verified": False,
+                                     "warning": "A ZIP appeared, but its listing association is unverified. Review it before manual import. Further requests remain paused."}
+                        if completion is not None and path.name == completion.guid and info.st_size == completion.received_bytes:
+                            # Bind the completion to actual bytes, not a stale
+                            # pathname/size. Import must verify this digest too.
+                            from .downloads import _stamp
+                            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+                            with os.fdopen(descriptor, "rb") as stream:
+                                opened = os.fstat(stream.fileno())
+                                if not stat.S_ISREG(opened.st_mode) or _stamp(opened)[:4] != _stamp(info)[:4]:
+                                    raise DownloadOutcomeUnknown(directory)
+                                digest, count = hashlib.sha256(), 0
+                                while chunk := stream.read(64 * 1024):
+                                    count += len(chunk)
+                                    if count > completion.received_bytes:
+                                        raise DownloadOutcomeUnknown(directory)
+                                    digest.update(chunk)
+                                if count != completion.received_bytes or _stamp(os.fstat(stream.fileno())) != _stamp(opened):
+                                    raise DownloadOutcomeUnknown(directory)
+                            self.verify_editor_reference(reference, listing_id)
+                            if events.poll() == completion and not events.failed:
+                                if _stamp(path.lstat()) != _stamp(info):
+                                    raise DownloadOutcomeUnknown(directory)
+                                renamed = directory / ("photo-pack-" + completion.guid + ".zip")
+                                _publish_no_replace(path, renamed)
+                                if _stamp(renamed.lstat())[:4] != _stamp(info)[:4]:
+                                    raise DownloadOutcomeUnknown(directory)
+                                candidate["candidate_path"] = str(renamed)
+                                candidate["_event_guid"] = completion.guid
+                                candidate["_archive_sha256"] = digest.hexdigest()
+                                candidate["_archive_size"] = count
+                                return candidate
+                        if events is None or events.failed:
+                            return candidate
+                else:
+                    stable, stable_count, candidate = None, 0, None
+            except DownloadOutcomeUnknown:
+                raise
+            except Exception:
+                raise DownloadOutcomeUnknown(directory) from None
+            time.sleep(poll_interval)
+        if candidate is not None:
+            return candidate  # File observed, event outcome unknown; never retry.
+        raise DownloadOutcomeUnknown(directory)
 
     def inspect_current_editor_page(self):
         if self.driver is None:
@@ -464,4 +547,21 @@ class ReadOnlyHub:
             except Exception:
                 raise RuntimeError("The Hub browser could not be confirmed closed. Close every Quick Relist browser manually, restart Quick Relist, then review the previous download.") from None
             self.driver = None
+            self._managed_default_driver = None
             self.editor_bindings.clear()
+            self._browser_closed = True
+        if self._profile_path is not None and self._browser_closed:
+            try:
+                try:
+                    info = self._profile_path.lstat()
+                except FileNotFoundError:
+                    self._profile_path = self._profile_identity = None
+                    return
+                if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                        or getattr(info, "st_file_attributes", 0) & 0x400
+                        or (info.st_dev, info.st_ino) != self._profile_identity):
+                    raise ValueError("The disposable profile path changed")
+                shutil.rmtree(self._profile_path)
+                self._profile_path = self._profile_identity = None
+            except Exception:
+                raise RuntimeError("The Hub browser closed, but protected temporary session files could not be removed. Close Quick Relist before checking its temporary browser folder.") from None

@@ -112,11 +112,12 @@ def test_editor_reference_refuses_ambiguous_or_mismatched_headings(result):
         ReadOnlyHub(IdentityDriver("https://hub.remax.co.za/app/listings/edit/123")).verify_editor_reference("RXCU12345", "123")
 
 
-def test_photo_pack_download_is_single_click_private_and_partial(tmp_path):
+@pytest.mark.parametrize("button_text", ["Download photo pack", "DOWNLOAD PHOTO PACK", " DOWNLOAD \n PHOTO PACK "])
+def test_photo_pack_download_is_single_click_private_and_partial(tmp_path, button_text):
     import zipfile
     pytest.importorskip("selenium")
     class Button:
-        text = "Download photo pack"
+        text = button_text
         def __init__(self, driver): self.driver, self.clicks = driver, 0
         def is_displayed(self): return True
         def is_enabled(self): return True
@@ -133,6 +134,8 @@ def test_photo_pack_download_is_single_click_private_and_partial(tmp_path):
             return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
         def find_elements(self, by, name): return [self.button]
         def execute_cdp_cmd(self, method, settings):
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": self.current_window_handle, "type": "page", "browserContextId": "synthetic-context"}}
             from pathlib import Path
             assert method == "Browser.setDownloadBehavior"
             self.download_path = Path(settings["downloadPath"])
@@ -165,7 +168,9 @@ def test_photo_pack_uncertain_click_is_never_retried(tmp_path):
             self.button = Button()
         def execute_script(self, script, ref): return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
         def find_elements(self, by, name): return [self.button]
-        def execute_cdp_cmd(self, method, settings): pass
+        def execute_cdp_cmd(self, method, settings):
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": self.current_window_handle, "type": "page", "browserContextId": "synthetic-context"}}
     driver = DownloadDriver()
     hub = ReadOnlyHub(driver)
     hub.editor_bindings["RXCU12345"] = {"listing_id": "123", "handle": "one"}
@@ -258,6 +263,8 @@ def test_download_refuses_unsafe_preconditions_before_click(tmp_path, mode):
         def execute_script(self, script, ref): return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
         def find_elements(self, by, name): return [self.button, self.button] if mode == "duplicate_buttons" else [self.button]
         def execute_cdp_cmd(self, method, settings):
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": self.current_window_handle, "type": "page", "browserContextId": "synthetic-context"}}
             if mode == "cdp_failure": raise RuntimeError("synthetic CDP unavailable")
     driver = GuardDriver()
     hub = ReadOnlyHub(driver)
@@ -287,6 +294,8 @@ def test_incomplete_download_is_preserved_and_not_retried(tmp_path):
         def execute_script(self, script, ref): return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
         def find_elements(self, by, name): return [self.button]
         def execute_cdp_cmd(self, method, settings):
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": self.current_window_handle, "type": "page", "browserContextId": "synthetic-context"}}
             from pathlib import Path
             self.path = Path(settings["downloadPath"])
     driver = PartialDriver()
@@ -381,3 +390,206 @@ def test_successful_browser_close_clears_stale_bindings():
     hub.close()
     assert hub.driver is None and hub.editor_bindings == {}
     assert driver.calls == ["quit"]
+
+
+@pytest.mark.parametrize("mode,verified", [("matched", True), ("cleanup_failed", False), ("missing_event", False), ("wrong_size", False)])
+def test_completed_guid_download_is_assigned_only_with_matching_event_evidence(tmp_path, monkeypatch, mode, verified):
+    import zipfile
+    from pathlib import Path
+    from quick_relist import photo_downloads
+    from quick_relist.photo_downloads import DownloadCompletion
+    pytest.importorskip("selenium")
+    guid = "12345678-1234-1234-1234-123456789abc"
+    class Button:
+        text = "DOWNLOAD PHOTO PACK"
+        clicks = 0
+        def __init__(self, driver): self.driver = driver
+        def is_displayed(self): return True
+        def is_enabled(self): return True
+        def get_attribute(self, key): return "button" if key == "type" else None
+        def click(self):
+            self.clicks += 1
+            with zipfile.ZipFile(self.driver.folder / guid, "w") as archive:
+                archive.writestr("photos/01.jpg", b"\xff\xd8\xffsynthetic\xff\xd9")
+    class EventDriver(Driver):
+        def __init__(self):
+            super().__init__("https://hub.remax.co.za/app/listings/edit/123/media")
+            self.button = Button(self)
+        def execute_script(self, *args): return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
+        def find_elements(self, *args): return [self.button]
+    class Events:
+        supported = True
+        failed = False
+        def __init__(self, driver, directory, ref, **options):
+            self.driver, self.directory = driver, directory
+            driver.folder = directory
+            assert ref == "RXCU12345"
+        def __enter__(self): return self
+        def __exit__(self, *args): self.failed = mode == "cleanup_failed"
+        def arm(self): return True
+        def poll(self):
+            path = self.directory / guid
+            if mode == "missing_event" or not path.exists(): return None
+            return DownloadCompletion(guid, path.stat().st_size + (1 if mode == "wrong_size" else 0))
+    monkeypatch.setattr(photo_downloads, "PhotoDownloadEvents", Events)
+    driver = EventDriver()
+    hub = ReadOnlyHub(driver)
+    hub.editor_bindings["RXCU12345"] = {"listing_id": "123", "handle": "one"}
+    result = hub.download_photo_pack("RXCU12345", "123", tmp_path / "downloads", timeout=.08, poll_interval=.01)
+    assert result["attribution_verified"] is verified
+    assert Path(result["candidate_path"]).is_file()
+    assert result["complete"] is False and driver.button.clicks == 1
+    assert (tmp_path / "downloads" / "download-review-required.json").exists()
+    if verified:
+        assert result["candidate_path"].endswith(".zip")
+        assert result["download_evidence"]["rxcu"] == "RXCU12345"
+        assert result["download_evidence"]["account_verified"] is False
+    else:
+        assert "download_evidence" not in result
+
+
+def test_fallback_refuses_unverified_download_context_before_click(tmp_path):
+    pytest.importorskip("selenium")
+    class Button:
+        text = "DOWNLOAD PHOTO PACK"
+        clicks = 0
+        def is_displayed(self): return True
+        def is_enabled(self): return True
+        def get_attribute(self, key): return "button"
+        def click(self): self.clicks += 1
+    class ContextDriver(Driver):
+        def __init__(self):
+            super().__init__("https://hub.remax.co.za/app/listings/edit/123/media")
+            self.button = Button()
+        def execute_script(self, *args): return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
+        def find_elements(self, *args): return [self.button]
+        def execute_cdp_cmd(self, method, params):
+            assert method == "Target.getTargetInfo"
+            return {"targetInfo": {"type": "page", "targetId": "wrong-tab", "browserContextId": "context"}}
+    driver = ContextDriver()
+    hub = ReadOnlyHub(driver)
+    hub.editor_bindings["RXCU12345"] = {"listing_id": "123", "handle": "one"}
+    with pytest.raises(RuntimeError, match="no click"):
+        hub.download_photo_pack("RXCU12345", "123", tmp_path / "downloads", timeout=.1, poll_interval=.01)
+    assert driver.button.clicks == 0
+
+
+@pytest.mark.parametrize("replacement_size", ["same", "different"])
+def test_completed_guid_replaced_during_final_identity_probe_is_not_attributed(tmp_path, replacement_size):
+    import zipfile
+    from types import SimpleNamespace
+    from quick_relist.hub_readonly import DownloadOutcomeUnknown
+    from quick_relist.photo_downloads import DownloadCompletion
+
+    guid = "12345678-1234-1234-1234-123456789abc"
+    source = tmp_path / guid
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("synthetic.txt", b"first")
+    completed_size = source.stat().st_size
+    url = "https://hub.remax.co.za/app/listings/edit/123/media"
+    driver = SimpleNamespace(current_window_handle="one", window_handles=["one"], current_url=url)
+    hub = ReadOnlyHub(driver)
+    replacement = tmp_path.parent / (tmp_path.name + "-replacement.zip")
+    with zipfile.ZipFile(replacement, "w") as archive:
+        archive.writestr("synthetic.txt", b"other" if replacement_size == "same" else b"different synthetic bytes")
+    if replacement_size == "same":
+        assert replacement.stat().st_size == completed_size
+
+    def replace_after_validation(*args):
+        replacement.replace(source)
+
+    hub.verify_editor_reference = replace_after_validation
+    completion = DownloadCompletion(guid, completed_size)
+    events = SimpleNamespace(poll=lambda: completion, failed=False)
+    with pytest.raises(DownloadOutcomeUnknown):
+        hub._wait_photo_pack(tmp_path, "RXCU12345", "123", "one", ("one",), url, events, 1, .01)
+    assert source.is_file()
+    assert not (tmp_path / ("photo-pack-" + guid + ".zip")).exists()
+
+
+def test_open_uses_new_private_disposable_profile_and_cleans_it_only_after_quit(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+    from selenium import webdriver
+    from quick_relist import hub_readonly
+    launched = []
+    class ManagedDriver(Driver):
+        def get(self, url): self.current_url = url
+    def chrome(*, options):
+        launched.append(options)
+        return ManagedDriver("about:blank")
+    monkeypatch.setattr(webdriver, "Chrome", chrome)
+    monkeypatch.setattr(hub_readonly.tempfile, "gettempdir", lambda: str(tmp_path))
+    hub = ReadOnlyHub()
+    hub.open()
+    profile = hub._profile_path
+    assert profile.is_dir() and profile.parent == tmp_path
+    assert "--incognito" not in launched[0].arguments
+    assert "--user-data-dir=" + str(profile) in launched[0].arguments
+    assert launched[0].experimental_options["prefs"]["profile.password_manager_enabled"] is False
+    assert hub._managed_default_driver is hub.driver
+    if os.name != "nt": assert profile.stat().st_mode & 0o077 == 0
+    (profile / "synthetic-session").write_bytes(b"synthetic")
+    hub.close()
+    assert not profile.exists() and hub._profile_path is None
+
+
+def test_failed_quit_preserves_disposable_profile_for_manual_recovery(tmp_path, monkeypatch):
+    from selenium import webdriver
+    from quick_relist import hub_readonly
+    class ManagedDriver(Driver):
+        def get(self, url): self.current_url = url
+        def quit(self): raise RuntimeError("synthetic uncertain close")
+    monkeypatch.setattr(webdriver, "Chrome", lambda **kw: ManagedDriver("about:blank"))
+    monkeypatch.setattr(hub_readonly.tempfile, "gettempdir", lambda: str(tmp_path))
+    hub = ReadOnlyHub()
+    hub.open()
+    profile = hub._profile_path
+    with pytest.raises(RuntimeError, match="could not be confirmed closed"):
+        hub.close()
+    assert profile.exists() and hub.driver is not None
+
+
+@pytest.mark.parametrize("failure", ["permission", "missing_child"])
+def test_profile_cleanup_failure_retains_owned_path_and_can_retry(tmp_path, monkeypatch, failure):
+    from quick_relist import hub_readonly
+    profile = tmp_path / "synthetic-profile"
+    profile.mkdir(mode=0o700)
+    retained = profile / "synthetic-session"
+    retained.write_bytes(b"synthetic")
+    info = profile.stat()
+    hub = ReadOnlyHub(Driver("about:blank"))
+    hub._profile_path = profile
+    hub._profile_identity = (info.st_dev, info.st_ino)
+    real_remove = hub_readonly.shutil.rmtree
+
+    def fail_remove(path):
+        if failure == "missing_child":
+            raise FileNotFoundError(2, "Synthetic child disappeared", str(profile / "missing-child"))
+        raise PermissionError("Synthetic locked file")
+
+    monkeypatch.setattr(hub_readonly.shutil, "rmtree", fail_remove)
+    with pytest.raises(RuntimeError, match="could not be removed"):
+        hub.close()
+    assert hub.driver is None and hub._browser_closed
+    assert hub._profile_path == profile and retained.is_file()
+    monkeypatch.setattr(hub_readonly.shutil, "rmtree", real_remove)
+    hub.close()
+    assert not profile.exists() and hub._profile_path is None
+
+
+def test_profile_cleanup_refuses_replaced_directory(tmp_path):
+    profile = tmp_path / "synthetic-profile"
+    profile.mkdir(mode=0o700)
+    info = profile.stat()
+    hub = ReadOnlyHub(Driver("about:blank"))
+    hub._profile_path = profile
+    hub._profile_identity = (info.st_dev, info.st_ino)
+    profile.rename(tmp_path / "original-profile")
+    profile.mkdir(mode=0o700)
+    retained = profile / "unrelated-synthetic-file"
+    retained.write_bytes(b"synthetic")
+    with pytest.raises(RuntimeError, match="could not be removed"):
+        hub.close()
+    assert retained.is_file()
+    assert hub._profile_path == profile

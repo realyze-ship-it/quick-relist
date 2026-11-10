@@ -90,7 +90,15 @@ def test_identical_images_preserved_and_flagged_not_deduplicated(tmp_path):
                                   "folder//image.jpg", "./image.jpg", "folder/./image.jpg",
                                   "private\nvalue.jpg", "private\x7fvalue.jpg", "a/" * 33 + "image.jpg"])
 def test_rejects_unsafe_names_even_when_image_not_extracted(tmp_path, name):
-    source = make_zip(tmp_path, [(name, JPEG)])
+    # Windows ZipInfo normalizes backslashes when writing. Construct the raw
+    # unsafe central/local header name explicitly so the fixture tests the
+    # importer rather than the platform's ZIP writer normalization.
+    written_name = name.replace("\\", "/")
+    source = make_zip(tmp_path, [(written_name, JPEG)])
+    if written_name != name:
+        source.write_bytes(source.read_bytes().replace(written_name.encode(), name.encode()))
+    with zipfile.ZipFile(source) as archive:
+        assert archive.infolist()[0].orig_filename == name
     with pytest.raises(MediaImportError, match="unsafe"):
         import_media_zip(source, tmp_path / "media")
     assert_clean(tmp_path / "media")

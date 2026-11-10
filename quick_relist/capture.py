@@ -118,8 +118,12 @@ return (() => {
   const visible = el => {
     if (!el || !el.getClientRects || !el.getClientRects().length) return false;
     if (el.closest('[hidden],[aria-hidden="true"]')) return false;
-    const style = getComputedStyle(el);
-    return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse';
+    for (let current = el; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse'
+          || Number(style.opacity || 1) === 0) return false;
+    }
+    return true;
   };
   const secret = /password|passwd|passcode|one.?time|(?:^|[_\s-])otp(?:$|[_\s-])|(?:^|[_\s-])pin(?:$|[_\s-])|token|secret|credential|csrf|authorization|credit.?card|card.?number|card.?security|(?:^|[_\s-])cvv(?:$|[_\s-])/i;
   const sensitiveContext = el => {
@@ -190,23 +194,32 @@ return (() => {
         selected_options: el.tagName === 'SELECT' ? limited(el.selectedOptions, 1000).map(o => ({value: cut(o.value), text: cut(o.textContent)})) : null,
         option_count: el.tagName === 'SELECT' ? el.options.length : null
       }));
-    // Hub's Country is a visible custom combo followed by an aria-hidden input.
-    // This narrowly observed, non-secret, two-letter country code is the only
-    // hidden value admitted. Never generalize this exception to other inputs.
-    const combos = Array.from(root.querySelectorAll('div[role="combobox"]#mui-component-select-country_id'))
-      .filter(el => visible(el) && !sensitiveContext(el));
-    const inputs = Array.from(root.querySelectorAll('input#country_id[name="country_id"][aria-hidden="true"]'));
-    if (combos.length === 1 && inputs.length === 1 && combos[0].nextElementSibling === inputs[0]
-        && combos[0].parentElement === inputs[0].parentElement && inputs[0].type === 'text'
-        && !sensitiveContext(inputs[0]) && /^[A-Za-z]{2}$/.test(inputs[0].value) && textOf(combos[0])) {
-      fields.push({dom_order: fields.length, tag: 'div', type: 'custom-combobox',
-        id: 'country_id', name: 'country_id', label: 'Country', section: scopeFor(combos[0]),
-        value: textOf(combos[0]), checked: null, disabled: !!inputs[0].disabled, read_only: false,
-        selected_options: [{value: cut(inputs[0].value), text: textOf(combos[0])}], option_count: null,
-        observed_hidden_country_code: true});
-      limitations.add('country_option_resolution_unverified');
-    } else if (combos.length || inputs.length) {
-      limitations.add('country_selector_unresolved');
+    // Only these business selectors were observed with a visible MUI combo
+    // immediately followed by its aria-hidden native input. Never generalize
+    // this exception to arbitrary hidden fields or credential-like controls.
+    const observedSelects = ['country_id','property_type_id','mandate_type_id',
+      'office_id','listing_type_id','land_area_units','floor_area_units',
+      'apartment_descriptive_property_type','deed_office_id'];
+    for (const name of observedSelects) {
+      const combos = Array.from(root.querySelectorAll('div[role="combobox"]#mui-component-select-' + name))
+        .filter(el => visible(el) && !sensitiveContext(el));
+      const inputs = Array.from(root.querySelectorAll('input#' + name + '[name="' + name + '"][aria-hidden="true"]'));
+      const code = inputs.length === 1 ? String(inputs[0].value) : '';
+      const codeShape = name === 'country_id' ? /^[A-Za-z]{2}$/.test(code) : /^[A-Za-z0-9_.:-]{0,128}$/.test(code);
+      if (combos.length === 1 && inputs.length === 1 && combos[0].nextElementSibling === inputs[0]
+          && combos[0].parentElement === inputs[0].parentElement && inputs[0].type === 'text'
+          && !sensitiveContext(inputs[0]) && codeShape && textOf(combos[0])) {
+        const record = {dom_order: fields.length, tag: 'div', type: 'custom-combobox',
+          id: name, name, label: name === 'country_id' ? 'Country' : labelFor(combos[0]), section: scopeFor(combos[0]),
+          value: textOf(combos[0]), checked: null, disabled: !!inputs[0].disabled, read_only: false,
+          selected_options: [{value: cut(code), text: textOf(combos[0])}], option_count: null,
+          observed_business_selection_code: true};
+        if (name === 'country_id') record.observed_hidden_country_code = true;
+        fields.push(record);
+        limitations.add(name === 'country_id' ? 'country_option_resolution_unverified' : 'business_select_option_resolution_unverified');
+      } else if (combos.length || inputs.length) {
+        limitations.add(name === 'country_id' ? 'country_selector_unresolved' : 'business_selector_unresolved');
+      }
     }
     return fields;
   };
@@ -269,8 +282,16 @@ return (() => {
     const section = scopeFor(el);
     const caption = figure ? textOf(figure.querySelector('figcaption')) : '';
     const hint = /floor\s*plan/i.test(section + ' ' + caption + ' ' + (el.alt || '')) ? 'floorplan' : el.tagName.toLowerCase();
+    // Observed Hub image-card metadata. The combined grid includes photos and
+    // floorplans; nearby upload-widget headings cannot classify these cards.
+    const position = el.getAttribute('pos');
+    const card = el.tagName === 'IMG' && el.alt === 'preview' && /^image-[0-9]+$/.test(el.id)
+      && /^[0-9]+$/.test(position || '') && Number.isSafeInteger(Number(position));
     return {dom_order: index, tag: el.tagName.toLowerCase(), kind_hint: hint,
       section, alt: cut(el.alt), title: cut(el.title), caption,
+      observed_asset_id: card ? el.id.slice(6) : null,
+      observed_position: card ? Number(position) : null,
+      original_source_ref: card ? referenceFor(el.getAttribute('data-full-src')) : null,
       source_ref: referenceFor(el.currentSrc || el.getAttribute('src')),
       width: Number(el.naturalWidth || el.videoWidth || 0), height: Number(el.naturalHeight || el.videoHeight || 0),
       cover_verified: false, original_bytes_verified: false, order_verified: false};
@@ -304,7 +325,7 @@ _BASE_BLINDSPOTS = (
     ("portal_status_unverified", "Visible portal controls do not independently verify saved targets or live publication status."),
     ("async_state_unverified", "Asynchronous, lazy-loaded, collapsed, off-screen and paginated content may be missing or stale."),
     ("revision_unverified", "These observations are not an atomic server revision and may differ between pages or capture times."),
-    ("sensitive_controls_omitted", "Hidden controls are excluded except the specifically identified two-letter country selector code. Password, OTP, file and credential-like controls, browser secrets and recognized URL query/fragment data are deliberately excluded. Unlabelled secrets embedded in ordinary business prose cannot be exhaustively detected."),
+    ("sensitive_controls_omitted", "Hidden controls are excluded except the narrowly allowlisted, structurally matched business-selector codes observed next to visible Hub controls. Password, OTP, file and credential-like controls, browser secrets and recognized URL query/fragment data are deliberately excluded. Unlabelled secrets embedded in ordinary business prose cannot be exhaustively detected."),
     ("address_schema_unverified", "Address fields and autocomplete selections have not been mapped or validated against the required Hub schema."),
 )
 _PAYLOAD_LISTS = ("fields", "rich_text", "dialogs", "sections", "lists", "tables", "media", "editor_links", "discovery", "limitations")

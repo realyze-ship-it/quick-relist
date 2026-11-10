@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +19,7 @@ from typing import Any, Callable
 
 from .core import REQUIRED_ADAPTER_QUALIFICATIONS
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -549,7 +550,7 @@ class CapturedObservationsDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(23, 22, 23, 20)
         root.addWidget(_label("Saved partial observations", "pageTitle"))
-        root.addWidget(_label(f"Filed locally under {job.get('rxcu', '')}. This does not verify that the captured editor or imported ZIP belongs to that reference or account. Nothing here approves or runs a relist.", "noticeBody", True))
+        root.addWidget(_label(f"Filed locally under {job.get('rxcu', '')}. Each record shows its own source checks. Account ownership and complete source fidelity remain unverified. Nothing here approves or runs a relist.", "noticeBody", True))
         self.capture_combo = QComboBox()
         self.capture_combo.setAccessibleName("Choose an immutable partial observation")
         for record in self.records:
@@ -588,7 +589,10 @@ class CapturedObservationsDialog(QDialog):
         missing = coverage.get("missing_pages") if isinstance(coverage, dict) else None
         page_note = f"{len(pages)} observed page(s). " if isinstance(pages, list) and pages else ""
         missing_note = f"Missing pages: {', '.join(str(item) for item in missing)}. " if isinstance(missing, list) and missing else ""
-        self.coverage.setText(f"INCOMPLETE · {page_note}{missing_note}A full source backup and media completeness are not verified.")
+        matched = capture.get("identity", {}).get("reference_verified") is True
+        source_note = "RXCU headings matched for each accepted page. " if matched else "RXCU association unverified. "
+        stopped_note = str(capture.get("stop_reason") or "")
+        self.coverage.setText(f"INCOMPLETE · {page_note}{missing_note}{source_note}A full source backup and media completeness are not verified. {stopped_note}")
         self.revision_combo.clear()
         self.revision_combo.addItem("New tentative copy from this original", None)
         try:
@@ -710,6 +714,7 @@ class MainWindow(QMainWindow):
         self._operation_result: Any = None
         self._operation_callback: Callable[[Any], None] | None = None
         self._is_busy = False
+        self._cancel_operation_callback = None
         self._settings = QSettings("QuickRelist", "QuickRelist")
         self.setWindowTitle("Quick Relist")
         self.setMinimumSize(1060, 720)
@@ -717,6 +722,29 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(STYLE)
         self._build_shell()
         self.refresh()
+
+    def _fit_detail_actions(self):
+        # Native Windows metrics may change after the first polish/show or DPI
+        # transition. Recompute instead of freezing a pre-show width estimate.
+        if not hasattr(self, "details_card"):
+            return
+        buttons = self.details_card.findChildren(QPushButton)
+        if not buttons:
+            return
+        for button in buttons:
+            button.ensurePolished()
+        margins = self.details_card.layout().contentsMargins()
+        needed = max(button.minimumSizeHint().width() for button in buttons) + margins.left() + margins.right() + 2
+        if self.details_card.minimumWidth() != max(310, needed):
+            self.details_card.setMinimumWidth(max(310, needed))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit_detail_actions)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit_detail_actions)
 
     @property
     def live_ready(self) -> bool:
@@ -820,6 +848,9 @@ class MainWindow(QMainWindow):
         self.progress.setTextVisible(False)
         self.progress.hide()
         outer.addWidget(self.progress)
+        self.stop_operation_button = _button("Stop source capture", self._stop_operation)
+        self.stop_operation_button.hide()
+        outer.addWidget(self.stop_operation_button)
         horizontal.addWidget(main, 1)
         self.statusBar().showMessage("Local workspace ready. No Hub actions have been performed.")
         self._show_page(0)
@@ -926,7 +957,6 @@ class MainWindow(QMainWindow):
 
         self.details_card, details = _card()
         self.details_card.setMinimumWidth(310)
-        self.details_card.setMaximumWidth(390)
         details.setSpacing(10)
         details.addWidget(_label("SELECTED LISTING", "eyebrow"))
         self.detail_title = _label("Nothing selected", "sectionTitle")
@@ -946,6 +976,9 @@ class MainWindow(QMainWindow):
         self.open_editor_button = _button("Open exact matching editor", self._open_selected_editor)
         self.open_editor_button.setToolTip("Open the unique exact RXCU result's Edit Listing link and verify the editor headings. No listing is changed.")
         details.addWidget(self.open_editor_button)
+        self.capture_all_pages_button = _button("Capture matched editor tabs", self._capture_all_pages)
+        self.capture_all_pages_button.setToolTip("Read each observed editor tab with RXCU and tab checks. Saves incomplete private source data; never changes Hub.")
+        details.addWidget(self.capture_all_pages_button)
         self.capture_page_button = _button("Save current page (incomplete)", self._capture_current_page)
         self.capture_page_button.setToolTip("Read visible controls without changing Hub. Saves private observations under the selected local job; the RXCU association is not verified.")
         details.addWidget(self.capture_page_button)
@@ -980,8 +1013,14 @@ class MainWindow(QMainWindow):
         self.audit_button = _button("View activity record", self._show_journal)
         self.audit_button.setObjectName("linkButton")
         details.addWidget(self.audit_button)
+        self.details_card.ensurePolished()
+        for button in self.details_card.findChildren(QPushButton):
+            button.ensurePolished()
+        margins = details.contentsMargins()
+        action_width = max(button.minimumSizeHint().width() for button in self.details_card.findChildren(QPushButton))
+        self.details_card.setMinimumWidth(max(310, action_width + margins.left() + margins.right() + 2))
         splitter.addWidget(self.details_card)
-        splitter.setSizes([660, 310])
+        splitter.setSizes([660, self.details_card.minimumWidth()])
         layout.addWidget(splitter, 1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1288,6 +1327,7 @@ class MainWindow(QMainWindow):
         self.open_editor_button.setEnabled(False)
         self.review_button.setEnabled(False)
         self.capture_page_button.setEnabled(False)
+        self.capture_all_pages_button.setEnabled(False)
         self.saved_captures_button.setEnabled(False)
         self.import_media_button.setEnabled(False)
         self.download_media_button.setEnabled(False)
@@ -1317,6 +1357,7 @@ class MainWindow(QMainWindow):
         self.capture_page_button.setEnabled(self.hub is not None and self.drafts is not None and unstarted and not self._is_busy)
         self.import_media_button.setEnabled(self.drafts is not None and self.media_root is not None and unstarted and not self._is_busy)
         bindings = getattr(self.hub, "editor_bindings", {}) if self.hub is not None else {}
+        self.capture_all_pages_button.setEnabled(bool(bindings.get(str(job.get("rxcu")))) and self.drafts is not None and unstarted and not self._is_busy)
         self.download_media_button.setEnabled(bool(bindings.get(str(job.get("rxcu")))) and self.drafts is not None and self.media_root is not None and unstarted and not self._is_busy and not pending)
         self.download_media_button.setToolTip("Automatic downloads are paused after an attempt. Use Review previous download to preserve files and reset the pause after checking the browser." if pending else "Request a photo pack from the matched editor. Its listing association and completeness remain unverified.")
         if self.drafts is not None:
@@ -1366,6 +1407,44 @@ class MainWindow(QMainWindow):
         confirmation.button(QMessageBox.StandardButton.Yes).setText("Save incomplete data locally")
         confirmation.setDefaultButton(QMessageBox.StandardButton.Cancel)
         return confirmation.exec() == QMessageBox.StandardButton.Yes
+
+    @Slot()
+    def _capture_all_pages(self) -> None:
+        if (not self.selected_job or self.hub is None or self.drafts is None
+                or self._is_busy or not self.capture_all_pages_button.isEnabled()):
+            return
+        job_id, reference = self.selected_job["id"], str(self.selected_job["rxcu"])
+        confirmation = QMessageBox(self)
+        confirmation.setTextFormat(Qt.TextFormat.PlainText)
+        confirmation.setWindowTitle("Capture matched editor tabs locally?")
+        confirmation.setText(f"Read the observed editor tabs for {reference} and save the visible source details on this computer?")
+        confirmation.setInformativeText("The exact RXCU headings and browser tab will be checked before and after every accepted page. The browser follows only the observed editor tabs or links for this listing and stays on its last inspected tab. Finish or discard any unsaved edits yourself before continuing. Do not use the browser during capture.\n\nPrivate property and contact details are stored locally without encryption. Nested dialogs, account ownership, originals and complete field coverage remain unverified. No Hub fields will be changed or saved. You may stop after the current browser read.")
+        confirmation.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
+        confirmation.button(QMessageBox.StandardButton.Yes).setText("Capture locally")
+        confirmation.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if confirmation.exec() != QMessageBox.StandardButton.Yes:
+            return
+        cancel_event = threading.Event()
+
+        def capture_and_save():
+            from .matched_capture import capture_matched_listing
+            try:
+                capture = capture_matched_listing(self.hub, reference, cancelled=cancel_event.is_set)
+                record_id = self.drafts.save_capture(job_id, capture)
+                return {"record_id": record_id, "page_count": len(capture.get("pages", [])),
+                        "status": capture.get("status"), "stop_reason": capture.get("stop_reason")}
+            except Exception:
+                raise RuntimeError("The matched source capture could not be recorded. No listing was changed. Check the matched editor and private local storage before starting again.") from None
+
+        def show_result(result):
+            message = f"Saved {result['page_count']} guarded editor page(s) locally. Source backup remains incomplete."
+            if result["status"] in ("stopped", "cancelled"):
+                message += " " + str(result.get("stop_reason") or "Capture stopped before all pages were read.")
+            self.statusBar().showMessage(message)
+            self._show_saved_captures()
+
+        self._run_operation("Reading matched editor tabs without changing Hub…", capture_and_save,
+                            "Matched source inspection finished.", show_result, cancel=cancel_event.set)
 
     @Slot()
     def _capture_current_page(self) -> None:
@@ -1434,7 +1513,7 @@ class MainWindow(QMainWindow):
         confirmation.setIcon(QMessageBox.Icon.Question)
         confirmation.setWindowTitle("Download photo pack?")
         confirmation.setText(f"Download the photo pack for {reference} to this computer?")
-        confirmation.setInformativeText("The editor headings will be checked again. Any ZIP that appears cannot yet be attributed to this listing automatically; inspect it before manually importing. Further automatic downloads will pause until you review the attempt and close the dedicated browser. Files are not encrypted by this app. No Hub listing will be changed.")
+        confirmation.setInformativeText("The editor headings will be checked again. If browser events match a completed ZIP to this editor frame and RXCU filename, its bytes will be imported into this local job. Otherwise the file remains unassigned for manual review. Do not use the browser or start other downloads during this request. Further requests pause until you review the attempt. Files are not encrypted by this app. No Hub listing will be changed; media completeness, original resolution and account ownership remain unverified.")
         confirmation.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
         confirmation.button(QMessageBox.StandardButton.Yes).setText("Download locally")
         confirmation.setDefaultButton(QMessageBox.StandardButton.Cancel)
@@ -1444,7 +1523,22 @@ class MainWindow(QMainWindow):
         def request_download():
             from .hub_readonly import DownloadOutcomeUnknown, PreviousDownloadExists
             try:
-                return self.hub.download_photo_pack(reference, binding["listing_id"], self.media_root.parent / "downloads")
+                result = self.hub.download_photo_pack(reference, binding["listing_id"], self.media_root.parent / "downloads")
+                evidence = result.get("download_evidence", {})
+                matched = (result.get("attribution_verified") is True and isinstance(evidence, dict)
+                           and evidence.get("method") == "browser_frame_guid_and_reference"
+                           and evidence.get("rxcu") == reference and evidence.get("listing_id") == binding["listing_id"]
+                           and evidence.get("completion_observed") is True)
+                if matched:
+                    from .media import import_media_zip
+                    imported = import_media_zip(result["candidate_path"], self.media_root)
+                    if (imported["archive"]["sha256"] != evidence.get("archive_sha256")
+                            or imported["archive"]["size"] != evidence.get("archive_size")):
+                        raise ValueError("The imported archive differs from the browser-matched bytes")
+                    imported["download_evidence"] = deepcopy(evidence)
+                    result["capture_id"] = self.drafts.save_capture(job_id, imported)
+                    result["media_count"] = imported["media_count"]
+                return result
             except PreviousDownloadExists as exc:
                 raise RuntimeError(f"A previous download needs review before another attempt. Check this local folder: {exc.directory}") from None
             except DownloadOutcomeUnknown as exc:
@@ -1453,6 +1547,10 @@ class MainWindow(QMainWindow):
                 raise RuntimeError("The photo-pack download could not be confirmed. Check the editor and browser before retrying. No listing was changed.") from None
 
         def show_candidate(result):
+            if result.get("capture_id"):
+                self.statusBar().showMessage(f"Stored {result['media_count']} image file(s) from the browser-matched ZIP. Complete source, original resolution, classification and order remain unverified.")
+                self._show_saved_captures()
+                return
             box = QMessageBox(self)
             box.setTextFormat(Qt.TextFormat.PlainText)
             box.setWindowTitle("ZIP requires manual review")
@@ -1462,7 +1560,7 @@ class MainWindow(QMainWindow):
             box.exec()
 
         self._run_operation("Requesting the photo pack without changing Hub…", request_download,
-                            "A ZIP appeared; listing association and contents are unverified.", show_candidate)
+                            "Photo-pack request finished; review the recorded evidence and remaining media checks.", show_candidate)
 
     @Slot()
     def _review_download(self) -> None:
@@ -1520,7 +1618,7 @@ class MainWindow(QMainWindow):
     def _import_media(self) -> None:
         if not self.selected_job or self.drafts is None or self.media_root is None or self._is_busy or not self.import_media_button.isEnabled():
             return
-        path, _selected_filter = QFileDialog.getOpenFileName(self, "Choose a downloaded original-media ZIP", "", "ZIP archives (*.zip)")
+        path, _selected_filter = QFileDialog.getOpenFileName(self, "Choose a downloaded original-media ZIP", "", "ZIP archives (*.zip);;All files (*)")
         if not path or not self._confirm_local_observation("Preserve the selected media ZIP and image files"):
             return
         job_id = self.selected_job["id"]
@@ -1613,7 +1711,7 @@ class MainWindow(QMainWindow):
             return
         self._run_operation("Cancelling the unstarted local job…", lambda: self.engine.cancel_job(job_id), "Local job cancelled. Its history is preserved; no Hub listing was changed.")
 
-    def _run_operation(self, title: str, operation: Callable[[], Any], success: str, callback: Callable[[Any], None] | None = None) -> None:
+    def _run_operation(self, title: str, operation: Callable[[], Any], success: str, callback: Callable[[Any], None] | None = None, *, cancel: Callable[[], None] | None = None) -> None:
         if self._is_busy:
             return
         self._is_busy = True
@@ -1621,6 +1719,9 @@ class MainWindow(QMainWindow):
         self._operation_success = success
         self._operation_result = None
         self._operation_callback = callback
+        self._cancel_operation_callback = cancel
+        self.stop_operation_button.setVisible(cancel is not None)
+        self.stop_operation_button.setEnabled(cancel is not None)
         self.stack.setEnabled(False)
         self.progress.show()
         self.statusBar().showMessage(title)
@@ -1636,6 +1737,13 @@ class MainWindow(QMainWindow):
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
 
+    @Slot()
+    def _stop_operation(self):
+        if self._is_busy and self._cancel_operation_callback is not None:
+            self._cancel_operation_callback()
+            self.stop_operation_button.setEnabled(False)
+            self.statusBar().showMessage("Stopping source capture after the current browser read. Earlier guarded pages will be kept.")
+
     @Slot(object)
     def _operation_succeeded(self, result: Any) -> None:
         self._operation_result = result
@@ -1650,6 +1758,8 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._is_busy = False
         self.progress.hide()
+        self.stop_operation_button.hide()
+        self._cancel_operation_callback = None
         self.stack.setEnabled(True)
         self.refresh()
         callback, result = self._operation_callback, self._operation_result

@@ -97,14 +97,19 @@ def test_links_never_followed(attempt, tmp_path, target):
     external = tmp_path / "external"
     external.mkdir()
     (external / "secret").write_text("SYNTHETIC_NOT_FOR_REVIEW")
-    if target == "marker":
-        (root / MARKER_NAME).unlink()
-        (root / MARKER_NAME).symlink_to(external / "secret")
-    elif target == "file":
-        (folder / "candidate.zip").symlink_to(external / "secret")
-    else:
-        folder.rmdir()
-        folder.symlink_to(external, target_is_directory=True)
+    try:
+        if target == "marker":
+            (root / MARKER_NAME).unlink()
+            (root / MARKER_NAME).symlink_to(external / "secret")
+        elif target == "file":
+            (folder / "candidate.zip").symlink_to(external / "secret")
+        else:
+            folder.rmdir()
+            folder.symlink_to(external, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires an unavailable privilege")
+        raise
     with pytest.raises(DownloadReviewError) as caught:
         inspect_download(root)
     assert "SYNTHETIC_NOT_FOR_REVIEW" not in str(caught.value)
@@ -213,7 +218,10 @@ def test_new_attempt_after_review_uses_new_folder_and_keeps_previous_files(tmp_p
         def __init__(self): self.button = Button(self)
         def execute_script(self, *args): return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
         def find_elements(self, *args): return [self.button]
-        def execute_cdp_cmd(self, method, params): self.folder = Path(params["downloadPath"])
+        def execute_cdp_cmd(self, method, params):
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": self.current_window_handle, "type": "page", "browserContextId": "synthetic-context"}}
+            self.folder = Path(params["downloadPath"])
         def quit(self): pass
     root = tmp_path / "downloads"
     first_driver = Driver()
@@ -233,3 +241,20 @@ def test_new_attempt_after_review_uses_new_folder_and_keeps_previous_files(tmp_p
     assert Path(first["candidate_path"]).read_bytes() == first_bytes
     assert (root / MARKER_NAME).exists()  # New request has its own unresolved pause.
     assert second["attribution_verified"] is False
+
+
+def test_windows_path_and_handle_ctime_difference_does_not_reject_unchanged_record(attempt, monkeypatch):
+    from types import SimpleNamespace
+    from quick_relist import downloads
+    root, _ = attempt
+    real_fstat = downloads.os.fstat
+    def different_ctime(fd):
+        actual = real_fstat(fd)
+        values = {key: getattr(actual, key) for key in dir(actual) if key.startswith("st_")}
+        values["st_ctime_ns"] += 100000
+        return SimpleNamespace(**values)
+    monkeypatch.setattr(downloads.os, "fstat", different_ctime)
+    review = inspect_download(root)
+    result = finish(root, review)
+    assert result["files_preserved"] is True
+    assert not (root / MARKER_NAME).exists()
