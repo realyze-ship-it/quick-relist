@@ -1,6 +1,6 @@
 # Connector implementation checklist
 
-The desktop shell and safety model do not implement Hub automation. A real connector must be implemented and verified before enabling any listing operation. The following observations are a guide, not a stable API or an exhaustive mapping:
+The desktop shell has experimental read-only Hub navigation, but the safety model does not implement live relisting. A real connector must be implemented and verified before enabling any listing change. The following observations are a guide, not a stable API or an exhaustive mapping:
 
 - Manage Listings filters can hide results. Confirm transaction type, status, office and agent filters before declaring an RXCU absent; exact-match and identity-check a single listing.
 - Edit and archive open new tabs. Track browser window handles, verify the page and return to the correct listing.
@@ -14,3 +14,5 @@ The desktop shell and safety model do not implement Hub automation. A real conne
 Unverified selectors, completeness rules and actual portal outcomes must fail closed. These observations contain no real listing data.
 
 Live connector qualification must also demonstrate an atomic server-side expected-revision precondition for each destructive operation. A read followed by a click is not an atomic concurrency safeguard. Hub support for this is unknown; do not set the connector ready or enable live writes until the requirement is met and independently verified. Required address values and suburb selection must be validated against the actual Hub form, not inferred from a partial inspection.
+
+The read-only editor opener checks a unique RXCU row, its controlled Select menu, the numeric editor URL and both visible reference headings. Account ownership, result completeness and capture fidelity remain unverified. The photo-pack helper cannot attribute a ZIP to a click with browser events, so it leaves the file unassigned for manual review and blocks subsequent automatic download attempts. Windows and actual download behavior remain untested.

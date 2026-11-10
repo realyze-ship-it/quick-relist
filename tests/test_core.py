@@ -695,3 +695,15 @@ class CoreTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_hyphenated_references_normalize_consistently():
+    from quick_relist.core import normalize_rxcu
+    assert normalize_rxcu(" rxcu-12345 ") == "RXCU12345"
+    assert normalize_rxcu("RXCU12345") == "RXCU12345"
+
+
+def test_rxcu_rejects_non_ascii_digits():
+    from quick_relist.core import normalize_rxcu, ValidationError
+    import pytest
+    with pytest.raises(ValidationError): normalize_rxcu("RXCU-١٢٣")

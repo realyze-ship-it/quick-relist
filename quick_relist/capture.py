@@ -180,15 +180,36 @@ return (() => {
     }
     return cut(raw);
   };
-  const fieldsFor = root => limited(root.querySelectorAll('input,select,textarea'), 2000)
-    .filter(safeControl).map((el, index) => ({
-      dom_order: index, tag: el.tagName.toLowerCase(), type: el.type || '',
-      id: cut(el.id), name: cut(el.name), label: labelFor(el), section: scopeFor(el),
-      value: fieldValue(el), checked: ['checkbox', 'radio'].includes(el.type) ? el.checked : null,
-      disabled: !!el.disabled, read_only: !!el.readOnly,
-      selected_options: el.tagName === 'SELECT' ? limited(el.selectedOptions, 1000).map(o => ({value: cut(o.value), text: cut(o.textContent)})) : null,
-      option_count: el.tagName === 'SELECT' ? el.options.length : null
-    }));
+  const fieldsFor = root => {
+    const fields = limited(root.querySelectorAll('input,select,textarea'), 2000)
+      .filter(safeControl).map((el, index) => ({
+        dom_order: index, tag: el.tagName.toLowerCase(), type: el.type || '',
+        id: cut(el.id), name: cut(el.name), label: labelFor(el), section: scopeFor(el),
+        value: fieldValue(el), checked: ['checkbox', 'radio'].includes(el.type) ? el.checked : null,
+        disabled: !!el.disabled, read_only: !!el.readOnly,
+        selected_options: el.tagName === 'SELECT' ? limited(el.selectedOptions, 1000).map(o => ({value: cut(o.value), text: cut(o.textContent)})) : null,
+        option_count: el.tagName === 'SELECT' ? el.options.length : null
+      }));
+    // Hub's Country is a visible custom combo followed by an aria-hidden input.
+    // This narrowly observed, non-secret, two-letter country code is the only
+    // hidden value admitted. Never generalize this exception to other inputs.
+    const combos = Array.from(root.querySelectorAll('div[role="combobox"]#mui-component-select-country_id'))
+      .filter(el => visible(el) && !sensitiveContext(el));
+    const inputs = Array.from(root.querySelectorAll('input#country_id[name="country_id"][aria-hidden="true"]'));
+    if (combos.length === 1 && inputs.length === 1 && combos[0].nextElementSibling === inputs[0]
+        && combos[0].parentElement === inputs[0].parentElement && inputs[0].type === 'text'
+        && !sensitiveContext(inputs[0]) && /^[A-Za-z]{2}$/.test(inputs[0].value) && textOf(combos[0])) {
+      fields.push({dom_order: fields.length, tag: 'div', type: 'custom-combobox',
+        id: 'country_id', name: 'country_id', label: 'Country', section: scopeFor(combos[0]),
+        value: textOf(combos[0]), checked: null, disabled: !!inputs[0].disabled, read_only: false,
+        selected_options: [{value: cut(inputs[0].value), text: textOf(combos[0])}], option_count: null,
+        observed_hidden_country_code: true});
+      limitations.add('country_option_resolution_unverified');
+    } else if (combos.length || inputs.length) {
+      limitations.add('country_selector_unresolved');
+    }
+    return fields;
+  };
   const escapeText = text => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const formatTags = new Set(['P','BR','B','STRONG','I','EM','U','S','UL','OL','LI','DIV','SPAN','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','PRE','CODE']);
   const richHTML = root => {
@@ -283,7 +304,7 @@ _BASE_BLINDSPOTS = (
     ("portal_status_unverified", "Visible portal controls do not independently verify saved targets or live publication status."),
     ("async_state_unverified", "Asynchronous, lazy-loaded, collapsed, off-screen and paginated content may be missing or stale."),
     ("revision_unverified", "These observations are not an atomic server revision and may differ between pages or capture times."),
-    ("sensitive_controls_omitted", "Hidden, password, OTP, file and credential-like controls, browser secrets and recognized URL query/fragment data are deliberately excluded. Unlabelled secrets embedded in ordinary business prose cannot be exhaustively detected."),
+    ("sensitive_controls_omitted", "Hidden controls are excluded except the specifically identified two-letter country selector code. Password, OTP, file and credential-like controls, browser secrets and recognized URL query/fragment data are deliberately excluded. Unlabelled secrets embedded in ordinary business prose cannot be exhaustively detected."),
     ("address_schema_unverified", "Address fields and autocomplete selections have not been mapped or validated against the required Hub schema."),
 )
 _PAYLOAD_LISTS = ("fields", "rich_text", "dialogs", "sections", "lists", "tables", "media", "editor_links", "discovery", "limitations")

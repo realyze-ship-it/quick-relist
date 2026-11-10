@@ -13,6 +13,7 @@ import re
 import sys
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 from .core import REQUIRED_ADAPTER_QUALIFICATIONS
@@ -415,6 +416,9 @@ class TentativeAddressDialog(QDialog):
         self.value_keys: dict[str, str] = {}
         previous_original = (revision or {}).get("original", {})
         previous_edited = (revision or {}).get("edited", {})
+        from .address import propose_address_fields
+        proposal = propose_address_fields(capture)
+        suggested_paths = {item["path"] for item in proposal["fields"].values()}
         self.setWindowTitle("Tentative address · not approved")
         self.setStyleSheet(STYLE)
         self.resize(800, 760)
@@ -422,7 +426,9 @@ class TentativeAddressDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(23, 22, 23, 20)
         root.addWidget(_label("Prepare a tentative address", "pageTitle"))
-        root.addWidget(_label("Select the captured controls that belong to the address, then edit their copies. Field labels are observations, not a verified address mapping. The listing and account association are unverified.", "noticeBody", True))
+        root.addWidget(_label("Suggested address controls are preselected where uniquely observed. Review every field and correct any selection. The listing, account and address mapping remain unverified.", "noticeBody", True))
+        if proposal["missing"] or proposal["ambiguous"]:
+            root.addWidget(_label(f"Address mapping needs review: {len(proposal['missing'])} fields not observed and {len(proposal['ambiguous'])} ambiguous. No missing values were invented.", "muted", True))
         root.addWidget(_label("These edits cannot approve the address or enable relisting. Typed option values are tentative and still need valid Hub option resolution. The incomplete source and every saved revision remain unchanged.", "muted", True))
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText("Find a captured field by label or name…")
@@ -434,7 +440,9 @@ class TentativeAddressDialog(QDialog):
         rows = QVBoxLayout(editor)
         self.field_rows: dict[str, QWidget] = {}
         self.field_search: dict[str, str] = {}
-        for path, original in self.original.items():
+        ordered_paths = [path for path in self.original if path in suggested_paths] + [path for path in self.original if path not in suggested_paths]
+        for path in ordered_paths:
+            original = self.original[path]
             title = str(original.get("label") or original.get("name") or original.get("id") or "Unlabelled observed control")
             card, box = _card()
             box.setContentsMargins(14, 12, 14, 12)
@@ -442,7 +450,8 @@ class TentativeAddressDialog(QDialog):
             include = QCheckBox(title)
             # A revision is only reusable when it belongs to these exact originals.
             matches = path in previous_original and previous_original[path] == original
-            include.setChecked(matches)
+            included = matches if revision is not None else path in suggested_paths
+            include.setChecked(included)
             include.setAccessibleName(f"Include observed field: {title}")
             self.included[path] = include
             box.addWidget(include)
@@ -472,7 +481,7 @@ class TentativeAddressDialog(QDialog):
                 field = QPlainTextEdit("" if value is None else str(value))
                 field.setMaximumHeight(80)
             field.setAccessibleName(f"Tentative edited {title}")
-            field.setEnabled(matches)
+            field.setEnabled(included)
             self.fields[path] = field
             box.addWidget(_label("TENTATIVE COPY", "eyebrow"))
             box.addWidget(field)
@@ -626,7 +635,7 @@ class MainWindow(QMainWindow):
         self.store = store if store is not None else getattr(engine, "store", None)
         self.hub = hub
         self.drafts = drafts
-        self.media_root = media_root
+        self.media_root = Path(media_root) if media_root is not None else None
         self._capture_sessions: dict[str, tuple[Any, Any]] = {}
         self.batch_id: str | None = None
         self.jobs: list[dict[str, Any]] = []
@@ -872,11 +881,17 @@ class MainWindow(QMainWindow):
         self.search_hub_button = _button("Find RXCU in Hub (read only)", self._search_selected_reference)
         self.search_hub_button.setToolTip("Search Manage Listings in the dedicated Hub browser. Review results and filters manually.")
         details.addWidget(self.search_hub_button)
+        self.open_editor_button = _button("Open exact matching editor", self._open_selected_editor)
+        self.open_editor_button.setToolTip("Open the unique exact RXCU result's Edit Listing link and verify the editor headings. No listing is changed.")
+        details.addWidget(self.open_editor_button)
         self.capture_page_button = _button("Save current page (incomplete)", self._capture_current_page)
         self.capture_page_button.setToolTip("Read visible controls without changing Hub. Saves private observations under the selected local job; the RXCU association is not verified.")
         details.addWidget(self.capture_page_button)
         self.saved_captures_button = _button("Review partial observations", self._show_saved_captures)
         details.addWidget(self.saved_captures_button)
+        self.download_media_button = _button("Download photo pack", self._download_media)
+        self.download_media_button.setToolTip("Download the verified editor's photo pack into a private local folder. Contents and completeness remain unverified.")
+        details.addWidget(self.download_media_button)
         self.import_media_button = _button("Import local media ZIP", self._import_media)
         self.import_media_button.setToolTip("Preserve original downloaded ZIP and image bytes locally. This does not verify media identity, order, captions or completeness.")
         details.addWidget(self.import_media_button)
@@ -1042,7 +1057,16 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _tokens(text: str) -> list[str]:
-        return [item.strip().upper() for item in re.split(r"[\s,;]+", text) if item.strip()]
+        from .core import normalize_rxcu, ValidationError
+        tokens = []
+        for item in re.split(r"[\s,;]+", text):
+            if not item.strip():
+                continue
+            try:
+                tokens.append(normalize_rxcu(item))
+            except ValidationError:
+                tokens.append(item.strip().upper())  # Engine gives the validation message.
+        return tokens
 
     @Slot()
     def _update_input(self) -> None:
@@ -1195,10 +1219,12 @@ class MainWindow(QMainWindow):
         job = self.selected_job
         self.capture_button.setEnabled(False)
         self.search_hub_button.setEnabled(False)
+        self.open_editor_button.setEnabled(False)
         self.review_button.setEnabled(False)
         self.capture_page_button.setEnabled(False)
         self.saved_captures_button.setEnabled(False)
         self.import_media_button.setEnabled(False)
+        self.download_media_button.setEnabled(False)
         self.observation_status.setText("No partial observations saved.")
         self.advance_button.setEnabled(False)
         self.reconcile_button.setEnabled(False)
@@ -1213,9 +1239,18 @@ class MainWindow(QMainWindow):
             return
         state = str(job.get("state", "queued"))
         self.search_hub_button.setEnabled(self.hub is not None and not self._is_busy)
+        self.open_editor_button.setEnabled(self.hub is not None and not self._is_busy)
         unstarted = state in ("queued", "awaiting_address", "ready", "blocked")
         self.capture_page_button.setEnabled(self.hub is not None and self.drafts is not None and unstarted and not self._is_busy)
         self.import_media_button.setEnabled(self.drafts is not None and self.media_root is not None and unstarted and not self._is_busy)
+        bindings = getattr(self.hub, "editor_bindings", {}) if self.hub is not None else {}
+        guard = self.media_root.parent / "downloads" / "download-review-required.json" if self.media_root is not None else None
+        try:
+            pending = guard is not None and (guard.exists() or guard.is_symlink())
+        except OSError:
+            pending = True
+        self.download_media_button.setEnabled(bool(bindings.get(str(job.get("rxcu")))) and self.drafts is not None and self.media_root is not None and unstarted and not self._is_busy and not pending)
+        self.download_media_button.setToolTip("Automatic downloads are paused after an attempt. Review the local downloads folder and use manual ZIP import; a reset workflow is not yet available." if pending else "Request a photo pack from the matched editor. Its listing association and completeness remain unverified.")
         if self.drafts is not None:
             try:
                 observations = self.drafts.list_captures(job["id"])
@@ -1271,6 +1306,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_local_observation("Save a partial page observation from the Hub editor"):
             return
         job_id = self.selected_job["id"]
+        reference = str(self.selected_job["rxcu"])
 
         def capture_and_save():
             try:
@@ -1283,7 +1319,14 @@ class MainWindow(QMainWindow):
                     collector = PartialHubCapture(self.hub.driver)
                 else:
                     collector = session[1]
-                capture = collector.capture_current_page()
+                binding = getattr(self.hub, "editor_bindings", {}).get(reference)
+                if binding:
+                    if self.hub.driver.current_window_handle != binding["handle"]:
+                        raise ValueError("The verified editor tab changed")
+                    self.hub.verify_editor_reference(reference, binding["listing_id"])
+                capture = collector.capture_current_page(binding["listing_id"]) if binding else collector.capture_current_page()
+                if binding:
+                    self.hub.verify_editor_reference(reference, binding["listing_id"])
                 self._capture_sessions[job_id] = (self.hub.driver, collector)
                 return self.drafts.save_capture(job_id, capture)
             except Exception:
@@ -1308,6 +1351,50 @@ class MainWindow(QMainWindow):
         dialog.source_text.clear()
         dialog.deleteLater()
         self.refresh()
+
+    @Slot()
+    def _download_media(self) -> None:
+        if not self.selected_job or self.hub is None or self.drafts is None or self.media_root is None or self._is_busy or not self.download_media_button.isEnabled():
+            return
+        reference = str(self.selected_job["rxcu"])
+        job_id = self.selected_job["id"]
+        binding = getattr(self.hub, "editor_bindings", {}).get(reference)
+        if not binding:
+            return
+        confirmation = QMessageBox(self)
+        confirmation.setTextFormat(Qt.TextFormat.PlainText)
+        confirmation.setIcon(QMessageBox.Icon.Question)
+        confirmation.setWindowTitle("Download photo pack?")
+        confirmation.setText(f"Download the photo pack for {reference} to this computer?")
+        confirmation.setInformativeText("The editor headings will be checked again. Any ZIP that appears cannot yet be attributed to this listing automatically; inspect it before manually importing. Further automatic downloads will pause; a reset workflow is not yet available. Files are not encrypted by this app. No Hub listing will be changed.")
+        confirmation.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
+        confirmation.button(QMessageBox.StandardButton.Yes).setText("Download locally")
+        confirmation.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if confirmation.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        def request_download():
+            from .hub_readonly import DownloadOutcomeUnknown, PreviousDownloadExists
+            try:
+                return self.hub.download_photo_pack(reference, binding["listing_id"], self.media_root.parent / "downloads")
+            except PreviousDownloadExists as exc:
+                raise RuntimeError(f"A previous download needs review before another attempt. Check this local folder: {exc.directory}") from None
+            except DownloadOutcomeUnknown as exc:
+                raise RuntimeError(f"The download outcome is uncertain. Check this local folder before retrying: {exc.directory}") from None
+            except Exception:
+                raise RuntimeError("The photo-pack download could not be confirmed. Check the editor and browser before retrying. No listing was changed.") from None
+
+        def show_candidate(result):
+            box = QMessageBox(self)
+            box.setTextFormat(Qt.TextFormat.PlainText)
+            box.setWindowTitle("ZIP requires manual review")
+            box.setText("A ZIP appeared, but its listing association is not verified.")
+            box.setInformativeText(f"Inspect the file before using Import local media ZIP. Further automatic downloads are paused; a reset workflow is not yet available.\n\nLocal folder: {result['directory']}")
+            box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            box.exec()
+
+        self._run_operation("Requesting the photo pack without changing Hub…", request_download,
+                            "A ZIP appeared; listing association and contents are unverified.", show_candidate)
 
     @Slot()
     def _import_media(self) -> None:
@@ -1455,24 +1542,40 @@ class MainWindow(QMainWindow):
         self._operation_result = None
         self._operation_callback = None
 
+    @staticmethod
+    def _safe_readonly_call(operation: Callable[[], Any]) -> Any:
+        try:
+            return operation()
+        except Exception:
+            # Browser exceptions can contain private URLs or page contents.
+            raise RuntimeError("The read-only Hub step could not be verified. Check the browser, filters and selected listing before continuing. No listing was changed.") from None
+
     @Slot()
     def _open_readonly_hub(self) -> None:
         if self.hub is None or self._is_busy:
             return
-        self._run_operation("Opening the read-only Hub browser…", self.hub.open, "Hub browser opened. Sign in yourself, then open a listing editor. No listing was changed.")
+        self._run_operation("Opening the read-only Hub browser…", lambda: self._safe_readonly_call(self.hub.open), "Hub browser opened. Sign in yourself, then open a listing editor. No listing was changed.")
 
     @Slot()
     def _inspect_readonly_hub(self) -> None:
         if self.hub is None or self._is_busy:
             return
-        self._run_operation("Reading the current Hub editor…", self.hub.inspect_current_editor_page, "Read-only inspection finished. The result is partial and unverified; no listing was changed.", self._show_partial_inspection)
+        self._run_operation("Reading the current Hub editor…", lambda: self._safe_readonly_call(self.hub.inspect_current_editor_page), "Read-only inspection finished. The result is partial and unverified; no listing was changed.", self._show_partial_inspection)
+
+    @Slot()
+    def _open_selected_editor(self) -> None:
+        if self.hub is None or not self.selected_job or self._is_busy:
+            return
+        reference = str(self.selected_job["rxcu"])
+        self._run_operation("Opening the exact matching editor…", lambda: self._safe_readonly_call(lambda: self.hub.open_listing_editor(reference)),
+                            "Matching row, editor link and headings verified. Account and complete source remain unverified.")
 
     @Slot()
     def _search_selected_reference(self) -> None:
         if self.hub is None or not self.selected_job or self._is_busy:
             return
         reference = str(self.selected_job["rxcu"])
-        self._run_operation("Searching Manage Listings in the Hub browser…", lambda: self.hub.search_reference(reference), "Hub search submitted. Review matches and active filters in the browser; a matching listing has not been verified.")
+        self._run_operation("Searching Manage Listings in the Hub browser…", lambda: self._safe_readonly_call(lambda: self.hub.search_reference(reference)), "Hub search submitted. Review matches and active filters in the browser; a matching listing has not been verified.")
 
     def _show_partial_inspection(self, result: Any) -> None:
         dialog = QDialog(self)

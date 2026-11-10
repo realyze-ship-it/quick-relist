@@ -102,9 +102,9 @@ def _audit_details(details: dict) -> dict:
 
 def normalize_rxcu(value: str) -> str:
     value = str(value).strip().upper()
-    if not re.fullmatch(r"RXCU\d{3,20}", value):
+    if not re.fullmatch(r"RXCU-?[0-9]{3,20}", value):
         raise ValidationError("Use an RXCU reference followed by 3 to 20 digits.")
-    return value
+    return value.replace("-", "")
 
 
 class HubAdapter(Protocol):

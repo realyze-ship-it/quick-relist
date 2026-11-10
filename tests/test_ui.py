@@ -569,7 +569,7 @@ def _synthetic_partial_capture():
                 {"label": "Show address", "name": "show", "type": "checkbox", "value": "on", "checked": False},
                 {"label": "Null field", "name": "null", "type": "text", "value": None},
                 {"label": "Unknown structure", "name": "nested", "type": "custom", "value": {"synthetic": [1, True]}},
-                {"label": "Suburb", "name": "suburb", "tag": "select", "type": "select-one", "value": "synthetic-1", "selected_options": [{"value": "synthetic-1", "text": "Synthetic original suburb"}]},
+                {"label": "Synthetic area", "name": "suburb", "tag": "select", "type": "select-one", "value": "synthetic-1", "selected_options": [{"value": "synthetic-1", "text": "Synthetic original suburb"}]},
                 {"label": "Observed number", "name": "number", "value": 1.5},
             ],
             "dialogs": [{"title": "Synthetic address details", "fields": [{"label": "Unit number", "name": "unit", "type": "text", "value": "1"}]}],
@@ -935,7 +935,7 @@ def test_new_observation_buttons_fit_small_window(draft_window, application):
     _seed_partial(draft_window)
     draft_window.resize(1060, 720)
     application.processEvents()
-    for button in (draft_window.capture_page_button, draft_window.saved_captures_button, draft_window.import_media_button):
+    for button in (draft_window.open_editor_button, draft_window.capture_page_button, draft_window.saved_captures_button, draft_window.download_media_button, draft_window.import_media_button):
         assert button.height() >= 35
         assert button.width() >= button.minimumSizeHint().width()
     scroll = draft_window.stack.widget(0)
@@ -954,3 +954,88 @@ def test_noncheckbox_boolean_value_is_preserved_readonly(application):
         assert dialog.corrected_address()[path]["value"] is True
     finally:
         dialog.deleteLater()
+
+
+def test_tentative_address_preselects_only_unique_observed_fields(application):
+    capture = {"complete": False, "pages": [{"page_key": "details", "fields": [
+        {"name": "street_name", "id": "street_name", "label": "Street name", "value": "Synthetic street", "type": "text"},
+        {"name": "", "id": "generated", "label": "Suburb", "value": "Synthetic suburb", "type": "text"},
+        {"name": "street_number", "id": "street_number", "label": "Street number", "value": "1", "type": "text"},
+        {"name": "street_number", "id": "another", "label": "Street number", "value": "2", "type": "text"},
+        {"name": "other", "id": "other", "label": "Other", "value": "untouched", "type": "text"},
+    ]}]}
+    dialog = ui.TentativeAddressDialog(capture)
+    try:
+        assert dialog.included["pages/0/fields/0"].isChecked()
+        assert dialog.included["pages/0/fields/1"].isChecked()
+        assert not dialog.included["pages/0/fields/2"].isChecked()
+        assert not dialog.included["pages/0/fields/3"].isChecked()
+        assert not dialog.included["pages/0/fields/4"].isChecked()
+        assert dialog.fields["pages/0/fields/0"].toPlainText() == "Synthetic street"
+    finally:
+        dialog.deleteLater()
+
+
+def test_open_editor_button_uses_selected_reference(draft_window, application):
+    _add_batch(draft_window, "RXCU-000123")
+    calls = []
+    draft_window.hub = SimpleNamespace(editor_bindings={}, open_listing_editor=lambda ref: calls.append(ref) or {"complete": False})
+    draft_window.refresh()
+    draft_window._open_selected_editor()
+    _finish_worker(application, draft_window)
+    assert calls == ["RXCU000123"]
+    assert draft_window.store.get_job(draft_window.selected_job["id"])["snapshot"] is None
+
+
+def test_download_requires_verified_editor_binding_and_explicit_confirmation(draft_window, application, monkeypatch, tmp_path):
+    from quick_relist import media
+    _add_batch(draft_window, "RXCU-000123")
+    calls = []
+    def download(ref, listing_id, root):
+        calls.append((ref, listing_id, root))
+        return {"candidate_path": str(tmp_path / "synthetic.zip"), "directory": str(tmp_path), "complete": False, "attribution_verified": False}
+    draft_window.hub = SimpleNamespace(editor_bindings={}, download_photo_pack=download)
+    draft_window.refresh()
+    assert not draft_window.download_media_button.isEnabled()
+    draft_window.hub.editor_bindings["RXCU000123"] = {"listing_id": "123", "handle": "synthetic"}
+    draft_window.refresh()
+    assert draft_window.download_media_button.isEnabled()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Cancel)
+    draft_window._download_media()
+    assert calls == []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(media, "import_media_zip", lambda path, root: pytest.fail("must not import unattributed ZIP"))
+    draft_window._download_media()
+    _finish_worker(application, draft_window)
+    assert len(calls) == 1 and calls[0][0:2] == ("RXCU000123", "123")
+    records = draft_window.drafts.list_captures(draft_window.selected_job["id"])
+    assert records == []  # Candidate ZIP remains unassigned until manual review.
+    assert draft_window.store.get_job(draft_window.selected_job["id"])["approved"] is False
+
+
+def test_browser_errors_never_expose_private_exception_text(draft_window, application):
+    _add_batch(draft_window, "RXCU-000123")
+    def fail(_): raise RuntimeError("SYNTHETIC_SECRET_PAGE_DATA")
+    draft_window.hub = SimpleNamespace(editor_bindings={}, open_listing_editor=fail)
+    draft_window.refresh()
+    draft_window._open_selected_editor()
+    _finish_worker(application, draft_window)
+    assert draft_window.test_errors
+    assert "SYNTHETIC_SECRET_PAGE_DATA" not in draft_window.test_errors[-1][1]
+    assert "read-only" in draft_window.test_errors[-1][1]
+
+
+def test_hyphenated_and_unhyphenated_references_deduplicate(window):
+    _add_batch(window, "RXCU-000123 RXCU000123")
+    assert [job["rxcu"] for job in window.jobs] == ["RXCU000123"]
+
+
+def test_download_guard_disables_further_attempts_in_ui(draft_window, tmp_path):
+    _add_batch(draft_window, "RXCU000123")
+    draft_window.hub = SimpleNamespace(editor_bindings={"RXCU000123": {"listing_id": "123", "handle": "synthetic"}})
+    root = draft_window.media_root.parent / "downloads"
+    root.mkdir(exist_ok=True)
+    (root / "download-review-required.json").write_text("{}")
+    draft_window.refresh()
+    assert not draft_window.download_media_button.isEnabled()
+    assert "reset workflow is not yet available" in draft_window.download_media_button.toolTip()

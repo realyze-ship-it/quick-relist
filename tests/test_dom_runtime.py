@@ -73,7 +73,7 @@ const signature = () => JSON.stringify({
   href: w.location.href
 });
 const before = signature();
-const result = w.Function(input.script)();
+const result = w.Function(input.script)(...(input.args || []));
 if (signature() !== before) throw new Error('Extractor changed the synthetic DOM or control state');
 process.stdout.write(JSON.stringify(result));
 dom.window.close();
@@ -318,3 +318,93 @@ def test_body_fallback_discloses_unverified_scope(extract):
     result = extract('<section><h1>Editor</h1><input id="listing-field" value="Synthetic listing"></section>')
     assert [field["id"] for field in result["fields"]] == ["listing-field"]
     assert "main_content_scope_unverified" in result["limitations"]
+
+
+def test_editor_identity_ignores_hidden_heading_descendants():
+    from quick_relist.hub_readonly import IDENTITY_SCRIPT
+    if shutil.which("node") is None:
+        pytest.skip("Optional Node/jsdom unavailable")
+    probe = subprocess.run(["node", "-e", "require.resolve('jsdom')"], capture_output=True, text=True)
+    if probe.returncode:
+        pytest.skip("Optional Node/jsdom unavailable")
+    html = """<h2><span style='display:none'>Edit listing - RXCU-12345 (</span>Edit listing - RXCU-99999 (Synthetic)</h2>
+    <main><h4><span aria-hidden='true'>Edit listing - RXCU-12345 (</span>Edit listing - RXCU-99999 (Synthetic)</h4></main>"""
+    run = subprocess.run(["node", "-e", NODE_RUNNER], input=json.dumps({"html": html, "url": BASE, "script": IDENTITY_SCRIPT, "args": ["RXCU12345"]}), capture_output=True, text=True, timeout=10, check=True)
+    result = json.loads(run.stdout)
+    assert result["outer_matches"] is False and result["inner_matches"] is False
+    assert result["outer_count"] == result["inner_count"] == 1
+
+
+def test_editor_identity_accepts_visible_hyphenated_reference():
+    from quick_relist.hub_readonly import IDENTITY_SCRIPT
+    if shutil.which("node") is None:
+        pytest.skip("Optional Node/jsdom unavailable")
+    probe = subprocess.run(["node", "-e", "require.resolve('jsdom')"], capture_output=True, text=True)
+    if probe.returncode:
+        pytest.skip("Optional Node/jsdom unavailable")
+    html = "<h2>Edit listing - <span>RXCU-12345</span> (Synthetic)</h2><main><h4>Edit listing - RXCU-12345 (Synthetic)</h4></main>"
+    run = subprocess.run(["node", "-e", NODE_RUNNER], input=json.dumps({"html": html, "url": BASE, "script": IDENTITY_SCRIPT, "args": ["RXCU12345"]}), capture_output=True, text=True, timeout=10, check=True)
+    result = json.loads(run.stdout)
+    assert result["outer_matches"] is True and result["inner_matches"] is True
+
+
+@pytest.mark.parametrize("wrapper", ["style='opacity:0'", "aria-hidden='true'", "style='visibility:hidden'"])
+def test_editor_identity_rejects_hidden_ancestor(wrapper):
+    from quick_relist.hub_readonly import IDENTITY_SCRIPT
+    if shutil.which("node") is None: pytest.skip("Optional Node/jsdom unavailable")
+    probe = subprocess.run(["node", "-e", "require.resolve('jsdom')"], capture_output=True, text=True)
+    if probe.returncode: pytest.skip("Optional Node/jsdom unavailable")
+    html = f"<section {wrapper}><h2>Edit listing - RXCU-12345 (Synthetic)</h2><main><h4>Edit listing - RXCU-12345 (Synthetic)</h4></main></section>"
+    run = subprocess.run(["node", "-e", NODE_RUNNER], input=json.dumps({"html": html, "url": BASE, "script": IDENTITY_SCRIPT, "args": ["RXCU12345"]}), capture_output=True, text=True, timeout=10, check=True)
+    result = json.loads(run.stdout)
+    assert result["outer_matches"] is False and result["inner_matches"] is False
+
+
+def test_only_exact_observed_country_selector_can_include_hidden_code(extract):
+    html = """<main><div><div role='combobox' id='mui-component-select-country_id'>Synthetic country</div>
+      <input id='country_id' name='country_id' aria-hidden='true' value='ZZ'></div>
+      <input id='secret' name='secret' aria-hidden='true' value='SYNTHETIC_SECRET'></main>"""
+    result = extract(html)
+    matches = [f for f in result['fields'] if f.get('name') == 'country_id']
+    assert len(matches) == 1
+    assert matches[0]['value'] == 'Synthetic country'
+    assert matches[0]['selected_options'] == [{'value': 'ZZ', 'text': 'Synthetic country'}]
+    assert matches[0]['observed_hidden_country_code'] is True
+    assert 'SYNTHETIC_SECRET' not in json.dumps(result)
+    assert 'country_option_resolution_unverified' in result['limitations']
+
+
+@pytest.mark.parametrize('code', ['SYNTHETIC_SECRET', '123', ''])
+def test_country_hidden_input_does_not_admit_arbitrary_values(extract, code):
+    html = f"""<main><div><div role='combobox' id='mui-component-select-country_id'>Synthetic country</div>
+      <input id='country_id' name='country_id' aria-hidden='true' value='{code}'></div></main>"""
+    result = extract(html)
+    assert not [f for f in result['fields'] if f.get('name') == 'country_id']
+    assert 'country_selector_unresolved' in result['limitations']
+
+
+def test_country_exception_never_reads_password_control(extract):
+    html = """<main><div><div role='combobox' id='mui-component-select-country_id'>Synthetic country</div>
+      <input type='password' id='country_id' name='country_id' aria-hidden='true' value='ZZ'></div></main>"""
+    result = extract(html)
+    assert not [f for f in result['fields'] if f.get('name') == 'country_id']
+    assert 'country_selector_unresolved' in result['limitations']
+
+
+def test_row_binding_rejects_changed_reference_and_unrelated_link():
+    from quick_relist.hub_readonly import ROW_BINDING_SCRIPT
+    if shutil.which("node") is None: pytest.skip("Optional Node/jsdom unavailable")
+    probe = subprocess.run(["node", "-e", "require.resolve('jsdom')"], capture_output=True, text=True)
+    if probe.returncode: pytest.skip("Optional Node/jsdom unavailable")
+    # IDs passed only to this synthetic harness; production passes WebElements.
+    runner = NODE_RUNNER.replace("const result = w.Function(input.script)(...(input.args || []));",
+        "const args = input.ids.map(id => w.document.getElementById(id)); const result = w.Function(input.script)(...args, input.ref);")
+    html = "<div id='row'><p>Ref: RXCU-99999</p><div id='combo'></div></div><ul id='menu'><li><a id='link'>Edit Listing</a></li></ul>"
+    run = subprocess.run(["node", "-e", runner], input=json.dumps({"html": html, "url": BASE, "script": ROW_BINDING_SCRIPT, "ids": ["row", "combo", "menu", "link"], "ref": "RXCU12345"}), capture_output=True, text=True, timeout=10, check=True)
+    assert json.loads(run.stdout) is False
+    html = html.replace("RXCU-99999", "RXCU-12345")
+    run = subprocess.run(["node", "-e", runner], input=json.dumps({"html": html, "url": BASE, "script": ROW_BINDING_SCRIPT, "ids": ["row", "combo", "menu", "link"], "ref": "RXCU12345"}), capture_output=True, text=True, timeout=10, check=True)
+    assert json.loads(run.stdout) is True
+    html = html.replace("<li><a id='link'>Edit Listing</a></li>", "</ul><a id='link'>Edit Listing</a><ul>")
+    run = subprocess.run(["node", "-e", runner], input=json.dumps({"html": html, "url": BASE, "script": ROW_BINDING_SCRIPT, "ids": ["row", "combo", "menu", "link"], "ref": "RXCU12345"}), capture_output=True, text=True, timeout=10, check=True)
+    assert json.loads(run.stdout) is False
