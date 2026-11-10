@@ -1,0 +1,23 @@
+# Local data must never enter the public repository
+__pycache__/
+*.py[cod]
+*.sqlite*
+*.db
+*.log
+.env*
+.venv/
+venv/
+build/
+dist/
+*.spec
+*.zip
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.pdf
+*.jsonl
+browser-profile/
+media/
+data/
+.pytest_cache/

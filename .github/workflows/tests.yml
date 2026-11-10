@@ -1,0 +1,20 @@
+name: Synthetic tests
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pytest>=8,<9' 'selenium>=4.20,<5' 'PySide6-Essentials>=6.7,<7'
+      - run: python -m compileall -q quick_relist
+      - run: python -m pytest -q
