@@ -25,13 +25,11 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 
-# These are integration qualification assertions, not implemented Hub features.
-# A real connector must not enable them without independently reviewed tests.
-REQUIRED_ADAPTER_QUALIFICATIONS = frozenset({
-    "complete_capture", "account_binding", "required_address_schema",
-    "atomic_revision_preconditions", "idempotent_writes",
-    "authoritative_reconciliation", "portal_observations",
-})
+from .mutations import (
+    GatedHubAdapter, MutationContractError, MutationRequest,
+    REQUIRED_ADAPTER_QUALIFICATIONS, validate_receipt,
+    validate_reconciliation, validate_replacement,
+)
 
 
 class RelistError(Exception):
@@ -84,10 +82,16 @@ def _safe_error(exc: Exception) -> str:
 
 
 def _audit_details(details: dict) -> dict:
-    """Do not copy arbitrary adapter evidence, tokens or vendor payloads to logs."""
+    """Project trusted engine-authored audit data, never raw provider responses.
+
+    A key allowlist cannot establish provenance. Callers must first build the
+    action-specific projection from local context and validated outcomes.
+    """
     allowed = {"rxcu", "position", "source_id", "listing_id", "snapshot_hash", "media_count",
                "approval_hash", "archive_reason", "reason", "state", "status", "accepted",
-               "verified", "archived", "all_removed"}
+               "verified", "archived", "all_removed", "request_hash", "source_revision",
+               "listing_revision", "previous_source_revision", "previous_listing_revision",
+               "source_revision_hash", "listing_revision_hash", "evidence_present", "evidence_hash"}
     result = {key: value for key, value in details.items()
               if key in allowed and isinstance(value, (str, int, bool, type(None)))}
     if "address" in details:
@@ -98,6 +102,37 @@ def _audit_details(details: dict) -> dict:
     if "portal_targets" in details:
         result["portal_count"] = len(details["portal_targets"])
     return result
+
+
+def _provider_evidence(response: dict) -> dict:
+    """Retain only a digest of opaque provider evidence, even on safe outcomes."""
+    evidence = response.get("evidence")
+    return {"evidence_present": bool(evidence), "evidence_hash": _digest(evidence)}
+
+
+def _mutation_audit(request: MutationRequest, result: dict, state: str) -> dict:
+    """Call only after validating the bound receipt and required post-write reads."""
+    details = {"source_id": request.source_id, "request_hash": request.fingerprint,
+               "status": "applied", "state": state,
+               "source_revision_hash": _digest(result["source_revision"]),
+               **_provider_evidence(result)}
+    if request.action == "remove_portals":
+        details["all_removed"] = True
+    elif request.action == "archive":
+        details.update(archived=True, archive_reason=request.archive_reason)
+    elif request.action == "create":
+        # The new identity is required recovery data, not an arbitrary extra.
+        details.update(listing_id=result["listing_id"], listing_revision_hash=_digest(result["listing_revision"]))
+    elif request.action == "publish":
+        details.update(listing_id=request.replacement_id, accepted=True,
+                       listing_revision_hash=_digest(result["listing_revision"]))
+    return details
+
+
+def _reconciliation_audit(request: MutationRequest, response: dict) -> dict:
+    """Call only after validating the exact bound reconciliation/status enum."""
+    return {"source_id": request.source_id, "request_hash": request.fingerprint,
+            "status": response["status"], **_provider_evidence(response)}
 
 
 def normalize_rxcu(value: str) -> str:
@@ -120,7 +155,13 @@ class HubAdapter(Protocol):
     local_path points to a downloaded original, not a URL or thumbnail. The
     other keys (including order/captions/tags) are fidelity-critical metadata.
 
-    All writes receive a stable operation_id for provider-side idempotency.
+    All writes receive a deeply immutable MutationRequest with a stable operation
+    key, exact source/account identity and explicit expected revisions. No legacy
+    positional write signatures are accepted. Read-only validate_replacement
+    must verify the complete sale/rental plan with unchanged mandate dates before
+    any removal/archive/create. If renewal is necessary, an explicit business
+    decision is required; this workflow cannot approve or invent new dates.
+    All responses must be authoritative and bound to the request fingerprint.
     reconcile_action is READ ONLY and returns {status: applied|not_applied|
     unknown, evidence: str, result: dict}. not_applied must mean the original
     request cannot later commit, not merely that an eventually consistent read
@@ -148,28 +189,23 @@ class HubAdapter(Protocol):
 
     def authenticated_identity(self) -> dict: ...
     def read_source(self, rxcu: str) -> dict: ...
-    def remove_from_portals(self, source_id: str, operation_id: str) -> dict: ...
+    def validate_replacement(self, request: MutationRequest) -> dict: ...
+    def remove_from_portals(self, request: MutationRequest) -> dict: ...
     def portals_removed(self, source_id: str) -> dict: ...
-    def archive(self, source_id: str, reason: str, operation_id: str) -> dict: ...
+    def archive(self, request: MutationRequest) -> dict: ...
     def archive_status(self, source_id: str) -> dict: ...
-    def create_listing(self, snapshot: dict, corrected_address: dict, operation_id: str) -> dict: ...
+    def create_listing(self, request: MutationRequest) -> dict: ...
     def read_listing(self, listing_id: str) -> dict: ...
-    def publish(self, listing_id: str, operation_id: str) -> dict: ...
+    def publish(self, request: MutationRequest) -> dict: ...
     def publication_status(self, listing_id: str) -> dict: ...
-    def reconcile_action(self, action: str, operation_id: str, payload: dict) -> dict: ...
+    def reconcile_action(self, request: MutationRequest) -> dict: ...
 
 
-class UnavailableHubAdapter:
-    """Production default: cannot read or modify any listing."""
-    is_live_ready = False
-    reason = "Hub is not connected. A qualified live Hub adapter is required. No listing has been changed."
+class UnavailableHubAdapter(GatedHubAdapter):
+    """Production default: no provider, credentials, endpoints or live writes."""
 
-    def __getattr__(self, name: str):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        def unavailable(*args, **kwargs):
-            raise AdapterUnavailable(self.reason)
-        return unavailable
+    def __init__(self):
+        super().__init__()
 
 
 class Store:
@@ -196,7 +232,7 @@ class Store:
           position INTEGER NOT NULL, rxcu TEXT NOT NULL, state TEXT NOT NULL,
           source_id TEXT, snapshot_json TEXT, snapshot_hash TEXT, expected_revision TEXT,
           corrected_address_json TEXT, archive_reason TEXT, approved INTEGER NOT NULL DEFAULT 0,
-          approval_hash TEXT, new_listing_id TEXT, error TEXT,
+          approval_hash TEXT, new_listing_id TEXT, replacement_revision TEXT, error TEXT,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           UNIQUE(batch_id, position), UNIQUE(batch_id, rxcu));
         CREATE TABLE IF NOT EXISTS operations(
@@ -207,6 +243,13 @@ class Store:
           id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL REFERENCES jobs(id),
           operation_id TEXT, action TEXT NOT NULL, phase TEXT NOT NULL,
           details_json TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TRIGGER IF NOT EXISTS immutable_operation_request BEFORE UPDATE ON operations
+        WHEN NEW.id IS NOT OLD.id OR NEW.job_id IS NOT OLD.job_id
+          OR NEW.action IS NOT OLD.action OR NEW.payload_json IS NOT OLD.payload_json
+          OR NEW.previous_state IS NOT OLD.previous_state
+        BEGIN SELECT RAISE(ABORT, 'Operation request and identity are immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS immutable_operation_delete BEFORE DELETE ON operations
+        BEGIN SELECT RAISE(ABORT, 'Operation history cannot be deleted'); END;
         CREATE TRIGGER IF NOT EXISTS immutable_snapshot BEFORE UPDATE ON jobs
         WHEN OLD.snapshot_json IS NOT NULL AND (
           NEW.snapshot_json IS NOT OLD.snapshot_json OR NEW.snapshot_hash IS NOT OLD.snapshot_hash
@@ -219,6 +262,12 @@ class Store:
         CREATE TRIGGER IF NOT EXISTS immutable_job_delete BEFORE DELETE ON jobs
         BEGIN SELECT RAISE(ABORT, 'Workflow history cannot be deleted'); END;
         """)
+        # Additive migration: legacy jobs remain readable, but their old unbound
+        # operation requests cannot be dispatched/reconciled by the new contract.
+        self.conn.execute("BEGIN IMMEDIATE")
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(jobs)")}
+        if "replacement_revision" not in columns:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN replacement_revision TEXT")
         self.conn.commit()
 
     def close(self) -> None:
@@ -319,20 +368,29 @@ class Store:
 
 class Engine:
     ARCHIVE_REASONS = {"mandate_expired"}
+    ACTION_STATES = {"remove_portals": "ready", "archive": "portals_removed",
+                     "create": "archived", "publish": "fidelity_verified"}
     def __init__(self, store: Store, adapter: HubAdapter | None = None):
         self.store = store
         self.adapter = adapter if adapter is not None else UnavailableHubAdapter()
 
     def _ready(self):
         if getattr(self.adapter, "is_live_ready", False) is not True:
+            missing = getattr(self.adapter, "missing_capabilities", None)
+            if isinstance(missing, tuple) and all(isinstance(item, str) for item in missing):
+                raise AdapterUnavailable("Hub is not connected. Missing verified capabilities: " + ", ".join(missing) + ". No action was started.")
             raise AdapterUnavailable("Hub is not connected. A qualified live Hub adapter is required. No action was started.")
         qualified = getattr(self.adapter, "qualification", None)
-        if not isinstance(qualified, dict) or any(qualified.get(key) is not True for key in REQUIRED_ADAPTER_QUALIFICATIONS):
-            raise AdapterUnavailable("Hub connector qualification is incomplete. Atomic revision protection, complete capture, identity, address validation and safe recovery must be independently verified before live use.")
+        missing = sorted(key for key in REQUIRED_ADAPTER_QUALIFICATIONS
+                         if not isinstance(qualified, dict) or qualified.get(key) is not True)
+        if missing:
+            raise AdapterUnavailable("Hub connector qualification is incomplete. Missing independently verified capabilities: " + ", ".join(missing) + ". No action was started.")
 
     def _call(self, method: str, *args):
         try:
             return getattr(self.adapter, method)(*args)
+        except MutationContractError:
+            raise SafetyBlocked(f"Hub {method} did not satisfy the verified mutation contract. No new action may proceed without investigation.") from None
         except Exception:
             # Exception text can include record contents, credentials or URLs.
             # Do not persist or expose it through the UI or operation journal.
@@ -514,7 +572,7 @@ class Engine:
             raise OperationBusy("Finish or reconcile the earlier RXCU before changing this listing.")
         self._verify_files(job["snapshot"]["media_manifest"])
 
-    def _source_unchanged(self, job: dict, allow_revision_change=False) -> dict:
+    def _source_unchanged(self, job: dict, expected_revision: str | None = None) -> dict:
         current = self._call("read_source", job["rxcu"])
         self._validate_capture(current, job["rxcu"])
         if current["source_id"] != job["source_id"]:
@@ -524,9 +582,11 @@ class Engine:
         if current["required_address_fields"] != job["snapshot"]["required_address_fields"]:
             raise SafetyBlocked("The required address schema changed after capture. Review is required.")
         original = job["snapshot"]
-        if current["fields"] != original["fields"] or self._media_business(current["media_manifest"]) != self._media_business(original["media_manifest"]) or current["portal_targets"] != original["portal_targets"]:
+        if (_json(current["fields"]) != _json(original["fields"])
+                or _json(self._media_business(current["media_manifest"])) != _json(self._media_business(original["media_manifest"]))
+                or current["portal_targets"] != original["portal_targets"]):
             raise SafetyBlocked("The source listing or original media changed after capture. Stop and review the source.")
-        if not allow_revision_change and current["revision"] != job["expected_revision"]:
+        if current["revision"] != (expected_revision if expected_revision is not None else job["expected_revision"]):
             raise SafetyBlocked("The source revision changed outside the verified workflow.")
         return current
 
@@ -549,11 +609,20 @@ class Engine:
         listing = self._call("read_listing", job["new_listing_id"])
         if not isinstance(listing, dict) or listing.get("listing_id") != job["new_listing_id"] or listing.get("complete") is not True:
             raise SafetyBlocked("The recreated listing identity or full contents cannot be verified.")
+        if not isinstance(listing.get("revision"), str) or not listing["revision"] or listing["revision"] != job["replacement_revision"]:
+            raise SafetyBlocked("The recreated listing revision changed outside the verified workflow. Publication is blocked.")
+        with self.store._db_lock:
+            creation = self.store.conn.execute("SELECT id FROM operations WHERE job_id=? AND action='create' AND status='applied'", (job["id"],)).fetchone()
+        if (creation is None or listing.get("source_id") != job["source_id"]
+                or listing.get("source_snapshot_hash") != job["snapshot_hash"]
+                or listing.get("creation_operation_id") != creation["id"]):
+            raise SafetyBlocked("The recreated listing is not bound to the exact captured source and creation operation.")
         if listing.get("account_identity") != job["snapshot"]["account_identity"]:
             raise SafetyBlocked("The recreated listing account or agency does not match the captured source. Publication is blocked.")
         expected_fields = deepcopy(job["snapshot"]["fields"])
         expected_fields["address"] = job["corrected_address"]
-        if listing.get("fields") != expected_fields or self._media_business(listing.get("media_manifest", [])) != self._media_business(job["snapshot"]["media_manifest"]):
+        if (_json(listing.get("fields")) != _json(expected_fields)
+                or _json(self._media_business(listing.get("media_manifest", []))) != _json(self._media_business(job["snapshot"]["media_manifest"]))):
             raise SafetyBlocked("Recreated listing fidelity failed. Publication is blocked.")
         if listing.get("portal_targets") != job["snapshot"]["portal_targets"]:
             raise SafetyBlocked("Recreated listing portal targets do not match the approved original.")
@@ -561,62 +630,109 @@ class Engine:
             raise SafetyBlocked("The new listing must remain an unpublished draft until the fidelity check passes.")
         return listing
 
-    def _begin(self, job: dict, action: str, payload: dict) -> str:
-        with self.store._tx() as db:
-            existing = db.execute("SELECT * FROM operations WHERE job_id=? AND action=?", (job["id"], action)).fetchone()
-            if existing:
-                if existing["status"] != "not_applied" or existing["payload_json"] != _json(payload):
-                    raise SafetyBlocked("This action already has an outcome or an unresolved intention. Reconcile it first.")
-                op_id = existing["id"]
-                db.execute("UPDATE operations SET status='uncertain',result_json=NULL WHERE id=?", (op_id,))
-            else:
-                op_id = uuid4().hex
-                db.execute("INSERT INTO operations(id,job_id,action,payload_json,previous_state,status) VALUES(?,?,?,?,?,?)",
-                           (op_id, job["id"], action, _json(payload), job["state"], "uncertain"))
-            self.store._event(db, job["id"], action, "intended", payload, op_id)
-            # This state is committed BEFORE any external write. Process death
-            # at any subsequent instruction leaves an explicit uncertainty.
-            self.store._update(db, job["id"], state="needs_reconciliation", error="Action outcome is not yet recorded. Reconcile before continuing.")
-        return op_id
+    @staticmethod
+    def _build_request(job: dict, action: str, operation_id: str) -> MutationRequest:
+        return MutationRequest(
+            action=action, operation_id=operation_id,
+            account_id=job["snapshot"]["account_identity"]["account_id"],
+            agency_id=job["snapshot"]["account_identity"]["agency_id"],
+            source_id=job["source_id"], source_rxcu=job["rxcu"],
+            expected_source_revision=job["expected_revision"],
+            portal_targets=tuple(job["snapshot"]["portal_targets"]),
+            snapshot_json=_json(job["snapshot"]), snapshot_hash=job["snapshot_hash"],
+            approved_address_json=_json(job["corrected_address"]), approval_hash=job["approval_hash"],
+            archive_reason=job["archive_reason"],
+            replacement_id=job["new_listing_id"] if action == "publish" else None,
+            expected_replacement_revision=job["replacement_revision"] if action == "publish" else None,
+        )
 
-    def _finish(self, job: dict, action: str, op_id: str, result: dict, reconciled=False):
+    def _request(self, job: dict, action: str) -> MutationRequest:
+        with self.store._db_lock:
+            existing = self.store.conn.execute("SELECT * FROM operations WHERE job_id=? AND action=?", (job["id"], action)).fetchone()
+        operation_id = existing["id"] if existing else uuid4().hex
+        try:
+            request = self._build_request(job, action, operation_id)
+            if job["state"] != self.ACTION_STATES.get(action):
+                raise SafetyBlocked("The requested mutation does not match the workflow stage.")
+            if existing:
+                saved = MutationRequest.from_dict(json.loads(existing["payload_json"]))
+                if existing["status"] != "not_applied" or saved != request or existing["previous_state"] != job["state"]:
+                    raise SafetyBlocked("This action already has an outcome or a different/unresolved intention. Reconcile it first.")
+            return request
+        except (MutationContractError, ValueError, TypeError) as exc:
+            raise SafetyBlocked("The mutation request is incomplete, changed or uses a legacy unbound format. Manual investigation is required.") from exc
+
+    def _begin(self, job: dict, request: MutationRequest):
+        payload = request.to_dict()
+        with self.store._tx() as db:
+            existing = db.execute("SELECT * FROM operations WHERE job_id=? AND action=?", (job["id"], request.action)).fetchone()
+            if existing:
+                if existing["id"] != request.operation_id or existing["status"] != "not_applied" or existing["payload_json"] != _json(payload):
+                    raise SafetyBlocked("This action already has an outcome or an unresolved intention. Reconcile it first.")
+                db.execute("UPDATE operations SET status='uncertain',result_json=NULL WHERE id=?", (request.operation_id,))
+            else:
+                db.execute("INSERT INTO operations(id,job_id,action,payload_json,previous_state,status) VALUES(?,?,?,?,?,?)",
+                           (request.operation_id, job["id"], request.action, _json(payload), job["state"], "uncertain"))
+            self.store._event(db, job["id"], request.action, "intended", {"source_id": request.source_id, "request_hash": request.fingerprint}, request.operation_id)
+            # Commit before dispatch. A process death at any later instruction
+            # leaves an immutable request and an explicit uncertain outcome.
+            self.store._update(db, job["id"], state="needs_reconciliation", error="Action outcome is not yet recorded. Reconcile before continuing.")
+
+    def _finish(self, job: dict, request: MutationRequest, result: dict, reconciled=False):
+        try:
+            validate_receipt(request, result)
+        except MutationContractError as exc:
+            raise SafetyBlocked("The operation receipt is not authoritative for this exact request. Reconciliation is required.") from exc
+        action = request.action
         values = {"error": None}
         if action == "remove_portals":
             self._removed(job)
-            values.update(state="portals_removed", expected_revision=self._source_unchanged(job, True)["revision"])
+            self._source_unchanged(job, result["source_revision"])
+            values.update(state="portals_removed", expected_revision=result["source_revision"])
         elif action == "archive":
             self._removed(job)
             self._archived(job)
-            values.update(state="archived", expected_revision=self._source_unchanged(job, True)["revision"])
+            self._source_unchanged(job, result["source_revision"])
+            values.update(state="archived", expected_revision=result["source_revision"])
         elif action == "create":
-            new_id = result.get("listing_id") if isinstance(result, dict) else None
-            if not isinstance(new_id, str) or not new_id or new_id == job["source_id"]:
-                raise SafetyBlocked("Creation returned no distinct verified new listing identity. Reconcile before retrying.")
+            new_id = result["listing_id"]
             with self.store._db_lock:
                 if self.store.conn.execute("SELECT 1 FROM jobs WHERE (new_listing_id=? OR source_id=?) AND id<>?", (new_id, new_id, job["id"])).fetchone():
                     raise SafetyBlocked("Creation identity conflicts with another tracked listing.")
-            # Persist identity before making any further network read.
-            values.update(state="created", new_listing_id=new_id)
+            # Persist identity/revision before any further network read. Fidelity
+            # and exact source lineage are checked on the next explicit Advance.
+            values.update(state="created", new_listing_id=new_id, replacement_revision=result["listing_revision"])
         elif action == "publish":
-            if result.get("accepted") is not True or result.get("listing_id") != job["new_listing_id"] or not result.get("evidence"):
-                raise SafetyBlocked("Publication acceptance has not been confirmed for the exact recreated listing.")
-            values.update(state="publication_pending")
+            values.update(state="publication_pending", replacement_revision=result["listing_revision"])
+        if action != "create":
+            self._identity(request.account_identity)
+        audit = _mutation_audit(request, result, values["state"])
         with self.store._tx() as db:
-            db.execute("UPDATE operations SET status='applied',result_json=? WHERE id=?", (_json(_audit_details(result)), op_id))
+            db.execute("UPDATE operations SET status='applied',result_json=? WHERE id=?", (_json(_audit_details(audit)), request.operation_id))
             self.store._update(db, job["id"], **values)
-            self.store._event(db, job["id"], action, "reconciled_applied" if reconciled else "confirmed", result, op_id)
+            self.store._event(db, job["id"], action, "reconciled_applied" if reconciled else "confirmed", audit, request.operation_id)
 
-    def _write(self, job: dict, action: str, payload: dict, call):
-        self._identity(job["snapshot"]["account_identity"])
-        operation_id = self._begin(job, action, payload)
+    def _write(self, job: dict, action: str, method: str):
+        request = self._request(job, action)
+        if action in {"remove_portals", "archive", "create"}:
+            validation = self._call("validate_replacement", request)
+            try:
+                validate_replacement(request, validation)
+            except MutationContractError as exc:
+                raise SafetyBlocked("A verified strictly read-only replacement validation is required before any removal, archive or creation.") from exc
+            if validation["decision_required"]:
+                raise SafetyBlocked("Replacement requires an explicit business decision, such as approved mandate signed/expiry dates. No mandate dates were changed and no new write was started.")
+            if not validation["valid"]:
+                raise SafetyBlocked("The exact replacement data, including unchanged mandate dates, is not valid for the required sale/rental form. No new write was started.")
+        self._verify_files(request.snapshot["media_manifest"])
+        self._identity(request.account_identity)
+        self._begin(job, request)
         try:
-            result = call(operation_id)
-            if not isinstance(result, dict):
-                raise SafetyBlocked("Adapter returned no structured operation receipt.")
-            self._finish(job, action, operation_id, result)
+            result = self._call(method, request)
+            self._finish(job, request, result)
         except Exception as exc:
             with self.store._tx() as db:
-                self.store._event(db, job["id"], action, "uncertain", {"error": _safe_error(exc)}, operation_id)
+                self.store._event(db, job["id"], action, "uncertain", {}, request.operation_id)
                 self.store._update(db, job["id"], error="Outcome uncertain. Reconcile; do not repeat the action.")
             raise SafetyBlocked("Action outcome is uncertain. Reconcile before continuing.") from exc
 
@@ -634,17 +750,14 @@ class Engine:
                     raise SafetyBlocked("Capture and approve the corrected address first.")
                 self._source_unchanged(job)
                 if state == "ready":
-                    self._write(job, "remove_portals", {"source_id": job["source_id"], "portal_targets": job["snapshot"]["portal_targets"]},
-                                lambda op: self._call("remove_from_portals", job["source_id"], op))
+                    self._write(job, "remove_portals", "remove_from_portals")
                 elif state == "portals_removed":
                     self._removed(job)
-                    self._write(job, "archive", {"source_id": job["source_id"], "reason": job["archive_reason"]},
-                                lambda op: self._call("archive", job["source_id"], job["archive_reason"], op))
+                    self._write(job, "archive", "archive")
                 elif state == "archived":
                     self._removed(job)
                     self._archived(job)
-                    self._write(job, "create", {"source_id": job["source_id"], "snapshot_hash": job["snapshot_hash"], "address": job["corrected_address"]},
-                                lambda op: self._call("create_listing", deepcopy(job["snapshot"]), deepcopy(job["corrected_address"]), op))
+                    self._write(job, "create", "create_listing")
                 elif state == "created":
                     self._fidelity(job)
                     with self.store._tx() as db:
@@ -654,8 +767,7 @@ class Engine:
                     self._removed(job)
                     self._archived(job)
                     self._fidelity(job)  # Recheck immediately before publication.
-                    self._write(job, "publish", {"listing_id": job["new_listing_id"], "approval_hash": job["approval_hash"]},
-                                lambda op: self._call("publish", job["new_listing_id"], op))
+                    self._write(job, "publish", "publish")
                 else:
                     self._check_publication(job)
             except Exception as exc:
@@ -678,8 +790,11 @@ class Engine:
         states = result.get("portals", {})
         targets = set(job["snapshot"]["portal_targets"])
         live = result.get("state") == "live" and result.get("verified") is True and bool(result.get("evidence")) and isinstance(states, dict) and set(states) == targets and all(s == "live" for s in states.values())
+        audit = {"listing_id": job["new_listing_id"], "state": "live" if live else "pending",
+                 "verified": live, "portal_targets": job["snapshot"]["portal_targets"],
+                 **_provider_evidence(result)}
         with self.store._tx() as db:
-            self.store._event(db, job["id"], "publication_status", "live" if live else "pending", result)
+            self.store._event(db, job["id"], "publication_status", "live" if live else "pending", audit)
             self.store._update(db, job["id"], state="live" if live else "publication_pending", error=None if live else "Publication is not yet verified live on every target portal.")
 
     def reconcile(self, job_id: str) -> dict:
@@ -698,22 +813,34 @@ class Engine:
             if row is None:
                 raise SafetyBlocked("No uncertain operation receipt was found. Do not repeat any action.")
             operation = dict(row)
-            payload = json.loads(operation["payload_json"])
             try:
                 self._guard(job)
-                evidence = self._call("reconcile_action", operation["action"], operation["id"], deepcopy(payload))
-                if not isinstance(evidence, dict) or not evidence.get("evidence"):
-                    raise SafetyBlocked("Reconciliation returned no authoritative evidence.")
+                try:
+                    request = MutationRequest.from_dict(json.loads(operation["payload_json"]))
+                    expected = self._build_request(job, operation["action"], operation["id"])
+                    if request != expected or operation["previous_state"] != self.ACTION_STATES.get(request.action):
+                        raise MutationContractError("Stored operation does not match this job, approval and pre-write revision context.")
+                except (MutationContractError, ValueError, TypeError) as exc:
+                    raise SafetyBlocked("This legacy or invalid operation has no immutable bound request. Manual investigation is required; it was not retried.") from exc
+                evidence = self._call("reconcile_action", request)
+                try:
+                    validate_reconciliation(request, evidence)
+                except MutationContractError as exc:
+                    raise SafetyBlocked("Reconciliation returned no authoritative evidence for the exact request, or cannot rule out a late commit.") from exc
+                audit = _reconciliation_audit(request, evidence)
                 with self.store._tx() as db:
-                    self.store._event(db, job_id, operation["action"], "reconciliation_observed", evidence, operation["id"])
+                    self.store._event(db, job_id, operation["action"], "reconciliation_observed", audit, operation["id"])
                 if evidence.get("status") == "applied":
-                    self._finish(job, operation["action"], operation["id"], evidence.get("result", {}), reconciled=True)
+                    self._finish(job, request, evidence["result"], reconciled=True)
                 elif evidence.get("status") == "not_applied":
-                    self._source_unchanged(job)
+                    self._source_unchanged(job, request.expected_source_revision)
+                    if request.action == "publish":
+                        self._fidelity({**job, "state": "fidelity_verified"})
+                    self._identity(request.account_identity)
                     with self.store._tx() as db:
-                        db.execute("UPDATE operations SET status='not_applied',result_json=? WHERE id=?", (_json(_audit_details(evidence)), operation["id"]))
+                        db.execute("UPDATE operations SET status='not_applied',result_json=? WHERE id=?", (_json(_audit_details(audit)), operation["id"]))
                         self.store._update(db, job_id, state=operation["previous_state"], error="Confirmed not applied. An explicit Advance may retry with the same operation key.")
-                        self.store._event(db, job_id, operation["action"], "reconciled_not_applied", evidence, operation["id"])
+                        self.store._event(db, job_id, operation["action"], "reconciled_not_applied", audit, operation["id"])
                 else:
                     raise SafetyBlocked("The action remains uncertain. No retry is allowed.")
             except Exception as exc:

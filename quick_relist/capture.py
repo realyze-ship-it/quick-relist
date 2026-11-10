@@ -15,7 +15,8 @@ Returned business data may be private. Keep it in memory or protected local
 storage; do not log it. No browser storage, cookies, network payloads, arbitrary
 hidden fields, password fields, OTP fields or unsanitized rich HTML are inspected.
 Only allowlisted business-selector codes paired with visible controls are read
-from the observed hidden native selection inputs.
+from the observed hidden native selection inputs. The five supported segmented
+date controls retain separately observed raw inputs and visible date parts.
 There is deliberately no persistence, telemetry, or credential handling here.
 """
 from __future__ import annotations
@@ -27,6 +28,8 @@ import json
 import re
 from typing import Any
 from urllib.parse import urlsplit
+
+from .date_capture import DATE_CAPTURE_HELPERS, is_segmented_date_record, segmented_date_record_valid
 
 SCHEMA_VERSION = "hub-visible-capture/v1"
 _URLISH = re.compile(r"(?:https?://|www\.|/)[^\s<>\"']+|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+(?:[/?#][^\s<>\"']*)|(?:data|javascript):[^\s<>\"']+", re.IGNORECASE)
@@ -143,7 +146,7 @@ return (() => {
     const key = [el.name, el.id, el.autocomplete, el.getAttribute('aria-label')].join(' ');
     return visible(el) && !sensitiveContext(el) && !['hidden', 'password', 'file', 'submit', 'button', 'reset', 'image'].includes(type) && !secret.test(key);
   };
-  const textOf = el => {
+  const textWithin = (el, acceptsParent) => {
     if (!el) return '';
     const parts = [];
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -151,6 +154,7 @@ return (() => {
     let length = 0;
     while ((node = walker.nextNode())) {
       const p = node.parentElement;
+      if (!acceptsParent(p)) continue;
       if (!visible(p) || p.closest('script,style,noscript,template,input,textarea,select,[hidden],[aria-hidden="true"]')) continue;
       if (sensitiveContext(p)) continue;
       const text = node.textContent || '';
@@ -160,6 +164,7 @@ return (() => {
     }
     return cut(parts.join(' ').replace(/\s+/g, ' ').trim());
   };
+  const textOf = el => textWithin(el, () => true);
   const labelFor = el => {
     if (el.getAttribute('aria-label')) return cut(el.getAttribute('aria-label'));
     const ids = el.getAttribute('aria-labelledby');
@@ -186,9 +191,10 @@ return (() => {
     }
     return cut(raw);
   };
+  /* __SEGMENTED_DATE_CAPTURE_HELPERS__ */
   const fieldsFor = root => {
     const fields = limited(root.querySelectorAll('input,select,textarea'), 2000)
-      .filter(safeControl).map((el, index) => ({
+      .filter(el => !isSegmentedDateControl(el) && safeControl(el)).map((el, index) => ({
         dom_order: index, tag: el.tagName.toLowerCase(), type: el.type || '',
         id: cut(el.id), name: cut(el.name), label: labelFor(el), section: scopeFor(el),
         value: fieldValue(el), checked: ['checkbox', 'radio'].includes(el.type) ? el.checked : null,
@@ -223,6 +229,7 @@ return (() => {
         limitations.add(name === 'country_id' ? 'country_selector_unresolved' : 'business_selector_unresolved');
       }
     }
+    fields.push(...dateFieldsFor(root, fields.length));
     return fields;
   };
   const escapeText = text => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -295,9 +302,137 @@ return (() => {
     title: textOf(el.querySelector('legend,h1,h2,h3,h4,h5,h6,[role="heading"]')), text: textOf(el)}));
   const lists = limited(root.querySelectorAll('ul,ol,dl,[role="list"]'), 300).filter(visible).map((el, index) => ({dom_order: index,
     section: scopeFor(el), items: limited(el.children, 2000).filter(visible).map(textOf)}));
-  const tables = limited(root.querySelectorAll('table,[role="table"],[role="grid"]'), 100).filter(visible).map((el, index) => ({dom_order: index,
-    section: scopeFor(el), rows: limited(el.querySelectorAll('tr,[role="row"]'), 2000).filter(visible).map(row =>
-      limited(row.querySelectorAll('th,td,[role="cell"],[role="gridcell"],[role="columnheader"]'), 100).filter(visible).map(textOf))}));
+  const tableSelector = 'table,[role="table"],[role="grid"]';
+  const rowSelector = 'tr,[role="row"]';
+  const cellSelector = 'th,td,[role="cell"],[role="gridcell"],[role="columnheader"],[role="rowheader"]';
+  const tables = limited(root.querySelectorAll(tableSelector), 100)
+    .filter(el => visible(el) && !sensitiveContext(el)).map((el, index) => {
+      const notes = new Set(['table_semantics_unverified', 'grid_positions_not_inferred',
+        'implicit_header_associations_not_inferred']);
+      const take = (items, limit) => {
+        const values = Array.from(items);
+        if (values.length > limit) notes.add('table_items_truncated');
+        return limited(values, limit);
+      };
+      const attr = (node, name) => node.hasAttribute(name) ? cut(node.getAttribute(name), 1000) : null;
+      const ownTable = node => node.closest(tableSelector) === el;
+      const ownRow = row => {
+        const ancestor = row.parentElement.closest(rowSelector);
+        return ownTable(row) && (!ancestor || !ownTable(ancestor));
+      };
+      // Nested tables get their own record. They never contribute text, rows,
+      // cells, actions or chips to a containing table/cell's observations.
+      const nested = el.querySelector(tableSelector);
+      if (nested) notes.add('nested_table_content_excluded');
+      const candidateRows = Array.from(el.querySelectorAll(rowSelector)).filter(ownTable);
+      const nestedRows = candidateRows.some(row => !ownRow(row));
+      if (nestedRows) notes.add('nested_row_structure_unsupported');
+      const rowNodes = take(candidateRows.filter(ownRow), 2000);
+      const observations = [];
+      const headerNodes = [];
+      let native = el.tagName === 'TABLE' && !nestedRows;
+      if (el.tagName !== 'TABLE') notes.add('non_native_table_structure_unsupported');
+      for (const [rowOrder, row] of rowNodes.entries()) {
+        if (!visible(row) || sensitiveContext(row)) { notes.add('table_rows_omitted'); continue; }
+        if (row.tagName !== 'TR') native = false;
+        const ownCell = node => {
+          const ancestor = node.parentElement.closest(cellSelector);
+          return ownTable(node) && node.closest(rowSelector) === row
+            && (!ancestor || !ownTable(ancestor) || ancestor.closest(rowSelector) !== row);
+        };
+        const candidateCells = Array.from(row.querySelectorAll(cellSelector)).filter(node => ownTable(node)
+          && node.closest(rowSelector) === row);
+        if (candidateCells.some(node => !ownCell(node))) {
+          notes.add('nested_cell_structure_unsupported'); native = false;
+        }
+        const cellNodes = take(candidateCells.filter(ownCell), 100);
+        const cells = [];
+        for (const [cellOrder, cell] of cellNodes.entries()) {
+          if (!visible(cell) || sensitiveContext(cell)) { notes.add('table_cells_omitted'); continue; }
+          const isNative = ['TH', 'TD'].includes(cell.tagName);
+          if (!isNative) native = false;
+          const inCell = node => ownTable(node) && node.closest(rowSelector) === row
+            && node.closest(cellSelector) === cell;
+          const cellText = node => textWithin(node, inCell);
+          const visibleLocal = node => inCell(node) && visible(node) && !sensitiveContext(node);
+          const actionLabel = node => {
+            if (node.hasAttribute('aria-label')) return cut(node.getAttribute('aria-label'), 1000);
+            const ids = (node.getAttribute('aria-labelledby') || '').trim().split(/\s+/).filter(Boolean);
+            if (ids.length) {
+              const labels = take(ids, 100).map(id => document.getElementById(id));
+              if (labels.length === ids.length && labels.every(label => label && visibleLocal(label))) {
+                return cut(labels.map(cellText).join(' ').trim(), 1000);
+              }
+              notes.add('table_action_label_relationship_unresolved');
+            }
+            return cut(cellText(node), 1000);
+          };
+          const actions = take(Array.from(cell.querySelectorAll('button,a,[role="button"]'))
+            .filter(node => visibleLocal(node) && !node.parentElement.closest('button,a,[role="button"]')), 100)
+            .map(node => ({tag: node.tagName.toLowerCase(), role: attr(node, 'role'), label: actionLabel(node),
+              disabled: typeof node.disabled === 'boolean' ? node.disabled : null,
+              aria_disabled: attr(node, 'aria-disabled')}));
+          // Only this recognizable chip root is observed. No status is derived
+          // from a chip's text, colour, row width or proximity to another row.
+          const chips = take(Array.from(cell.querySelectorAll('.MuiChip-root'))
+            .filter(node => visibleLocal(node) && !node.parentElement.closest('.MuiChip-root')), 100)
+            .map(node => ({text: cellText(node)}));
+          if (chips.length) notes.add('chip_detection_limited_to_mui_roots');
+          const headerIDs = take((cell.getAttribute('headers') || '').trim().split(/\s+/).filter(Boolean), 100);
+          const record = {dom_order: cellOrder, tag: cell.tagName.toLowerCase(), role: attr(cell, 'role'),
+            id: attr(cell, 'id'), text: cellText(cell),
+            rowspan_attribute: attr(cell, 'rowspan'), rowspan_property: isNative ? cell.rowSpan : null,
+            colspan_attribute: attr(cell, 'colspan'), colspan_property: isNative ? cell.colSpan : null,
+            scope_attribute: attr(cell, 'scope'), scope_property: isNative ? cut(cell.scope, 1000) : null,
+            headers_attribute: attr(cell, 'headers'), headers_property: isNative ? cut(cell.headers, 1000) : null,
+            header_ids: headerIDs.map(id => cut(id, 1000)), header_refs: [], actions, chips};
+          if (isNative && (cell.rowSpan !== 1 || cell.colSpan !== 1)) notes.add('table_spans_present');
+          if (isNative && ['rowspan', 'colspan'].some(name => cell.hasAttribute(name)
+              && !/^[0-9]+$/.test(cell.getAttribute(name)))) notes.add('table_span_attribute_invalid');
+          cells.push(record);
+          headerNodes.push({node: cell, record, rowOrder, rawHeaderIDs: headerIDs});
+        }
+        const group = row.parentElement;
+        observations.push({dom_order: rowOrder, tag: row.tagName.toLowerCase(), role: attr(row, 'role'),
+          row_group_tag: group && ['THEAD', 'TBODY', 'TFOOT'].includes(group.tagName) ? group.tagName.toLowerCase() : null,
+          cells});
+      }
+      // Explicit headers IDREFs are retained, never turned into grid positions
+      // or implicit/portal associations. A reference can point only to a unique
+      // captured native header in this table; even that is not semantic proof.
+      const byID = new Map();
+      for (const item of headerNodes) {
+        if (!item.node.id) continue;
+        const matches = byID.get(item.node.id) || [];
+        matches.push(item); byID.set(item.node.id, matches);
+      }
+      for (const item of headerNodes) {
+        item.record.header_refs = item.rawHeaderIDs.map(rawID => {
+          const id = cut(rawID, 1000);
+          const matches = byID.get(rawID) || [];
+          const target = matches.length === 1 ? matches[0] : null;
+          if (target && rawID === id && target.node.tagName === 'TH' && target.record.id === id
+              && document.getElementById(rawID) === target.node) {
+            return {id, status: 'observed_header', row_dom_order: target.rowOrder,
+              cell_dom_order: target.record.dom_order};
+          }
+          notes.add('explicit_header_relationship_unresolved');
+          return {id, status: 'unresolved', row_dom_order: null, cell_dom_order: null};
+        });
+      }
+      if (new Set(observations.map(row => row.cells.length)).size > 1) notes.add('table_row_cell_counts_vary');
+      const status = el.tagName !== 'TABLE' ? 'unsupported_non_native'
+        : native ? 'observed_native' : 'ambiguous_mixed';
+      if (status === 'ambiguous_mixed') notes.add('mixed_table_structure_unsupported');
+      const captions = take(Array.from(el.children).filter(node => node.tagName === 'CAPTION'
+        && visible(node) && !sensitiveContext(node)), 100);
+      for (const note of notes) limitations.add(note);
+      return {dom_order: index, section: scopeFor(el),
+        rows: observations.map(row => row.cells.map(cell => cell.text)),
+        structure: {schema_version: 'table-dom/v1', tag: el.tagName.toLowerCase(), role: attr(el, 'role'),
+          captions: captions.map(node => textWithin(node, ownTable)), status, mapping_verified: false,
+          complete: false, rows: observations, limitations: Array.from(notes)}};
+    });
   const referenceFor = value => {
     if (!value) return null;
     try {
@@ -343,7 +478,7 @@ return (() => {
   return {href, ready_state: document.readyState, fields: fieldsFor(root), rich_text: richFor(root), dialogs,
     sections, lists, tables, media, editor_links, discovery, limitations: Array.from(limitations)};
 })();
-"""
+""".replace("/* __SEGMENTED_DATE_CAPTURE_HELPERS__ */", DATE_CAPTURE_HELPERS)
 
 _BASE_BLINDSPOTS = (
     ("partial_not_backup", "Visible DOM observations are not a complete listing backup and cannot authorize relisting."),
@@ -357,7 +492,7 @@ _BASE_BLINDSPOTS = (
     ("portal_status_unverified", "Visible portal controls do not independently verify saved targets or live publication status."),
     ("async_state_unverified", "Asynchronous, lazy-loaded, collapsed, off-screen and paginated content may be missing or stale."),
     ("revision_unverified", "These observations are not an atomic server revision and may differ between pages or capture times."),
-    ("sensitive_controls_omitted", "Hidden controls are excluded except the narrowly allowlisted, structurally matched business-selector codes observed next to visible Hub controls. Password, OTP, file and credential-like controls, browser secrets and recognized URL query/fragment data are deliberately excluded. Unlabelled secrets embedded in ordinary business prose cannot be exhaustively detected."),
+    ("sensitive_controls_omitted", "Hidden controls are excluded except narrowly allowlisted, structurally matched business-selector codes and the raw inputs of five supported visible segmented date controls. Password, OTP, file and credential-like controls, browser secrets and recognized URL query/fragment data are deliberately excluded. Unlabelled secrets embedded in ordinary business prose cannot be exhaustively detected."),
     ("address_schema_unverified", "Address fields and autocomplete selections have not been mapped or validated against the required Hub schema."),
 )
 _PAYLOAD_LISTS = ("fields", "rich_text", "dialogs", "sections", "lists", "tables", "media", "editor_links", "discovery", "limitations")
@@ -365,6 +500,92 @@ _PAYLOAD_LISTS = ("fields", "rich_text", "dialogs", "sections", "lists", "tables
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def _validate_table_structure(table: dict) -> None:
+    """Validate the additive observation without requiring it on older captures.
+
+    Coordinates are DOM sequence numbers only. They are never interpreted as
+    grid columns, portal assignments, saved values or header semantics.
+    """
+    if "structure" not in table:
+        return
+
+    def fail():
+        raise CaptureReadError("The editor returned malformed table observations.")
+
+    def strings(value, limit):
+        return isinstance(value, list) and len(value) <= limit and all(isinstance(x, str) for x in value)
+
+    def optional_string(value):
+        return value is None or isinstance(value, str)
+
+    structure = table["structure"]
+    if (not isinstance(structure, dict) or structure.get("schema_version") != "table-dom/v1"
+            or not isinstance(structure.get("status"), str)
+            or structure["status"] not in {"observed_native", "unsupported_non_native", "ambiguous_mixed"}
+            or structure.get("mapping_verified") is not False or structure.get("complete") is not False
+            or not isinstance(structure.get("tag"), str) or not optional_string(structure.get("role"))
+            or not strings(structure.get("captions"), 100) or not strings(structure.get("limitations"), 100)):
+        fail()
+    rows = structure.get("rows")
+    if not isinstance(rows, list) or len(rows) > 2000:
+        fail()
+    coordinates = {}
+    previous_row = -1
+    for row in rows:
+        if (not isinstance(row, dict) or type(row.get("dom_order")) is not int
+                or not previous_row < row["dom_order"] < 2000 or not isinstance(row.get("tag"), str)
+                or not optional_string(row.get("role"))
+                or not optional_string(row.get("row_group_tag"))
+                or row.get("row_group_tag") not in {None, "thead", "tbody", "tfoot"}
+                or not isinstance(row.get("cells"), list) or len(row["cells"]) > 100):
+            fail()
+        previous_row = row["dom_order"]
+        previous_cell = -1
+        for cell in row["cells"]:
+            if (not isinstance(cell, dict) or type(cell.get("dom_order")) is not int
+                    or not previous_cell < cell["dom_order"] < 100
+                    or not isinstance(cell.get("tag"), str) or not isinstance(cell.get("text"), str)
+                    or any(not optional_string(cell.get(key)) for key in
+                           ("role", "id", "rowspan_attribute", "colspan_attribute", "scope_attribute",
+                            "scope_property", "headers_attribute", "headers_property"))
+                    or not strings(cell.get("header_ids"), 100)):
+                fail()
+            previous_cell = cell["dom_order"]
+            for key, minimum, maximum in (("rowspan_property", 0, 65534), ("colspan_property", 1, 1000)):
+                value = cell.get(key)
+                if value is not None and (type(value) is not int or not minimum <= value <= maximum):
+                    fail()
+            for key in ("actions", "chips", "header_refs"):
+                if (not isinstance(cell.get(key), list) or len(cell[key]) > 100
+                        or any(not isinstance(item, dict) for item in cell[key])):
+                    fail()
+            if any(not isinstance(chip.get("text"), str) for chip in cell["chips"]):
+                fail()
+            for action in cell["actions"]:
+                if (not isinstance(action.get("tag"), str) or not isinstance(action.get("label"), str)
+                        or not optional_string(action.get("role")) or not optional_string(action.get("aria_disabled"))
+                        or action.get("disabled") is not None and type(action["disabled"]) is not bool):
+                    fail()
+            coordinates[(row["dom_order"], cell["dom_order"])] = cell
+    if table.get("rows") != [[cell["text"] for cell in row["cells"]] for row in rows]:
+        fail()
+    for cell in coordinates.values():
+        if cell["header_ids"] != [ref.get("id") for ref in cell["header_refs"]]:
+            fail()
+        for ref in cell["header_refs"]:
+            if ref.get("status") == "unresolved":
+                if ref.get("row_dom_order") is not None or ref.get("cell_dom_order") is not None:
+                    fail()
+            elif ref.get("status") == "observed_header":
+                if any(type(ref.get(key)) is not int for key in ("row_dom_order", "cell_dom_order")):
+                    fail()
+                target = coordinates.get((ref["row_dom_order"], ref["cell_dom_order"]))
+                if target is None or target["tag"] != "th" or target.get("id") != ref["id"]:
+                    fail()
+            else:
+                fail()
 
 
 def _validate_observation(raw: Any, expected_url: str) -> dict:
@@ -398,8 +619,13 @@ def _validate_observation(raw: Any, expected_url: str) -> dict:
             if field.get("type", "").lower() in {"password", "hidden", "file", "submit", "button", "reset", "image"} or _SECRET_FIELD.search(identifiers):
                 result["limitations"].append("sensitive_control_omitted")
                 continue
+            if is_segmented_date_record(field) and not segmented_date_record_valid(field):
+                raise CaptureReadError("The editor returned malformed segmented date observations.")
             safe.append(field)
         return safe
+
+    for table in result["tables"]:
+        _validate_table_structure(table)
 
     result["fields"] = clean_fields(result["fields"])
     for dialog in result["dialogs"]:

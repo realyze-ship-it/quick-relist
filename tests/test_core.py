@@ -8,6 +8,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from quick_relist.mutations import MutationRequest
+
 from quick_relist.core import (
     AdapterUnavailable, Engine, OperationBusy, SafetyBlocked, Store,
     UnavailableHubAdapter, ValidationError, VerificationUnavailable,
@@ -26,6 +28,16 @@ class SyntheticHub:
         self.listings = {}
         self.calls = []
         self.receipts = {}
+        self.requests = {}
+        self.not_applied = set()
+        self.removed_sources = set()
+        self.archived_sources = set()
+        self.validation_requests = []
+        self.uploads = {}
+        self.validation_valid = True
+        self.validation_decision_required = False
+        self.before_execute = None
+        self._lock = threading.RLock()
         self.portal_clear = True
         self.archive_verified = True
         self.live = False
@@ -64,64 +76,145 @@ class SyntheticHub:
     def read_source(self, rxcu):
         return deepcopy(self.source(rxcu))
 
-    def _record(self, action, operation_id, result):
-        self.calls.append((action, operation_id))
-        if self.fail_before == action:
-            self.fail_before = None
-            raise TimeoutError("Synthetic request was not applied")
-        if operation_id in self.receipts:
-            raise AssertionError("A successful operation was blindly repeated")
-        self.receipts[operation_id] = deepcopy(result)
-        if self.fail_after == action:
-            self.fail_after = None
-            raise TimeoutError("Synthetic response lost after apply")
-        if self.crash_after == action:
-            self.crash_after = None
-            raise SystemExit("Synthetic process death after apply")
-        return result
+    def _bound(self, request):
+        return {"operation_id": request.operation_id, "request_hash": request.fingerprint,
+                "action": request.action, "authoritative": True, "evidence": "Synthetic authoritative ledger"}
 
-    def remove_from_portals(self, source_id, operation_id):
-        return self._record("remove_portals", operation_id, {"source_id": source_id, "accepted": True})
+    def validate_replacement(self, request):
+        self.validation_requests.append(request)
+        return {**self._bound(request), "non_mutating": True, "verified": True,
+                "valid": self.validation_valid, "decision_required": self.validation_decision_required,
+                "mandate_policy": "preserve_exact_source"}
+
+    def _record(self, request, apply):
+        # This lock models a server transaction. No real Hub call exists here.
+        with self._lock:
+            action, operation_id = request.action, request.operation_id
+            self.calls.append((action, operation_id))
+            if operation_id in self.requests and self.requests[operation_id] != request:
+                raise AssertionError("Operation key changed its immutable request")
+            self.requests[operation_id] = request
+            if operation_id in self.receipts:
+                raise AssertionError("A successful operation was blindly repeated")
+            if self.fail_before == action:
+                self.fail_before = None
+                self.not_applied.add(operation_id)
+                raise TimeoutError("Synthetic request was not applied")
+            if self.before_execute:
+                hook, self.before_execute = self.before_execute, None
+                hook(request)
+            source = self.source(request.source_rxcu)
+            if (self.account_identity != request.account_identity
+                    or source["account_identity"] != request.account_identity
+                    or source["source_id"] != request.source_id
+                    or source["revision"] != request.expected_source_revision):
+                self.not_applied.add(operation_id)
+                raise RuntimeError("Synthetic atomic source/account/revision conflict")
+            if action != "remove_portals" and request.source_id not in self.removed_sources:
+                self.not_applied.add(operation_id)
+                raise RuntimeError("Synthetic atomic portal prerequisite conflict")
+            if action in {"create", "publish"} and request.source_id not in self.archived_sources:
+                self.not_applied.add(operation_id)
+                raise RuntimeError("Synthetic atomic archive prerequisite conflict")
+            if action == "publish":
+                listing = self.listings[request.replacement_id]
+                if (listing["revision"] != request.expected_replacement_revision or listing["state"] != "draft"
+                        or listing["account_identity"] != request.account_identity
+                        or listing["source_id"] != request.source_id
+                        or listing["source_snapshot_hash"] != request.snapshot_hash):
+                    self.not_applied.add(operation_id)
+                    raise RuntimeError("Synthetic atomic replacement conflict")
+            result = apply()
+            result = {**self._bound(request), "status": "applied", "account_identity": request.account_identity,
+                      "source_id": request.source_id, "previous_source_revision": request.expected_source_revision,
+                      "source_revision": source["revision"], **result}
+            self.receipts[operation_id] = deepcopy(result)
+            self.not_applied.discard(operation_id)
+            if self.fail_after == action:
+                self.fail_after = None
+                raise TimeoutError("Synthetic response lost after apply")
+            if self.crash_after == action:
+                self.crash_after = None
+                raise SystemExit("Synthetic process death after apply")
+            return result
+
+    def remove_from_portals(self, request):
+        def apply():
+            self.removed_sources.add(request.source_id)
+            self.source(request.source_rxcu)["revision"] = "r2"
+            return {"accepted": True}
+        return self._record(request, apply)
 
     def portals_removed(self, source_id):
-        return {"source_id": source_id, "verified": self.portal_clear, "all_removed": self.portal_clear,
+        clear = self.portal_clear and source_id in self.removed_sources
+        return {"source_id": source_id, "verified": clear, "all_removed": clear,
                 "portals": {"example-portal-a": "removed", "example-portal-b": "removed"}, "evidence": "Synthetic verified portal reads"}
 
-    def archive(self, source_id, reason, operation_id):
-        self.reason = reason
-        return self._record("archive", operation_id, {"source_id": source_id, "archived": True})
+    def archive(self, request):
+        def apply():
+            self.reason = request.archive_reason
+            self.archived_sources.add(request.source_id)
+            self.source(request.source_rxcu)["revision"] = "r3"
+            return {"archived": True, "archive_status": request.archive_status, "archive_reason": request.archive_reason}
+        return self._record(request, apply)
 
     def archive_status(self, source_id):
-        return {"source_id": source_id, "verified": self.archive_verified, "archived": self.archive_verified,
+        archived = self.archive_verified and source_id in self.archived_sources
+        return {"source_id": source_id, "verified": archived, "archived": archived,
                 "status": "cancelled", "reason": getattr(self, "reason", None), "evidence": "Synthetic archive record"}
 
-    def create_listing(self, snapshot, corrected_address, operation_id):
-        new_id = self.create_id or "new-" + snapshot["rxcu"]
-        fields = deepcopy(snapshot["fields"])
-        fields["address"] = deepcopy(corrected_address)
-        # No external system exists: these are only in-memory fixture records.
-        self.listings[new_id] = {"listing_id": new_id, "fields": fields, "state": "draft", "complete": True,
-                                 "account_identity": deepcopy(snapshot["account_identity"]),
-                                 "media_manifest": deepcopy(snapshot["media_manifest"]), "portal_targets": snapshot["portal_targets"][:]}
-        return self._record("create", operation_id, {"listing_id": new_id})
+    def create_listing(self, request):
+        def apply():
+            snapshot = request.snapshot
+            uploads = []
+            for asset in snapshot["media_manifest"]:
+                content = Path(asset["local_path"]).read_bytes()
+                if len(content) != asset["size"] or hashlib.sha256(content).hexdigest() != asset["sha256"]:
+                    self.not_applied.add(request.operation_id)
+                    raise RuntimeError("Synthetic media changed at consumption")
+                uploads.append({"metadata": {key: value for key, value in asset.items() if key != "local_path"}, "content": content})
+            new_id = self.create_id or "new-" + snapshot["rxcu"]
+            self.uploads[new_id] = uploads
+            self.listings[new_id] = {"listing_id": new_id, "fields": request.replacement_fields,
+                "state": "draft", "revision": "draft1", "complete": True,
+                "source_id": request.source_id, "source_snapshot_hash": request.snapshot_hash,
+                "creation_operation_id": request.operation_id, "raw_source": snapshot["raw"],
+                "account_identity": request.account_identity,
+                "media_manifest": snapshot["media_manifest"], "portal_targets": list(request.portal_targets)}
+            return {"listing_id": new_id, "listing_revision": "draft1", "listing_state": "draft"}
+        return self._record(request, apply)
 
     def read_listing(self, listing_id):
         return deepcopy(self.listings[listing_id])
 
-    def publish(self, listing_id, operation_id):
-        return self._record("publish", operation_id, {"listing_id": listing_id, "accepted": True, "evidence": "Synthetic acceptance receipt"})
+    def publish(self, request):
+        def apply():
+            self.listings[request.replacement_id]["revision"] = "published1"
+            self.listings[request.replacement_id]["state"] = "pending"
+            return {"listing_id": request.replacement_id, "listing_revision": "published1",
+                    "previous_listing_revision": request.expected_replacement_revision, "accepted": True}
+        return self._record(request, apply)
 
     def publication_status(self, listing_id):
         state = "live" if self.live else "pending"
         return {"listing_id": listing_id, "state": state, "verified": self.live,
                 "portals": {"example-portal-a": state, "example-portal-b": state}, "evidence": "Synthetic publication observations"}
 
-    def reconcile_action(self, action, operation_id, payload):
+    def reconcile_action(self, request):
         if self.reconcile_override is not None:
             return deepcopy(self.reconcile_override)
-        return {"status": "applied" if operation_id in self.receipts else "not_applied",
-                "evidence": "Synthetic authoritative operation ledger; no late commit possible",
-                "result": deepcopy(self.receipts.get(operation_id, {}))}
+        status = "applied" if request.operation_id in self.receipts else "not_applied" if request.operation_id in self.not_applied else "unknown"
+        return {**self._bound(request), "status": status, "terminal": status == "not_applied",
+                "result": deepcopy(self.receipts.get(request.operation_id, {}))}
+
+    # Provider API used through the production GatedHubAdapter in adapter tests.
+    def execute(self, request):
+        methods = {"remove_portals": self.remove_from_portals, "archive": self.archive,
+                   "create": self.create_listing, "publish": self.publish}
+        return methods[request.action](request)
+
+    def reconcile(self, request):
+        return self.reconcile_action(request)
 
 
 class CoreTest(unittest.TestCase):
@@ -432,7 +525,7 @@ class CoreTest(unittest.TestCase):
     def test_adapter_exception_text_is_never_exposed_or_persisted(self):
         job_id = self.prepared()
         marker = "SYNTHETIC_PRIVATE_TOKEN_DO_NOT_LOG"
-        def fail(source_id, operation_id):
+        def fail(request):
             raise RuntimeError(marker)
         self.hub.remove_from_portals = fail
         with self.assertRaises(SafetyBlocked) as caught:
@@ -446,8 +539,8 @@ class CoreTest(unittest.TestCase):
         job_id = self.reach("fidelity_verified")
         marker = "SYNTHETIC_PRIVATE_PROVIDER_PAYLOAD"
         old_publish = self.hub.publish
-        def publish(listing_id, operation_id):
-            receipt = old_publish(listing_id, operation_id)
+        def publish(request):
+            receipt = old_publish(request)
             return {**receipt, "evidence": marker, "error": marker, "unknown_vendor_payload": marker}
         self.hub.publish = publish
         self.engine.advance(job_id)
@@ -460,14 +553,15 @@ class CoreTest(unittest.TestCase):
     def test_intention_is_durable_before_external_action(self):
         job_id = self.prepared()
         original = self.hub.remove_from_portals
-        def remove(source_id, operation_id):
+        def remove(request):
+            operation_id = request.operation_id
             other = sqlite3.connect(self.path)
             try:
                 self.assertEqual(other.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()[0], "needs_reconciliation")
                 self.assertEqual(other.execute("SELECT phase FROM journal WHERE operation_id=?", (operation_id,)).fetchone()[0], "intended")
             finally:
                 other.close()
-            return original(source_id, operation_id)
+            return original(request)
         self.hub.remove_from_portals = remove
         self.engine.advance(job_id)
 

@@ -29,6 +29,7 @@ from typing import Any
 
 from .capture import _digest
 from .source_fields import extract_source_fields
+from .date_capture import DATE_NAMES, DATE_UNRESOLVED_ISSUES
 
 SCHEMA_VERSION = "hub-replacement-review/v1"
 WARNING = ("Historical partial observations only. Equal fields do not prove a complete copy. "
@@ -82,9 +83,10 @@ _RAW_UNRESOLVED = {
     "address_hidden": {"address_visibility_polarity_unverified"},
     "suburb": {"suburb_selected_entity_id_unresolved"},
     "rich_text_description": {"rich_text_format_fidelity_unverified"},
+    **{name: set(DATE_UNRESOLVED_ISSUES) for name in DATE_NAMES},
 }
 _VALUE_KEYS = ("value", "display_value", "selected_code", "selected_options",
-               "control_value", "sanitized_html")
+               "control_value", "sanitized_html", "date_parts")
 _LIMITATIONS = (
     "incomplete_source_and_replacement", "equal_observations_not_complete_copy",
     "replacement_relationship_unverified", "historical_values_not_rechecked",

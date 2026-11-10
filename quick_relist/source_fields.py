@@ -23,6 +23,8 @@ import re
 from typing import Any
 
 from .capture import EDITOR_PAGES, CaptureSafetyError, _digest, parse_editor_url, verify_capture_integrity
+from .date_capture import (DATE_UNRESOLVED_ISSUES, date_observed_parts,
+                           is_segmented_date_record, segmented_date_record_valid)
 
 SCHEMA_VERSION = "hub-source-fields/v1"
 WARNING = "Historical partial field inventory only. Verify every value in Hub; not a complete source backup or safe for relisting."
@@ -260,6 +262,8 @@ def _matches(spec, field, rich):
 
 
 def _control_issues(field, kind):
+    if is_segmented_date_record(field):
+        return [] if kind == "date" and segmented_date_record_valid(field) else ["segmented_date_shape_invalid"]
     if kind == "rich_text":
         return [] if all(isinstance(field.get(k), str) for k in ("text", "sanitized_html")) else ["control_shape_invalid"]
     if (not isinstance(field.get("value"), str) or not isinstance(field.get("type"), str)
@@ -323,6 +327,16 @@ def _resolve(entry, observations):
             entry["status"] = "unresolved"
         return
     entry.update(value=field["value"], display_value=field["value"])
+    if kind == "date" and is_segmented_date_record(field):
+        data = field["date_picker"]
+        entry.update(status="unresolved", issues=list(DATE_UNRESOLVED_ISSUES),
+                     date_parts=date_observed_parts(field),
+                     date_semantics_verified=False, date_business_validation_verified=False,
+                     date_requiredness={"verified": False, "label_text": data["label"]["text_content"],
+                         "input_required_attribute": data["input"]["required_attribute"],
+                         "input_required_property": data["input"]["required_property"],
+                         "input_aria_required": data["input"]["aria_required"],
+                         "group_aria_required": data["group"]["aria_required"]})
     if kind == "suburb":
         entry.update(status="unresolved", issues=["suburb_selected_entity_id_unresolved"])
     if kind == "selection":
@@ -434,7 +448,7 @@ def extract_source_fields(capture: Any, *, expected_listing_id: str | None = Non
         if any(sum(_matches(s, obs["field"], spec["kind"] == "rich_text")
                    for s in specs if s["page"] == spec["page"]) > 1 for obs in matches):
             entry.update(status="ambiguous", issues=["conflicting_control_identifiers"])
-            for key in ("value", "display_value", "selected_code", "selected_path", "control_value"):
+            for key in ("value", "display_value", "selected_code", "selected_path", "control_value", "date_parts", "date_requiredness"):
                 entry.pop(key, None)
         for code in entry["issues"]:
             result["gaps"].append({"code": code, "field_key": entry["key"], "page": entry["page"]})
