@@ -665,11 +665,12 @@ class SourceFieldReviewDialog(QDialog):
 class CapturedObservationsDialog(QDialog):
     """Read private immutable observations and save separate tentative revisions."""
 
-    def __init__(self, job: dict[str, Any], records: list[dict[str, Any]], drafts: Any, parent: QWidget | None = None):
+    def __init__(self, job: dict[str, Any], records: list[dict[str, Any]], drafts: Any, parent: QWidget | None = None, *, store: Any = None):
         super().__init__(parent)
         self.job = deepcopy(job)
         self.records = deepcopy(records)
         self.drafts = drafts
+        self.store = store
         self.setWindowTitle("Saved observations · incomplete")
         self.setStyleSheet(STYLE)
         self.resize(860, 730)
@@ -690,6 +691,8 @@ class CapturedObservationsDialog(QDialog):
         root.addWidget(self.source_text, 1)
         self.source_fields_button = _button("Review copied listing fields", self._review_source_fields)
         root.addWidget(self.source_fields_button)
+        self.replacement_button = _button("Compare with a saved replacement", self._review_replacement)
+        root.addWidget(self.replacement_button)
         self.revision_combo = QComboBox()
         self.revision_combo.setAccessibleName("Choose a tentative address revision")
         root.addWidget(self.revision_combo)
@@ -708,6 +711,7 @@ class CapturedObservationsDialog(QDialog):
         if not 0 <= index < len(self.records):
             self.edit_button.setEnabled(False)
             self.source_fields_button.setEnabled(False)
+            self.replacement_button.setEnabled(False)
             self.source_text.clear()
             return
         record = self.records[index]
@@ -718,8 +722,12 @@ class CapturedObservationsDialog(QDialog):
         missing = coverage.get("missing_pages") if isinstance(coverage, dict) else None
         page_note = f"{len(pages)} observed page(s). " if isinstance(pages, list) and pages else ""
         missing_note = f"Missing pages: {', '.join(str(item) for item in missing)}. " if isinstance(missing, list) and missing else ""
-        matched = capture.get("identity", {}).get("reference_verified") is True
+        identity = capture.get("identity")
+        matched = isinstance(identity, dict) and identity.get("reference_verified") is True
         self.source_fields_button.setEnabled(matched and bool(pages))
+        self.replacement_button.setEnabled(matched and bool(pages)
+            and capture.get("capture_kind") == "matched_partial_visible_dom"
+            and self.store is not None and self.drafts is not None)
         source_note = "RXCU headings matched for each accepted page. " if matched else "RXCU association unverified. "
         stopped_note = str(capture.get("stop_reason") or "")
         self.coverage.setText(f"INCOMPLETE · {page_note}{missing_note}{source_note}A full source backup and media completeness are not verified. {stopped_note}")
@@ -753,6 +761,22 @@ class CapturedObservationsDialog(QDialog):
             if dialog is not None:
                 dialog.detail.clear()
                 dialog.table.clearContents()
+                dialog.deleteLater()
+
+    def _review_replacement(self):
+        index = self.capture_combo.currentIndex()
+        if not self.replacement_button.isEnabled() or not 0 <= index < len(self.records):
+            return
+        dialog = None
+        try:
+            from .replacement_ui import ReplacementComparisonDialog
+            dialog = ReplacementComparisonDialog(self.job, self.records[index], self.drafts, self.store, self)
+            dialog.exec()
+        except Exception:
+            self.saved_hint.setText("The saved replacement comparison could not be opened. Saved observations are unchanged; no difference was approved and no Hub action was taken.")
+        finally:
+            if dialog is not None:
+                dialog.clear_private_data()
                 dialog.deleteLater()
 
     def _edit_address(self) -> None:
@@ -1638,7 +1662,7 @@ class MainWindow(QMainWindow):
             records = self.drafts.list_captures(self.selected_job["id"])
             if not records:
                 return
-            dialog = CapturedObservationsDialog(self.selected_job, records, self.drafts, self)
+            dialog = CapturedObservationsDialog(self.selected_job, records, self.drafts, self, store=self.store)
         except Exception:
             self._show_error("Local observations unavailable", "The saved observations could not be read. No address approval or Hub action is available from these records.")
             return
