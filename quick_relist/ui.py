@@ -626,6 +626,68 @@ class CapturedObservationsDialog(QDialog):
         self.saved_hint.setText("Tentative revision saved locally. Original and earlier revisions preserved. Address approval remains blocked.")
 
 
+class DownloadReviewDialog(QDialog):
+    """Review local files without opening, importing or approving their contents."""
+    def __init__(self, review: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Review previous photo-pack attempt")
+        self.resize(760, 570)
+        layout = QVBoxLayout(self)
+        layout.addWidget(_label("Files are preserved, not verified", "sectionTitle"))
+        layout.addWidget(_label("A timeout does not mean the download failed. Check the files and the browser's download history before requesting another pack. Resetting only lifts the local pause; it never retries, imports or assigns a file.", "muted", True))
+        folder = QLineEdit(review["directory"])
+        folder.setReadOnly(True)
+        folder.setAccessibleName("Private download folder")
+        layout.addWidget(folder)
+        open_folder = _button("Open download folder", lambda: self._open_folder(review["directory"]))
+        layout.addWidget(open_folder)
+        table = QTableWidget(0, 3)
+        table.setHorizontalHeaderLabels(["File", "Bytes", "Observed state"])
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.verticalHeader().hide()
+        for row, entry in enumerate(review["files"]):
+            table.insertRow(row)
+            labels = {"partial": "Incomplete download", "zip_candidate": "ZIP, contents unverified", "other": "Unrecognized file"}
+            for col, text in enumerate((entry["name"], str(entry["size"]), labels[entry["kind"]])):
+                table.setItem(row, col, QTableWidgetItem(text))
+        layout.addWidget(table, 1)
+        if not review["files"]:
+            layout.addWidget(_label("No files were found. Check for a pending download in any older browser before resetting.", "noticeBody", True))
+        elif any(item["kind"] == "partial" for item in review["files"]):
+            layout.addWidget(_label("Incomplete files will be kept as they are. Do not import them as a completed photo pack.", "noticeBody", True))
+        self.closed_check = QCheckBox("I closed every Quick Relist browser, including earlier sessions.")
+        self.reviewed_check = QCheckBox("I reviewed the files and pending downloads. Keep all files and allow a new request.")
+        layout.addWidget(self.closed_check)
+        layout.addWidget(self.reviewed_check)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
+        self.reset_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.reset_button.setText("Keep files and reset pause")
+        self.reset_button.setEnabled(False)
+        self.reset_button.setAutoDefault(False)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setDefault(True)
+        self.closed_check.toggled.connect(self._update_ready)
+        self.reviewed_check.toggled.connect(self._update_ready)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _update_ready(self):
+        self.reset_button.setEnabled(self.closed_check.isChecked() and self.reviewed_check.isChecked())
+
+    def accept(self):
+        if self.closed_check.isChecked() and self.reviewed_check.isChecked():
+            super().accept()
+
+    def _open_folder(self, directory):
+        # The backend validated this generated local directory, never a URL
+        # or executable name supplied by a ZIP. Opening it does not import it.
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(directory)):
+            QMessageBox.information(self, "Folder unavailable", "Copy the folder path above into File Explorer to review the saved files.")
+
+
 class MainWindow(QMainWindow):
     """Desktop shell over the safety-enforcing Engine/Store API."""
 
@@ -892,6 +954,8 @@ class MainWindow(QMainWindow):
         self.download_media_button = _button("Download photo pack", self._download_media)
         self.download_media_button.setToolTip("Download the verified editor's photo pack into a private local folder. Contents and completeness remain unverified.")
         details.addWidget(self.download_media_button)
+        self.review_download_button = _button("Review previous download", self._review_download)
+        details.addWidget(self.review_download_button)
         self.import_media_button = _button("Import local media ZIP", self._import_media)
         self.import_media_button.setToolTip("Preserve original downloaded ZIP and image bytes locally. This does not verify media identity, order, captions or completeness.")
         details.addWidget(self.import_media_button)
@@ -984,6 +1048,8 @@ class MainWindow(QMainWindow):
         browser_actions.addWidget(self.inspect_browser_button)
         browser_actions.addStretch()
         browser_layout.addLayout(browser_actions)
+        self.review_download_session_button = _button("Review previous photo-pack attempt", self._review_download)
+        browser_layout.addWidget(self.review_download_session_button)
         browser_layout.addWidget(_label("This preview is partial, unverified and shown in memory only. To preserve a page locally, select a queued reference in Batch workspace and use Save current page. Partial observations and tentative edits never approve an address or enable live changes.", "noticeBody", True))
         layout.addWidget(browser_card)
         connection, connection_layout = _card()
@@ -1232,6 +1298,13 @@ class MainWindow(QMainWindow):
         self.cancel_job_button.setEnabled(False)
         self.audit_button.setEnabled(bool(job) and not self._is_busy)
         self.detail_error.hide()
+        guard = self.media_root.parent / "downloads" / "download-review-required.json" if self.media_root is not None else None
+        try:
+            pending = guard is not None and (guard.exists() or guard.is_symlink())
+        except OSError:
+            pending = True
+        for button in (self.review_download_button, self.review_download_session_button):
+            button.setEnabled(pending and not self._is_busy)
         if not job:
             self.detail_title.setText("Nothing selected")
             self.detail_state.setText("Choose a row to review its next step.")
@@ -1244,13 +1317,8 @@ class MainWindow(QMainWindow):
         self.capture_page_button.setEnabled(self.hub is not None and self.drafts is not None and unstarted and not self._is_busy)
         self.import_media_button.setEnabled(self.drafts is not None and self.media_root is not None and unstarted and not self._is_busy)
         bindings = getattr(self.hub, "editor_bindings", {}) if self.hub is not None else {}
-        guard = self.media_root.parent / "downloads" / "download-review-required.json" if self.media_root is not None else None
-        try:
-            pending = guard is not None and (guard.exists() or guard.is_symlink())
-        except OSError:
-            pending = True
         self.download_media_button.setEnabled(bool(bindings.get(str(job.get("rxcu")))) and self.drafts is not None and self.media_root is not None and unstarted and not self._is_busy and not pending)
-        self.download_media_button.setToolTip("Automatic downloads are paused after an attempt. Review the local downloads folder and use manual ZIP import; a reset workflow is not yet available." if pending else "Request a photo pack from the matched editor. Its listing association and completeness remain unverified.")
+        self.download_media_button.setToolTip("Automatic downloads are paused after an attempt. Use Review previous download to preserve files and reset the pause after checking the browser." if pending else "Request a photo pack from the matched editor. Its listing association and completeness remain unverified.")
         if self.drafts is not None:
             try:
                 observations = self.drafts.list_captures(job["id"])
@@ -1366,7 +1434,7 @@ class MainWindow(QMainWindow):
         confirmation.setIcon(QMessageBox.Icon.Question)
         confirmation.setWindowTitle("Download photo pack?")
         confirmation.setText(f"Download the photo pack for {reference} to this computer?")
-        confirmation.setInformativeText("The editor headings will be checked again. Any ZIP that appears cannot yet be attributed to this listing automatically; inspect it before manually importing. Further automatic downloads will pause; a reset workflow is not yet available. Files are not encrypted by this app. No Hub listing will be changed.")
+        confirmation.setInformativeText("The editor headings will be checked again. Any ZIP that appears cannot yet be attributed to this listing automatically; inspect it before manually importing. Further automatic downloads will pause until you review the attempt and close the dedicated browser. Files are not encrypted by this app. No Hub listing will be changed.")
         confirmation.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
         confirmation.button(QMessageBox.StandardButton.Yes).setText("Download locally")
         confirmation.setDefaultButton(QMessageBox.StandardButton.Cancel)
@@ -1389,12 +1457,64 @@ class MainWindow(QMainWindow):
             box.setTextFormat(Qt.TextFormat.PlainText)
             box.setWindowTitle("ZIP requires manual review")
             box.setText("A ZIP appeared, but its listing association is not verified.")
-            box.setInformativeText(f"Inspect the file before using Import local media ZIP. Further automatic downloads are paused; a reset workflow is not yet available.\n\nLocal folder: {result['directory']}")
+            box.setInformativeText(f"Inspect the file before using Import local media ZIP. Use Review previous download after checking the files and browser to reset the pause.\n\nLocal folder: {result['directory']}")
             box.setStandardButtons(QMessageBox.StandardButton.Ok)
             box.exec()
 
         self._run_operation("Requesting the photo pack without changing Hub…", request_download,
                             "A ZIP appeared; listing association and contents are unverified.", show_candidate)
+
+    @Slot()
+    def _review_download(self) -> None:
+        if self.media_root is None or self._is_busy:
+            return
+        root = self.media_root.parent / "downloads"
+        marker = root / "download-review-required.json"
+        if not (marker.exists() or marker.is_symlink()):
+            self.refresh()
+            return
+        if self.hub is not None and getattr(self.hub, "driver", None) is not None:
+            confirmation = QMessageBox(self)
+            confirmation.setTextFormat(Qt.TextFormat.PlainText)
+            confirmation.setWindowTitle("Close the Hub browser for review?")
+            confirmation.setText("First check the browser's download history and finish or cancel any pending download.")
+            confirmation.setInformativeText("Continue closes this app's dedicated Hub browser and ends its sign-in session. Unsaved browser edits may be lost. All downloaded files stay on this computer. The download pause stays until you finish the next review.")
+            confirmation.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
+            confirmation.button(QMessageBox.StandardButton.Yes).setText("Close browser and review")
+            confirmation.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if confirmation.exec() != QMessageBox.StandardButton.Yes:
+                return
+
+        def close_and_inspect():
+            from .downloads import inspect_download
+            if self.hub is not None and getattr(self.hub, "driver", None) is not None:
+                try:
+                    self.hub.close()
+                except Exception:
+                    raise RuntimeError("The Hub browser could not be confirmed closed. The download pause was kept. Close every Quick Relist browser manually, restart Quick Relist, then review the previous download.") from None
+            return inspect_download(root)
+
+        self._run_operation("Reviewing the previous local download…", close_and_inspect,
+                            "Previous download files inspected. No listing was changed.", self._show_download_review)
+
+    def _show_download_review(self, review):
+        dialog = DownloadReviewDialog(review, self)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        confirmed = dialog.closed_check.isChecked() and dialog.reviewed_check.isChecked()
+        dialog.deleteLater()
+        if not accepted or not confirmed:
+            self.statusBar().showMessage("Download review cancelled. The pause and all files are preserved.")
+            return
+        root = self.media_root.parent / "downloads"
+
+        def finish():
+            from .downloads import finish_download_review
+            if self.hub is not None and getattr(self.hub, "driver", None) is not None:
+                raise RuntimeError("A Hub browser is still connected. Close it before resetting the download pause.")
+            return finish_download_review(root, review["review_token"], browsers_closed=True, files_reviewed=True)
+
+        self._run_operation("Recording the download review…", finish,
+                            "Download pause reset; all files were kept. No download was retried. Reopen Hub and select the listing again for a new request, or import a reviewed ZIP manually.")
 
     @Slot()
     def _import_media(self) -> None:
@@ -1532,15 +1652,16 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         self.stack.setEnabled(True)
         self.refresh()
+        callback, result = self._operation_callback, self._operation_result
+        self._operation_result = None
+        self._operation_callback = None
         if self._operation_error:
             self.statusBar().showMessage("Operation stopped. Review the recorded outcome before trying again.")
             self._show_error("Operation did not complete", self._operation_error)
         else:
             self.statusBar().showMessage(self._operation_success)
-            if self._operation_callback:
-                self._operation_callback(self._operation_result)
-        self._operation_result = None
-        self._operation_callback = None
+            if callback:
+                callback(result)
 
     @staticmethod
     def _safe_readonly_call(operation: Callable[[], Any]) -> Any:
@@ -1690,4 +1811,4 @@ def launch(engine: Any = None, store: Any = None, hub: Any = None, drafts: Any =
     return application.exec() if owns_application else 0
 
 
-__all__ = ["AddressReviewDialog", "TentativeAddressDialog", "CapturedObservationsDialog", "MainWindow", "launch"]
+__all__ = ["AddressReviewDialog", "TentativeAddressDialog", "CapturedObservationsDialog", "DownloadReviewDialog", "MainWindow", "launch"]

@@ -1038,4 +1038,135 @@ def test_download_guard_disables_further_attempts_in_ui(draft_window, tmp_path):
     (root / "download-review-required.json").write_text("{}")
     draft_window.refresh()
     assert not draft_window.download_media_button.isEnabled()
-    assert "reset workflow is not yet available" in draft_window.download_media_button.toolTip()
+    assert "Review previous download" in draft_window.download_media_button.toolTip()
+    assert draft_window.review_download_button.isEnabled()
+
+
+def _seed_download_attempt(window):
+    import json
+    root = window.media_root.parent / "downloads"
+    root.mkdir(mode=0o700, exist_ok=True)
+    folder = root / ("download-" + "1" * 32)
+    folder.mkdir(mode=0o700)
+    (folder / "synthetic.zip.crdownload").write_bytes(b"synthetic partial")
+    (root / "download-review-required.json").write_text(json.dumps({"version": 1, "directory": folder.name, "state": "attempted"}))
+    window.refresh()
+    return root, folder
+
+
+def test_review_dialog_requires_both_checks_and_cancel_is_default(application, tmp_path):
+    review = {"directory": str(tmp_path), "files": [{"name": "synthetic.zip.crdownload", "size": 17, "kind": "partial"}]}
+    dialog = ui.DownloadReviewDialog(review)
+    try:
+        dialog.show()
+        application.processEvents()
+        assert not dialog.reset_button.isEnabled()
+        dialog.accept()
+        assert dialog.result() == QtWidgets.QDialog.DialogCode.Rejected
+        dialog.closed_check.setChecked(True)
+        assert not dialog.reset_button.isEnabled()
+        dialog.reviewed_check.setChecked(True)
+        assert dialog.reset_button.isEnabled()
+        dialog.closed_check.setChecked(False)
+        assert not dialog.reset_button.isEnabled()
+        dialog.closed_check.setChecked(True)
+        dialog.accept()
+        assert dialog.result() == QtWidgets.QDialog.DialogCode.Accepted
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_download_recovery_available_without_a_selected_batch(draft_window):
+    _seed_download_attempt(draft_window)
+    assert draft_window.selected_job is None
+    assert draft_window.review_download_session_button.isEnabled()
+    assert not draft_window.download_media_button.isEnabled()
+
+
+def test_cancel_before_browser_close_keeps_session_and_pause(draft_window, monkeypatch):
+    root, _ = _seed_download_attempt(draft_window)
+    calls = []
+    draft_window.hub = SimpleNamespace(driver=object(), close=lambda: calls.append("close"))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Cancel)
+    draft_window._review_download()
+    assert calls == []
+    assert (root / "download-review-required.json").exists()
+
+
+def test_cancel_review_after_close_keeps_all_files_and_pause(draft_window, application, monkeypatch):
+    root, folder = _seed_download_attempt(draft_window)
+    hub = SimpleNamespace(driver=object(), editor_bindings={"RXCU000123": {"listing_id": "123"}})
+    def close():
+        hub.driver = None
+        hub.editor_bindings.clear()
+    hub.close = close
+    draft_window.hub = hub
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(ui.DownloadReviewDialog, "exec", lambda _: QtWidgets.QDialog.DialogCode.Rejected)
+    draft_window._review_download()
+    _finish_worker(application, draft_window)
+    assert hub.driver is None and hub.editor_bindings == {}
+    assert (root / "download-review-required.json").exists()
+    assert (folder / "synthetic.zip.crdownload").read_bytes() == b"synthetic partial"
+    assert "cancelled" in draft_window.statusBar().currentMessage()
+
+
+def test_failed_close_never_opens_review_or_resets_pause(draft_window, application, monkeypatch):
+    root, _ = _seed_download_attempt(draft_window)
+    def close(): raise RuntimeError("SYNTHETIC_PRIVATE_DRIVER_TEXT")
+    draft_window.hub = SimpleNamespace(driver=object(), close=close)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *_: QtWidgets.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(ui.DownloadReviewDialog, "exec", lambda _: pytest.fail("review must not open after uncertain close"))
+    draft_window._review_download()
+    _finish_worker(application, draft_window)
+    assert (root / "download-review-required.json").exists()
+    assert "could not be confirmed closed" in draft_window.test_errors[-1][1]
+    assert "restart Quick Relist" in draft_window.test_errors[-1][1]
+    assert "SYNTHETIC_PRIVATE" not in draft_window.test_errors[-1][1]
+
+
+def test_review_reset_after_restart_preserves_files_and_never_retries(draft_window, application, monkeypatch):
+    root, folder = _seed_download_attempt(draft_window)
+    draft_window.hub = SimpleNamespace(driver=None, editor_bindings={}, download_photo_pack=lambda *_: pytest.fail("never automatically retry"))
+    def confirm(dialog):
+        dialog.closed_check.setChecked(True)
+        dialog.reviewed_check.setChecked(True)
+        return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(ui.DownloadReviewDialog, "exec", confirm)
+    draft_window._review_download()
+    draft_window._review_download()  # Repeated click during the worker is ignored.
+    _finish_worker(application, draft_window)
+    assert not (root / "download-review-required.json").exists()
+    assert len(list(root.glob("download-reviewed-*"))) == 1
+    assert (folder / "synthetic.zip.crdownload").read_bytes() == b"synthetic partial"
+    assert not draft_window.review_download_session_button.isEnabled()
+    assert not draft_window.download_media_button.isEnabled()
+    assert "No download was retried" in draft_window.statusBar().currentMessage()
+    assert not draft_window.live_ready
+
+
+def test_changed_download_during_review_keeps_pause(draft_window, application, monkeypatch):
+    root, folder = _seed_download_attempt(draft_window)
+    draft_window.hub = SimpleNamespace(driver=None, editor_bindings={})
+    def confirm(dialog):
+        dialog.closed_check.setChecked(True)
+        dialog.reviewed_check.setChecked(True)
+        (folder / "late.zip").write_bytes(b"synthetic late")
+        return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(ui.DownloadReviewDialog, "exec", confirm)
+    draft_window._review_download()
+    _finish_worker(application, draft_window)
+    assert (root / "download-review-required.json").exists()
+    assert "changed after review" in draft_window.test_errors[-1][1]
+    assert not list(root.glob("download-reviewed-*"))
+
+
+def test_worker_callback_can_start_a_second_operation(window, application):
+    seen = []
+    def next_operation(result):
+        seen.append(result)
+        window._run_operation("second", lambda: "second result", "second done", lambda value: seen.append(value))
+    window._run_operation("first", lambda: "first result", "first done", next_operation)
+    _finish_worker(application, window)
+    assert seen == ["first result", "second result"]

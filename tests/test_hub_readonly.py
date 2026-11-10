@@ -360,3 +360,24 @@ def test_unrelated_menu_cannot_supply_editor_link():
     with pytest.raises(ValueError, match="unique Edit Listing"):
         ReadOnlyHub(driver).open_listing_editor("RXCU12345", timeout=.05, poll_interval=.01)
     assert driver.combo.clicks == 1 and driver.window_handles == ["one"]
+
+
+def test_failed_browser_close_keeps_handle_and_bindings():
+    class BrokenClose(Driver):
+        def quit(self): raise RuntimeError("SYNTHETIC_PRIVATE_DRIVER_DETAILS")
+    driver = BrokenClose("https://hub.remax.co.za/app/listings")
+    hub = ReadOnlyHub(driver)
+    hub.editor_bindings["RXCU12345"] = {"listing_id": "123", "handle": "one"}
+    with pytest.raises(RuntimeError, match="could not be confirmed closed") as caught:
+        hub.close()
+    assert "SYNTHETIC_PRIVATE" not in str(caught.value)
+    assert hub.driver is driver and hub.editor_bindings
+
+
+def test_successful_browser_close_clears_stale_bindings():
+    driver = Driver("https://hub.remax.co.za/app/listings")
+    hub = ReadOnlyHub(driver)
+    hub.editor_bindings["RXCU12345"] = {"listing_id": "123", "handle": "one"}
+    hub.close()
+    assert hub.driver is None and hub.editor_bindings == {}
+    assert driver.calls == ["quit"]
