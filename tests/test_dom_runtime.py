@@ -31,7 +31,8 @@ BASE = "https://hub.remax.co.za/app/listings/edit/synthetic-123"
 # jsdom has no layout; the rectangle shim models display:none / hidden and
 # closed dialogs. Visibility is still checked by the production script using
 # getComputedStyle. aria-hidden deliberately does not affect the rectangle:
-# it does not hide a real element geometrically either.
+# it does not hide a real element geometrically either. The runner awaits
+# jsdom's actual load event before extracting; document.readyState is not mocked.
 NODE_RUNNER = r"""
 const fs = require('node:fs');
 const {JSDOM} = require('jsdom');
@@ -72,11 +73,26 @@ const signature = () => JSON.stringify({
     .map(el => [el.id, el.value, el.checked, el.disabled, el.readOnly]),
   href: w.location.href
 });
-const before = signature();
-const result = w.Function(input.script)(...(input.args || []));
-if (signature() !== before) throw new Error('Extractor changed the synthetic DOM or control state');
-process.stdout.write(JSON.stringify(result));
-dom.window.close();
+(async () => {
+  if (w.document.readyState !== 'complete') {
+    await new Promise((resolve, reject) => {
+      const onLoad = () => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => {
+        w.removeEventListener('load', onLoad);
+        reject(new Error('Synthetic document did not finish loading'));
+      }, 5000);
+      w.addEventListener('load', onLoad, {once: true});
+    });
+  }
+  if (w.document.readyState !== 'complete') throw new Error('Synthetic document is not ready');
+  const before = signature();
+  const result = w.Function(input.script)(...(input.args || []));
+  if (signature() !== before) throw new Error('Extractor changed the synthetic DOM or control state');
+  process.stdout.write(JSON.stringify(result));
+})().catch(error => {
+  process.stderr.write(String(error.stack || error));
+  process.exitCode = 1;
+}).finally(() => dom.window.close());
 """
 
 
@@ -107,6 +123,15 @@ def extract() -> Callable[..., dict]:
         return result
 
     return run
+
+
+def test_extractor_runs_after_real_document_load(extract):
+    from quick_relist.capture import _validate_observation
+
+    result = extract('<main><table><tr><td>Synthetic ready document</td></tr></table></main>')
+    assert result["ready_state"] == "complete"
+    # Validate the untouched extraction, including the production readiness guard.
+    _validate_observation(result, BASE)
 
 
 def test_visible_fields_read_live_values_labels_and_control_state(extract):
