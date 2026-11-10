@@ -1,0 +1,108 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Synthetic Hub field-transfer qualification only</title>
+<style>body{font:16px system-ui;padding:24px}input,textarea,[role=combobox]{display:block;margin:6px;padding:5px;width:280px}input[type=checkbox],input[type=radio]{display:inline;width:auto}label{display:block;margin:8px}textarea{height:70px}.MuiPickersTextField-root{padding:12px;border:1px solid #bbb;margin:12px 0}.MuiPickersInputBase-input,input[aria-hidden=true]{position:absolute;opacity:0;pointer-events:none;width:1px;height:1px}.MuiPickersSectionList-section{display:inline-block;margin:8px}.MuiPickersSectionList-sectionContent{display:inline-block;min-width:45px;border:1px solid #ccc;padding:5px}ul[role=listbox]{background:#eef;border:1px solid #669;padding:16px;position:fixed;top:30px;left:360px;max-height:75vh;overflow:auto;z-index:10}li[role=option]{padding:8px;cursor:pointer}li[aria-disabled=true]{color:#999}</style></head>
+<body data-synthetic-only="true" data-fixture-nonce="__NONCE__"><h1>Synthetic fields only</h1><p>No account, network submission or live data. Application event counters remain separate from the form.</p>
+<main id="quick-relist-synthetic-form" data-context="__CONTEXT_ATTR__"></main><output id="fixture-summary"></output>
+<script>
+'use strict';
+const CONFIG=__CONFIG_JSON__;
+const root=document.getElementById('quick-relist-synthetic-form');
+const stats=window.fixtureStats={input:0,change:0,click:0,fieldWrites:0,trustedEvents:0,untrustedEvents:0,menuOpens:0,menuCloses:0,saveClicks:0,calendarClicks:0,log:[]};
+const models=new Map();
+const create=(tag,attrs={},text='')=>{const e=document.createElement(tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);e.textContent=text;return e;};
+const note=(kind,key,event)=>{stats[kind]++;stats[event.isTrusted?'trustedEvents':'untrustedEvents']++;stats.log.push({kind,key});};
+function interrupt(key){
+ if(CONFIG.scenario==='interrupt'&&key==='street_name')root.setAttribute('data-context','interrupted');
+ if(CONFIG.scenario==='unrelated_change'&&key==='street_name')document.querySelector('[name=street_number]').value='UNEXPECTED';
+}
+function input(key,value,tag='input',attrs={}){
+ const label=create('label',{for:key},key==='marketing_header'?'Marketing header description':key);
+ const e=create(tag,{id:key,name:key,...attrs});e.value=value;models.set(key,{value});root.append(label,e);
+ for(const kind of ['input','change'])e.addEventListener(kind,event=>{note(kind,key,event);models.get(key).value=e.value;stats.fieldWrites++;interrupt(key);});
+ e.addEventListener('blur',()=>{e.value=models.get(key).value;});return e;
+}
+function checkbox(key,checked,label){
+ const l=create('label',{},label+' '),e=create('input',{type:'checkbox',name:key,value:'on'});e.className='PrivateSwitchBase-input';e.checked=checked;const switchRoot=create('span',{class:'MuiCheckbox-root'});switchRoot.append(e);l.prepend(switchRoot);root.append(l);
+ e.addEventListener('click',event=>note('click',key,event));e.addEventListener('change',event=>{note('change',key,event);stats.fieldWrites++;});
+}
+function combo(key,code,text,disabled=false){
+ const wrap=create('div'),e=create('div',{id:'mui-component-select-'+key,role:'combobox',tabindex:'0','aria-haspopup':'listbox','aria-expanded':'false'},text);
+ const native=create('input',{id:key,name:key,'aria-hidden':'true',tabindex:'-1'});native.value=code;
+ if(disabled){native.disabled=true;e.setAttribute('aria-disabled','true');}
+ wrap.append(e,native);root.append(wrap);
+ e.addEventListener('click',event=>{
+  note('click',key,event);if(disabled)return;stats.menuOpens++;
+  const id='fixture-menu-'+key;e.setAttribute('aria-controls',id);e.setAttribute('aria-expanded','true');
+  const popup=create('div',{id:'menu-'+key,role:'presentation',class:'MuiMenu-root MuiModal-root'}),paper=create('div',{class:'MuiMenu-paper'}),list=create('ul',{id,role:'listbox',tabindex:'-1',class:'MuiMenu-list'});paper.append(list);popup.append(paper);
+  const items=CONFIG.options[key].map(x=>({...x}));
+  if(CONFIG.scenario==='changed_options'&&stats.menuOpens>CONFIG.changedAfter)items[1].text='Changed option';
+  for(const item of items){const li=create('li',{role:'option',class:'MuiMenuItem-root','data-value':item.code,'aria-selected':String(item.code===native.value),tabindex:'-1'},item.text);
+   if(item.disabled)li.setAttribute('aria-disabled','true');list.append(li);
+   li.addEventListener('click',event=>{note('click',key,event);if(item.disabled)return;native.value=item.code;e.textContent=item.text;stats.fieldWrites++;close();});
+  }
+  function close(){popup.remove();e.removeAttribute('aria-controls');e.setAttribute('aria-expanded','false');stats.menuCloses++;e.focus();}
+  list.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();close();}});
+  document.body.append(popup);list.focus();
+ });
+}
+function radio(){
+ const group=create('div',{role:'radiogroup','aria-label':'sale_state_id'});root.append(group);
+ for(let i=1;i<=5;i++){const l=create('label',{},'Synthetic state '+i),e=create('input',{type:'radio',name:'sale_state_id',value:String(i)});e.className='PrivateSwitchBase-input';e.checked=i===1;const switchRoot=create('span',{class:'MuiRadio-root'});switchRoot.append(e);l.prepend(switchRoot);group.append(l);
+ e.addEventListener('click',event=>note('click','sale_state_id',event));e.addEventListener('change',event=>{note('change','sale_state_id',event);stats.fieldWrites++;});}
+}
+const monthNames=['January','February','March','April','May','June','July','August','September','October','November','December'];
+const ordinal=n=>n+((n%100>=11&&n%100<=13)?'th':({1:'st',2:'nd',3:'rd'}[n%10]||'th'));
+function date(key,index,label){
+ const wrap=create('div',{class:'MuiFormControl-root MuiPickersTextField-root'}),l=create('label',{id:'fixture-date-label-'+index,for:'fixture-date-input-'+index},label);
+ const g=create('div',{class:'MuiPickersInputBase-root MuiPickersOutlinedInput-root',role:'group','aria-labelledby':l.id});
+ const container=create('div',{class:'MuiPickersSectionList-root MuiPickersInputBase-sectionsContainer'});
+ const n=create('input',{id:'fixture-date-input-'+index,name:key,'aria-hidden':'true',tabindex:'-1',class:'MuiPickersInputBase-input MuiPickersOutlinedInput-input'});
+ const values=[2099,11,19],parts=[];
+ function render(){
+  for(let i=0;i<3;i++){const text=i===0?String(values[i]):i===1?monthNames[values[i]-1]:ordinal(values[i]);parts[i].textContent=text;parts[i].setAttribute('aria-valuenow',String(values[i]));if(i)parts[i].setAttribute('aria-valuetext',text);}
+  n.value=String(values[0])+'/'+String(values[1]).padStart(2,'0')+'/'+String(values[2]).padStart(2,'0');
+ }
+ for(let i=0;i<3;i++){
+  const section=create('span',{class:'MuiPickersSectionList-section'}),p=create('span',{class:'MuiPickersSectionList-sectionContent MuiPickersInputBase-sectionContent',role:'spinbutton',contenteditable:'true','aria-label':['Year','Month','Day'][i],'aria-readonly':'false','aria-disabled':'false',tabindex:i?'−1':'0'});
+  p.setAttribute('tabindex',i?'-1':'0');section.append(p);container.append(section);parts.push(p);
+  p.addEventListener('input',event=>note('input',key,event));
+  p.addEventListener('blur',event=>{const raw=p.textContent.trim();if(/^\d+$/.test(raw)){
+    let number=Number(raw);if(CONFIG.scenario==='date_clamp'&&i===2)number=Math.min(20,number);
+    if((i===0&&number>0)||(i===1&&number>=1&&number<=12)||(i===2&&number>=1&&number<=31)){values[i]=number;stats.fieldWrites++;}
+   }render();});
+ }
+ const button=create('button',{type:'button','aria-label':'Choose date'},'Calendar');button.addEventListener('click',()=>stats.calendarClicks++);
+ g.append(container,button,n);wrap.append(l,g);root.append(wrap);render();
+}
+if(CONFIG.page==='details'){
+ for(const [key,value] of Object.entries(CONFIG.initialText))input(key,value);
+ for(const key of CONFIG.counts){const e=input(key,'0');e.removeAttribute('name');}
+ for(const [key,label] of Object.entries(CONFIG.checkboxLabels))checkbox(key,true,label);
+ radio();
+ for(const key of CONFIG.combos){const o=CONFIG.options[key][0];combo(key,o.code,o.text,CONFIG.scenario==='disabled_combo'&&key==='office_id');}
+ CONFIG.dates.forEach((key,i)=>date(key,i,CONFIG.dateLabels[i]));
+}else if(CONFIG.page==='media'){
+ for(const [key,value] of Object.entries(CONFIG.initialText))input(key,value,key==='marketing_header'?'textarea':'input');
+ const label=create('label',{for:'outlined-multiline-flexible'},'Brochure Description');
+ const e=create('textarea',{id:'outlined-multiline-flexible'});e.value='Synthetic old brochure';models.set('brochure_description',{value:e.value});root.append(label,e);
+ for(const kind of ['input','change'])e.addEventListener(kind,event=>{note(kind,'brochure_description',event);models.get('brochure_description').value=e.value;stats.fieldWrites++;});
+ e.addEventListener('blur',()=>e.value=models.get('brochure_description').value);
+}else for(const [key,value] of Object.entries(CONFIG.initialText))input(key,value);
+if(CONFIG.scenario==='duplicate')root.append(document.querySelector('[name=street_name]').cloneNode(true));
+if(CONFIG.scenario==='missing')document.querySelector('[name=street_name]').remove();
+if(CONFIG.scenario==='disabled')document.querySelector('[name=street_name]').disabled=true;
+if(CONFIG.scenario==='unknown')root.append(create('input',{name:'unsupported_rental_field',value:'Synthetic'}));
+if(CONFIG.scenario==='unknown_custom_control')root.append(create('div',{role:'switch',tabindex:'0','aria-checked':'false'},'Unsupported synthetic switch'));
+if(CONFIG.scenario==='bad_date_shape')document.querySelector('[aria-label=Year]').setAttribute('aria-label','Unverified');
+if(CONFIG.scenario==='bad_checkbox_label')document.querySelector('[name=address_hidden]').closest('label').append(' changed');
+if(CONFIG.scenario==='bad_combo_sibling')document.getElementById('office_id').before(create('span',{},'gap'));
+if(CONFIG.scenario==='secret_guard'){
+ const secret=create('input',{type:'password',name:'unrelated_secret'});root.append(secret);stats.secretReads=0;
+ Object.defineProperty(secret,'value',{get(){stats.secretReads++;throw new Error('Secret value read is prohibited');},set(){throw new Error('Secret write is prohibited');}});
+}
+if(CONFIG.scenario==='dependent_reset'){
+ const native=document.getElementById('property_type_id');let current=native.value;
+ const descriptor=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');
+ Object.defineProperty(native,'value',{get(){return descriptor.get.call(this);},set(v){descriptor.set.call(this,v);if(v!==current){current=v;document.querySelector('[name=street_number]').value='Dependent reset';}}});
+}
+document.getElementById('fixture-summary').textContent='Synthetic fixture ready';
+</script></body></html>
