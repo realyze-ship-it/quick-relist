@@ -91,6 +91,16 @@ listing mutation or live readiness is enabled by either title presentation.
    Keep the partial observations for review and close the app's browser when
    you have finished inspecting the outcome.
 
+New room-opener exceptions include a bounded diagnostic in **Review partial
+observations** and the saved `room_option_capture` record. It identifies only
+the allowlisted room category and a known exception category: intercepted
+click, stale element, element not interactable, move target out of bounds,
+timeout, or unclassified exception. Exception text, screenshots, stack traces
+and arbitrary class names are not saved by this diagnostic. The opening
+outcome remains uncertain even when the category is known. It does not prove
+that no click happened, diagnose a previous capture, or authorize another
+click. The existing stop and manual-inspection instructions still apply.
+
 ## Optional photo-pack check
 
 Only do this if a fresh download is wanted and authorized. An existing pack

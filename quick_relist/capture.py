@@ -15,7 +15,8 @@ Returned business data may be private. Keep it in memory or protected local
 storage; do not log it. No browser storage, cookies, network payloads, arbitrary
 hidden fields, password fields, OTP fields or unsanitized rich HTML are inspected.
 Only allowlisted business-selector codes paired with visible controls are read
-from the observed hidden native selection inputs. The five supported segmented
+from the observed hidden native selection inputs. Opacity-zero room checkboxes
+require the exact observed visible, room-local MUI label proxy. The five supported segmented
 date controls retain separately observed raw inputs and visible date parts.
 There is deliberately no persistence, telemetry, or credential handling here.
 """
@@ -195,11 +196,16 @@ return (() => {
     return cut(raw);
   };
   /* __SEGMENTED_DATE_CAPTURE_HELPERS__ */
+  // Local room ownership is established before generic dialog fields are read.
+  // Neither map is a general exception for hidden or credential-like inputs.
+  const roomControlLabels = new Map(), roomCheckboxProxies = new Set(), refusedRoomControls = new Set();
   const fieldsFor = root => {
     const fields = limited(root.querySelectorAll('input,select,textarea'), 2000)
-      .filter(el => !isSegmentedDateControl(el) && safeControl(el)).map((el, index) => ({
+      .filter(el => !refusedRoomControls.has(el) && !isSegmentedDateControl(el)
+        && (safeControl(el) || roomCheckboxProxies.has(el))).map((el, index) => ({
         dom_order: index, tag: el.tagName.toLowerCase(), type: el.type || '',
-        id: cut(el.id), name: cut(el.name), label: labelFor(el), section: scopeFor(el),
+        id: cut(el.id), name: cut(el.name), label: roomControlLabels.get(el) || labelFor(el), section: scopeFor(el),
+        ...(roomCheckboxProxies.has(el) ? {observed_room_checkbox_proxy: true} : {}),
         value: fieldValue(el), checked: ['checkbox', 'radio'].includes(el.type) ? el.checked : null,
         disabled: !!el.disabled, read_only: !!el.readOnly,
         selected_options: el.tagName === 'SELECT' ? limited(el.selectedOptions, 1000).map(o => ({value: cut(o.value), text: cut(o.textContent)})) : null,
@@ -261,26 +267,163 @@ return (() => {
         label: labelFor(el), section: scopeFor(el), text: textOf(el),
         sanitized_html: richHTML(el), format_fidelity_verified: false}));
   };
+  const unsupportedRoomNode = (node, dialog) => node.hasAttribute('aria-checked')
+    || (node.hasAttribute('data-indeterminate') && node.getAttribute('data-indeterminate') !== 'false')
+    || node.hasAttribute('contenteditable') || (node !== dialog && node.hasAttribute('role'));
+  const roomCheckbox = el => {
+    // The observed native input is opacity-zero. Only its exact visible MUI
+    // label proxy qualifies. Repeated IDs never supply a document-global label.
+    const proxy = el.parentElement, label = proxy?.parentElement;
+    const caption = label?.children[1], icon = proxy?.children[1];
+    const style = getComputedStyle(el);
+    if (el.tagName !== 'INPUT' || el.type !== 'checkbox' || !el.id || el.name !== el.id
+        || refusedRoomControls.has(el) || el.indeterminate
+        || ![null, 'false'].includes(el.getAttribute('data-indeterminate'))
+        || !el.classList.contains('PrivateSwitchBase-input') || sensitiveContext(el)
+        || ['hidden', 'aria-hidden', 'aria-label', 'aria-labelledby', 'aria-checked', 'tabindex'].some(a => el.hasAttribute(a))
+        || Number(style.opacity || 1) !== 0 || style.display !== 'block'
+        || style.visibility !== 'visible' || style.position !== 'absolute'
+        || !Array.from(el.getClientRects()).some(r => r.width > 0 && r.height > 0)
+        || !proxy?.matches('span.MuiButtonBase-root.MuiCheckbox-root.PrivateSwitchBase-root')
+        || !visible(proxy) || proxy.children.length !== 2 || proxy.children[0] !== el
+        || icon?.tagName.toLowerCase() !== 'svg' || icon.getAttribute('aria-hidden') !== 'true'
+        || icon.getAttribute('focusable') !== 'false'
+        || !label?.matches('label.MuiFormControlLabel-root.MuiFormControlLabel-labelPlacementEnd')
+        || !visible(label) || sensitiveContext(label) || label.hasAttribute('for')
+        || label.children.length !== 2 || label.children[0] !== proxy
+        || label.querySelectorAll('input,select,textarea').length !== 1
+        || !caption?.matches('span.MuiTypography-root.MuiTypography-body1.MuiFormControlLabel-label')
+        || !visible(caption) || caption.children.length) return null;
+    return textOf(caption) || null;
+  };
+  const sectionedRoomControls = (block, count) => {
+    const controls = [];
+    for (let i = 0; i < count; i++) {
+      const grid = block.children[4 + i * 3];
+      if (!grid.matches('div.MuiGrid-root.MuiGrid-container.MuiGrid-direction-xs-row')
+          || !visible(grid) || !grid.children.length) return null;
+      for (const item of grid.children) {
+        if (!item.matches('div.MuiGrid-root.MuiGrid-direction-xs-row.MuiGrid-grid-xs-12.MuiGrid-grid-sm-4')
+            || !visible(item) || item.children.length !== 1) return null;
+        const label = item.children[0], input = label.querySelector('input');
+        if (!input || input.parentElement?.parentElement !== label) return null;
+        const text = roomCheckbox(input);
+        if (!text) return null;
+        controls.push([input, text]);
+        if (controls.length > 1998) return null;  // fieldsFor also counts both textareas.
+      }
+    }
+    // Unknown trailing subtrees are not folded into a description. The second
+    // textarea is only a measuring control; its value is never inspected.
+    const field = block.lastElementChild, label = field.children[0], base = field.children[1];
+    if (!field.matches('div.MuiFormControl-root.MuiFormControl-fullWidth.MuiTextField-root')
+        || !visible(field) || field.children.length !== 2 || label?.tagName !== 'LABEL'
+        || !visible(label) || sensitiveContext(label)
+        || !base?.matches('div.MuiInputBase-root.MuiOutlinedInput-root.MuiInputBase-multiline')
+        || !visible(base) || base.children.length !== 3) return null;
+    const description = base.children[0], measure = base.children[1], outline = base.children[2];
+    if (description.tagName !== 'TEXTAREA' || description.name !== 'description'
+        || !description.id || label.getAttribute('for') !== description.id || !safeControl(description)
+        || Array.from(document.querySelectorAll('[id]')).filter(el => el.id === description.id).length !== 1
+        || measure.tagName !== 'TEXTAREA' || measure.hasAttribute('id') || measure.hasAttribute('name')
+        || measure.getAttribute('aria-hidden') !== 'true' || !measure.readOnly
+        || measure.getAttribute('tabindex') !== '-1' || getComputedStyle(measure).visibility !== 'hidden'
+        || getComputedStyle(measure).position !== 'absolute'
+        || outline.tagName !== 'FIELDSET' || outline.getAttribute('aria-hidden') !== 'true'
+        || new Set(controls.map(([input]) => input.id)).size !== controls.length
+        || block.querySelectorAll('input,select,textarea').length !== controls.length + 2
+        || block.querySelectorAll('button').length !== 1 || block.querySelector('button') !== block.children[1]
+        || block.querySelector('a[href],[contenteditable],.rdw-editor-main,.rdw-editor')) return null;
+    return controls;
+  };
+  const legacyRoomControls = block => {
+    // The supported legacy shape uses direct controls/implicit labels, not an
+    // arbitrary subtree with one H6. Explicit duplicate-ID labels are ambiguous.
+    const controls = [], ids = new Set(), names = new Set(), children = Array.from(block.children);
+    if (children[0]?.tagName !== 'H6') return null;
+    for (const child of children.slice(1)) {
+      if (child.tagName === 'BR' && !child.children.length) continue;
+      if (child.tagName === 'TEXTAREA' && child.getAttribute('aria-hidden') === 'true'
+          && child.readOnly && child.getAttribute('tabindex') === '-1' && !child.id && !child.name) continue;
+      let control = child, label = '';
+      if (child.tagName === 'LABEL') {
+        if (child.hasAttribute('for') || child.children.length !== 1 || !visible(child)) return null;
+        control = child.children[0]; label = textOf(child);
+        if (!label || control.hasAttribute('aria-label') || control.hasAttribute('aria-labelledby')) return null;
+      } else if (['checkbox', 'radio'].includes(control.type) || control.labels?.length) return null;
+      if (!['INPUT', 'TEXTAREA'].includes(control.tagName) || !safeControl(control)
+          || refusedRoomControls.has(control)) return null;
+      if (['checkbox', 'radio'].includes(control.type)) {
+        if ((control.id && ids.has(control.id)) || (control.name && names.has(control.name))) return null;
+        if (control.id) ids.add(control.id);
+        if (control.name) names.add(control.name);
+      }
+      controls.push([control, label]);
+    }
+    return controls.length ? controls : null;
+  };
   const roomGroups = (dialog, title) => {
-    // Repeated room checkbox IDs are only meaningful inside their own room.
-    // These titles and direct content-child blocks were observed in Hub.
     const roomLabels = {'Set bedrooms options': 'Bedroom', 'Set bathrooms options': 'Bathroom',
       'Set kitchens options': 'Kitchen', 'Set parkings options': 'Parking', 'Set lounges options': 'Lounge'};
+    if (!Object.prototype.hasOwnProperty.call(roomLabels, title)) return [];
     const label = roomLabels[title];
-    if (!label) return [];
+    // Run before structural early returns. Unsupported native/local proxy state
+    // must not leak through generic flat fields as an ordinary checked boolean.
+    for (const el of dialog.querySelectorAll('input[type="checkbox"],input[type="radio"]')) {
+      const local = el.closest('label');
+      let refused = el.indeterminate || (local && dialog.contains(local)
+        && [local, ...local.querySelectorAll('[aria-checked],[data-indeterminate],[role],[contenteditable]')]
+          .some(node => unsupportedRoomNode(node, dialog)));
+      for (let current = el; current && dialog.contains(current); current = current.parentElement) {
+        if (unsupportedRoomNode(current, dialog)) refused = true;
+      }
+      if (refused) { refusedRoomControls.add(el); limitations.add('room_group_structure_unresolved'); }
+    }
     const contents = Array.from(dialog.querySelectorAll('.MuiDialogContent-root')).filter(visible);
     if (contents.length !== 1) { limitations.add('room_group_structure_unresolved'); return []; }
-    const seen = new Set();
-    const groups = [];
+    const sections = {
+      'Bedroom': ['Bedroom options', 'Room options', 'Floor options'],
+      'Bathroom': ['Bathroom options', 'Room options', 'Floor options'],
+      'Kitchen': ['Kitchen options', 'Room options', 'Floor options'],
+      'Parking': ['Parking options', 'Room options', 'Floor options'],
+      'Lounge': ['Room options', 'Floor options'],
+    };
+    const seen = new Set(), groups = [];
+    if (contents[0].children.length > 200) limitations.add('room_group_structure_unresolved');
     for (const block of limited(contents[0].children, 200)) {
-      if (block.tagName !== 'DIV' || !visible(block)) continue;
-      const headings = Array.from(block.children).filter(el => el.tagName === 'H6' && visible(el));
-      if (headings.length !== 1) continue;
-      const heading = textOf(headings[0]);
-      const match = heading.match(new RegExp('^' + label + ' ([1-9][0-9]*)$'));
+      if (!visible(block) || block.tagName === 'BR') continue;
+      if (block.tagName !== 'DIV') { limitations.add('room_group_structure_unresolved'); continue; }
+      const headings = Array.from(block.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]')).filter(visible);
+      const rawDirect = Array.from(block.children).filter(el => el.tagName === 'H6'), direct = rawDirect.filter(visible);
+      const unsupported = [block, ...block.querySelectorAll('[role],[aria-checked],[data-indeterminate],[contenteditable]')]
+        .some(node => unsupportedRoomNode(node, dialog))
+        || Array.from(block.querySelectorAll('input')).some(el => el.indeterminate || refusedRoomControls.has(el));
+      if (unsupported) {
+        for (const el of block.querySelectorAll('input[type="checkbox"],input[type="radio"]')) refusedRoomControls.add(el);
+        limitations.add('room_group_structure_unresolved'); continue;
+      }
+      const sectioned = direct.length === sections[label].length + 1
+        && direct.slice(1).every((el, i) => textOf(el) === sections[label][i])
+        && Array.from(block.children).map(el => el.tagName).join(',') ===
+          ['H6', 'BUTTON', 'BR', ...sections[label].flatMap(() => ['H6', 'DIV', 'BR']), 'DIV'].join(',');
+      // MUI section markers prevent a damaged sectioned room falling through
+      // to legacy and accepting only its description while omitting checkboxes.
+      const legacy = rawDirect.length === 1 && !block.querySelector(
+        '.MuiGrid-container,.MuiFormControlLabel-root,.MuiCheckbox-root,.PrivateSwitchBase-input')
+        ? legacyRoomControls(block) : null;
+      if (headings.length !== direct.length || direct.length !== rawDirect.length || (!sectioned && !legacy)) {
+        limitations.add('room_group_structure_unresolved'); continue;
+      }
+      const heading = textOf(direct[0]), match = heading.match(new RegExp('^' + label + ' ([1-9][0-9]*)$'));
       if (!match || !Number.isSafeInteger(Number(match[1])) || seen.has(match[1])) {
         limitations.add('room_group_structure_unresolved'); continue;
       }
+      const controls = sectioned ? sectionedRoomControls(block, sections[label].length) : legacy;
+      if (!controls) { limitations.add('room_group_structure_unresolved'); continue; }
+      controls.forEach(([el, text]) => {
+        if (text) roomControlLabels.set(el, text);
+        if (sectioned) roomCheckboxProxies.add(el);
+      });
       seen.add(match[1]);
       groups.push({title: heading, index: Number(match[1]), fields: fieldsFor(block),
         rich_text: richFor(block), mapping_verified: false});
@@ -296,8 +439,9 @@ return (() => {
   const dialogs = limited(document.querySelectorAll('[role="dialog"],[aria-modal="true"],dialog[open]'), 100)
     .filter(el => visible(el) && !sensitiveContext(el)).map((el, index) => {
       const title = labelFor(el) || textOf(el.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'));
+      const room_groups = roomGroups(el, title);
       return {dom_order: index, title, fields: fieldsFor(el), rich_text: richFor(el),
-        text: textOf(el), room_groups: roomGroups(el, title)};
+        text: textOf(el), room_groups};
     });
   const groups = new Set(root.querySelectorAll('fieldset,section,article,[role="group"]'));
   root.querySelectorAll('h1,h2,h3,h4,h5,h6,legend,[role="heading"]').forEach(h => { if (visible(h) && h.parentElement) groups.add(h.parentElement); });
@@ -497,7 +641,7 @@ _BASE_BLINDSPOTS = (
     ("portal_status_unverified", "Visible portal controls do not independently verify saved targets or live publication status."),
     ("async_state_unverified", "Asynchronous, lazy-loaded, collapsed, off-screen and paginated content may be missing or stale."),
     ("revision_unverified", "These observations are not an atomic server revision and may differ between pages or capture times."),
-    ("sensitive_controls_omitted", "Hidden controls are excluded except narrowly allowlisted, structurally matched business-selector codes and the raw inputs of five supported visible segmented date controls. Password, OTP, file and credential-like controls, browser secrets and recognized URL query/fragment data are deliberately excluded. Unlabelled secrets embedded in ordinary business prose cannot be exhaustively detected."),
+    ("sensitive_controls_omitted", "Hidden controls are excluded except narrowly allowlisted, structurally matched business-selector codes, raw inputs of five supported visible segmented date controls, and opacity-zero checkboxes within exact observed visible room-label proxies. Password, OTP, file and credential-like controls, browser secrets and recognized URL query/fragment data are deliberately excluded. Unlabelled secrets embedded in ordinary business prose cannot be exhaustively detected."),
     ("address_schema_unverified", "Address fields and autocomplete selections have not been mapped or validated against the required Hub schema."),
 )
 _PAYLOAD_LISTS = ("fields", "rich_text", "dialogs", "sections", "lists", "tables", "media", "editor_links", "discovery", "limitations")

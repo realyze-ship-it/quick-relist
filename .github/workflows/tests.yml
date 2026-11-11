@@ -38,4 +38,4 @@ jobs:
           "$driver" --version
           export QUICK_RELIST_CHROMEDRIVER="$driver"
           export QUICK_RELIST_CHROME_BINARY="$chrome"
-          python -m pytest -q --maxfail=1 tests/test_draft_pipeline_chrome.py tests/test_media_metadata_chrome.py tests/test_editor_recheck_chrome.py tests/test_segmented_dates_chrome.py
+          python -m pytest -q --maxfail=1 tests/test_draft_pipeline_chrome.py tests/test_media_metadata_chrome.py tests/test_editor_recheck_chrome.py tests/test_segmented_dates_chrome.py tests/test_room_positioning_chrome.py tests/test_room_shapes_chrome.py

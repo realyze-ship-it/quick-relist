@@ -245,14 +245,14 @@ class MatchedHubCapture(PartialHubCapture):
         raise CaptureReadError("The editor tab navigation did not become verifiable. Inspect Hub before trying again.")
 
     def _capture_rooms(self, sample, url):
-        from .room_capture import capture_existing_room_options
+        from .room_capture import capture_existing_room_options, room_open_failure_note
         result = capture_existing_room_options(self.hub, self.reference,
             expected_listing_id=self._listing_id, expected_url=url, timeout=self.timeout,
             expected_main_fingerprint=_digest({key: sample[key] for key in ('fields', 'rich_text')}),
             poll_interval=self.poll_interval, stable_for=self.stable_for, cancelled=self.cancelled)
         self._pending_rooms.extend(deepcopy(result.get('pending_dialogs', [])))
         self._room_results.append({key: deepcopy(result.get(key)) for key in
-            ('status', 'stop_reason', 'stop_code', 'observations', 'complete', 'server_writes_verified')})
+            ('status', 'stop_reason', 'stop_code', 'open_failure', 'observations', 'complete', 'server_writes_verified')})
         accepted = []
         for dialog in result.get('dialogs', []):
             source = dialog.get('source', {})
@@ -268,7 +268,12 @@ class MatchedHubCapture(PartialHubCapture):
         sample['integrity'] = {'algorithm': 'sha256', 'sha256': _digest(sample)}
         if result.get('status') != 'partial' or self._pending_rooms:
             self._cancelled = result.get('status') == 'cancelled'
-            raise CaptureReadError('Room-option capture stopped. Earlier guarded pages and dialogs were retained. Check the current editor before continuing; uncertain dialog data remains separate and unverified.')
+            reason = 'Room-option capture stopped. Earlier guarded pages and dialogs were retained. Check the current editor before continuing; uncertain dialog data remains separate and unverified.'
+            if result.get('stop_code') == 'open_uncertain':
+                note = room_open_failure_note(result.get('open_failure'))
+                if note:
+                    reason += ' ' + note
+            raise CaptureReadError(reason)
         self._identity(url)
 
     def capture(self):

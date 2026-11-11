@@ -259,7 +259,13 @@ class SegmentedDateTests(unittest.TestCase):
     def test_production_injection_and_offline_fixture_stay_in_sync(self):
         self.assertEqual(READ_PAGE_SCRIPT.count("const dateFieldsFor ="), 1)
         self.assertNotIn("__SEGMENTED_DATE_CAPTURE_HELPERS__", READ_PAGE_SCRIPT)
-        self.assertIn("!isSegmentedDateControl(el) && safeControl(el)", READ_PAGE_SCRIPT)
+        # Date controls must be excluded before either the ordinary-control or
+        # room-proxy branch. Keep the parentheses so neither branch can bypass it.
+        guarded_filter = (
+            ".filter(el => !refusedRoomControls.has(el) && !isSegmentedDateControl(el) "
+            "&& (safeControl(el) || roomCheckboxProxies.has(el)))"
+        )
+        self.assertEqual(" ".join(READ_PAGE_SCRIPT.split()).count(guarded_filter), 1)
         self.assertIn("fields.push(...dateFieldsFor(root, fields.length))", READ_PAGE_SCRIPT)
         fixture = Path(__file__).parent / "fixtures" / "segmented_dates.html"
         self.assertEqual(fixture.read_text(encoding="utf-8"), fixture_html())

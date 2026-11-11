@@ -11,7 +11,7 @@ import pytest
 from quick_relist.capture import READ_PAGE_SCRIPT
 from quick_relist.hub_readonly import IDENTITY_SCRIPT
 from quick_relist.room_capture import (
-    ESCAPE, ROOM_OPTIONS, ROOM_STATE_SCRIPT, RoomOptionDescriptor,
+    ESCAPE, ROOM_OPTIONS, ROOM_POSITION_SCRIPT, ROOM_STATE_SCRIPT, RoomOptionDescriptor,
     capture_existing_room_options,
 )
 import quick_relist.room_capture as module
@@ -92,9 +92,15 @@ class Driver:
             self.hook('closed')
 
     def execute_script(self, script, *args):
-        assert script in (IDENTITY_SCRIPT, READ_PAGE_SCRIPT, ROOM_STATE_SCRIPT)
+        assert script in (IDENTITY_SCRIPT, READ_PAGE_SCRIPT, ROOM_STATE_SCRIPT, ROOM_POSITION_SCRIPT)
         self.transition()
         self.calls.append(('read', script))
+        if script == ROOM_POSITION_SCRIPT:
+            descriptor = next(d for d in ROOM_OPTIONS if d.key == args[0]['key'])
+            assert args[1] is self.openers[descriptor.key] and args[2] == self.counts[descriptor.key]
+            assert args[3] is False, 'Legacy clean visible fixture never needs scrolling'
+            self.hook('position')
+            return 'clear'
         if script == IDENTITY_SCRIPT:
             assert self.modal is None, 'Hidden background identity must not be inspected during a modal'
             result = {'outer_count': 1, 'inner_count': 1,

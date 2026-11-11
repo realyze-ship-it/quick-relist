@@ -4,6 +4,7 @@ Only exact observed caption openers are clicked, once each. Escape is the sole
 close action. This observes DOM field equality, never proves no server writes.
 No navigation, field editing, network/storage reads, form/button clicks or retry
 of uncertain actions is supported. Results contain private, partial source data.
+One view-only centered scroll is permitted per verified opener when necessary.
 """
 from __future__ import annotations
 
@@ -78,7 +79,7 @@ return (() => {
   const control=inputBase?.parentElement, layout=control?.parentElement, common=layout?.parentElement;
   const shape=visible(input) && input.type === 'text' && !input.hasAttribute('name') && !input.disabled && !input.readOnly &&
     !['step','min','max','inputmode','pattern'].some(a => input.hasAttribute(a)) &&
-    !['role','title','aria-label','tabindex'].some(a => e.hasAttribute(a)) &&
+    e.childElementCount === 0 && !['role','title','aria-label','tabindex'].some(a => e.hasAttribute(a)) &&
     !e.closest('button,a,[role="button"],[contenteditable="true"]') && e.getAttribute('aria-disabled') !== 'true' &&
     inputBase?.matches('div.MuiInputBase-root') && control?.matches('div.MuiFormControl-root') &&
     layout?.matches('div.flex.alignItems_flexend') && [...layout.children].some(n => n.tagName === 'H6' && visible(n)) &&
@@ -94,6 +95,46 @@ return (() => {
 })();
 """
 
+# Re-run the same structural probe inside each positioning RPC. The only
+# optional side effect is one instant scroll of that exact verified node.
+# Return static statuses only, never geometry, hit nodes or private DOM text.
+ROOM_POSITION_SCRIPT = r"""
+return (() => {
+  const wanted=arguments[0], expected=arguments[1], count=arguments[2], scroll=arguments[3];
+  const state=(function() {
+""" + ROOM_STATE_SCRIPT + r"""
+  })(wanted);
+  const f=state.feature;
+  if (!state.ready || state.busy || state.overlays.length || !f ||
+      f.opener_count !== 1 || f.count_count !== 1 || !f.shape_ok ||
+      f.element !== expected || f.count !== count || !Number.isSafeInteger(count) || count <= 0)
+    return 'changed';
+  const e=f.element;
+  if (!e.isConnected || e.ownerDocument !== document || e.getRootNode() !== document) return 'changed';
+  const rects=[...e.getClientRects()], w=window.innerWidth, h=window.innerHeight;
+  const cw=document.documentElement.clientWidth, ch=document.documentElement.clientHeight;
+  if (![w,h,cw,ch].every(n => Number.isFinite(n) && n > 0) || !rects.length ||
+      rects.some(r => ![r.x,r.y,r.width,r.height,r.x+r.width,r.y+r.height].every(Number.isFinite) ||
+        r.width < 1 || r.height < 1)) return 'invalid';
+  // WebDriver's in-view center: FIRST client rect, clipped to the initial
+  // viewport, then floored. Not the bounding-box center or an offset guess.
+  const r=rects[0], left=Math.max(0,r.x), right=Math.min(w,r.x+r.width),
+    top=Math.max(0,r.y), bottom=Math.min(h,r.y+r.height);
+  const x=Math.floor((left+right)/2), y=Math.floor((top+bottom)/2);
+  let clear=false;
+  if (right-left >= 1 && bottom-top >= 1 && x >= left && x < right && y >= top && y < bottom &&
+      x < cw && y < ch) {
+    // The observed caption has text nodes only. No descendant may supply a
+    // click target, even if an empty child preserves the aggregate caption.
+    clear=document.elementFromPoint(x,y) === e;
+  }
+  if (clear) return 'clear';
+  if (scroll !== true) return 'needs_scroll';
+  e.scrollIntoView({behavior:'instant', block:'center', inline:'center'});
+  return 'scrolled';
+})();
+"""
+
 _REASONS = {
     'binding_changed': 'The matched editor binding changed. No further room action was taken.',
     'position_changed': 'The editor route or browser tabs changed. Inspect the current tab before continuing.',
@@ -104,6 +145,9 @@ _REASONS = {
     'main_changed': 'The observed main source fields changed. Inspect Hub before continuing.',
     'main_timeout': 'The main source fields did not settle within the wait limit.',
     'opener_ambiguous': 'The room opener or count is missing, changed or ambiguous. No opener was clicked.',
+    'opener_position_unreadable': 'The room opener position could not be verified safely. No opener was clicked.',
+    'opener_obscured': 'The room opener is not safely reachable after the bounded view check. No opener was clicked.',
+    'opener_scroll_uncertain': 'The view-scrolling outcome is uncertain. No opener was clicked and the scroll was not retried.',
     'open_uncertain': 'The room-opening outcome is uncertain. Inspect the current tab; the opener was not retried.',
     'open_timeout': 'The expected room dialog did not appear within the wait limit. The opener was not retried.',
     'dialog_changed': 'The open dialog is different or ambiguous. It was left for manual inspection.',
@@ -115,6 +159,49 @@ _REASONS = {
     'cancelled': 'Room capture was cancelled. Earlier observations were retained; inspect any open dialog manually.',
     'browser_failure': 'Room capture stopped after a browser read failure. Inspect the current tab before continuing.',
 }
+
+
+_OPEN_FAILURE_LABELS = {
+    'click_intercepted': 'intercepted click',
+    'stale_element': 'stale element',
+    'not_interactable': 'element not interactable',
+    'move_target_out_of_bounds': 'move target out of bounds',
+    'timeout': 'timeout',
+    'other_exception': 'unclassified exception',
+}
+
+
+def _open_failure_kind(exc):
+    # Selenium is optional for offline use. Match exact known types, never
+    # class names, messages, attributes or traceback data. Unknown subclasses
+    # also stay generic; a diagnostic is not proof of the click's outcome.
+    try:
+        from selenium.common.exceptions import (ElementClickInterceptedException,
+            ElementNotInteractableException, MoveTargetOutOfBoundsException,
+            StaleElementReferenceException, TimeoutException)
+    except ImportError:
+        return 'other_exception'
+    for exception_type, kind in (
+            (ElementClickInterceptedException, 'click_intercepted'),
+            (StaleElementReferenceException, 'stale_element'),
+            (ElementNotInteractableException, 'not_interactable'),
+            (MoveTargetOutOfBoundsException, 'move_target_out_of_bounds'),
+            (TimeoutException, 'timeout')):
+        if type(exc) is exception_type:
+            return kind
+    return 'other_exception'
+
+
+def room_open_failure_note(diagnostic):
+    """Render only bounded static diagnostics on existing local review surfaces."""
+    if type(diagnostic) is not dict or set(diagnostic) != {'kind', 'room_key'}:
+        return ''
+    kind, room = diagnostic['kind'], diagnostic['room_key']
+    if (type(kind) is not str or kind not in _OPEN_FAILURE_LABELS
+            or type(room) is not str or room not in {d.key for d in ROOM_OPTIONS}):
+        return ''
+    return (f'Room opener diagnostic ({room}): {_OPEN_FAILURE_LABELS[kind]}. '
+            'The room-opening outcome remains uncertain; the opener was not retried.')
 
 
 class _Stop(Exception):
@@ -160,6 +247,7 @@ class _RoomCapture:
         self.escape_attempted = False
         self.result = {'dialogs': [], 'pending_dialogs': [], 'observations': [], 'status': 'partial',
                        'stop_code': None, 'stop_reason': None, 'cleanup_stop_code': None,
+                       'open_failure': None,
                        'complete': False, 'server_writes_verified': False, 'main_fields_fingerprint': None}
 
     def check_cancel(self):
@@ -281,9 +369,8 @@ class _RoomCapture:
             self.wait(deadline)
         raise _Stop('close_timeout' if closing else 'main_timeout')
 
-    def open(self):
-        self.identity()
-        state = self.state()
+    @staticmethod
+    def checked_feature(state):
         if state['overlays']:
             raise _Stop('initial_dialog')
         feature = state['feature']
@@ -292,6 +379,44 @@ class _RoomCapture:
                 or type(feature.get('count_count')) is not int or feature.get('count_count') != 1
                 or feature.get('shape_ok') is not True or feature.get('element') is None):
             raise _Stop('opener_ambiguous')
+        return feature
+
+    def recheck_opener(self, original, count):
+        # Reacquire after browser calls, including scrolling. Existing node
+        # identity, source identity and fields must all still match. This is
+        # evidence around calls, not an atomic guarantee against later changes.
+        self.identity()
+        page = self.snapshot()
+        if page['dialogs'] or not page['fields'] or 'main_content_scope_unverified' in page['limitations']:
+            raise _Stop('main_unreadable')
+        if self.fingerprint(page) != self.baseline:
+            raise _Stop('main_changed')
+        self.identity()
+        feature = self.checked_feature(self.state())
+        if (feature['element'] != original['element'] or type(feature.get('count')) is not int
+                or feature['count'] != count):
+            raise _Stop('opener_ambiguous')
+        return feature
+
+    def position_opener(self, feature, count, *, scroll=False):
+        self.guard()
+        try:
+            status = self.rpc(lambda: self.driver.execute_script(ROOM_POSITION_SCRIPT,
+                asdict(self.descriptor), feature['element'], count, scroll))
+        except _Stop:
+            raise
+        except Exception:
+            raise _Stop('opener_scroll_uncertain' if scroll else 'opener_position_unreadable') from None
+        self.guard()
+        if status == 'changed':
+            raise _Stop('opener_ambiguous')
+        if type(status) is not str or status not in {'clear', 'needs_scroll', 'scrolled'} or (not scroll and status == 'scrolled'):
+            raise _Stop('opener_position_unreadable')
+        return status
+
+    def open(self):
+        self.identity()
+        feature = self.checked_feature(self.state())
         count = feature.get('count')
         if type(count) is not int or count < 0:
             self.result['observations'].append({'key': self.descriptor.key, 'status': 'skipped', 'reason': 'count_unqualified'})
@@ -299,12 +424,25 @@ class _RoomCapture:
         if count == 0:
             self.result['observations'].append({'key': self.descriptor.key, 'status': 'skipped', 'reason': 'zero_existing_rooms'})
             return None
+        original = feature
+        if self.position_opener(feature, count) == 'needs_scroll':
+            feature = self.recheck_opener(original, count)
+            status = self.position_opener(feature, count, scroll=True)
+            if status == 'needs_scroll':
+                raise _Stop('opener_obscured')
+            if status == 'scrolled':
+                self.settled_main()
+        feature = self.recheck_opener(original, count)
+        if self.position_opener(feature, count) != 'clear':
+            raise _Stop('opener_obscured')
         self.guard()
         try:
             self.rpc(feature['element'].click)  # Once. Never retry on any outcome.
         except _Stop:
             raise
-        except Exception:
+        except Exception as exc:
+            room = next(d.key for d in ROOM_OPTIONS if d == self.descriptor)
+            self.result['open_failure'] = {'kind': _open_failure_kind(exc), 'room_key': room}
             raise _Stop('open_uncertain') from None
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
@@ -416,6 +554,8 @@ class _RoomCapture:
                 except (Exception, KeyboardInterrupt) as cleanup:
                     self.result['cleanup_stop_code'] = cleanup.code if isinstance(cleanup, _Stop) else 'browser_failure'
             reason = _REASONS[code]
+            if code == 'open_uncertain':
+                reason += ' ' + room_open_failure_note(self.result['open_failure'])
             cleanup_code = self.result['cleanup_stop_code']
             if cleanup_code:
                 reason += ' Cleanup: ' + _REASONS[cleanup_code]
