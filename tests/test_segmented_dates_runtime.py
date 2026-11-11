@@ -14,12 +14,32 @@ from quick_relist.date_capture import (DATE_DIAGNOSTIC_KIND, DATE_NAMES, DATE_TY
     segmented_date_diagnostic_valid, segmented_date_record_valid)
 from segmented_date_fixtures import RAW_DATES, date_record, fixture_html, picker_html
 
-RUNNER = r"""
+WAIT_FOR_COMPLETE = r"""
+const waitForComplete = (w, timeoutMs = 2000) => new Promise((resolve, reject) => {
+  const cleanup = () => { clearTimeout(timer); w.removeEventListener('load', ready); };
+  const ready = () => {
+    if (w.document.readyState !== 'complete') return;
+    cleanup(); resolve();
+  };
+  const timer = setTimeout(() => {
+    cleanup(); reject(new Error('Synthetic document did not reach readyState complete'));
+  }, timeoutMs);
+  w.addEventListener('load', ready);
+  ready();
+});
+"""
+
+RUNNER = WAIT_FOR_COMPLETE + r"""
 const fs = require('node:fs');
 const {JSDOM} = require('jsdom');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+async function run() {
 const dom = new JSDOM(input.html, {url:'https://hub.remax.co.za/app/listings/edit/123456', pretendToBeVisual:true, runScripts:'outside-only'});
 const w = dom.window;
+try {
+// JSDOM returns before its load event. Never overwrite readyState or relax the
+// production boundary to accept an observation taken before loading completes.
+await waitForComplete(w);
 Object.defineProperty(w.Element.prototype, 'getClientRects', {value:function() {
   for (let el=this; el; el=el.parentElement) {
     if (el.hidden || w.getComputedStyle(el).display === 'none' || (el.tagName === 'DIALOG' && !el.open)) return [];
@@ -45,8 +65,88 @@ for (const id of input.deny_values || []) {
 const result = w.Function(input.script)();
 if (signature() !== before) throw new Error('Extractor changed DOM or controls');
 process.stdout.write(JSON.stringify(result));
-dom.window.close();
+} finally { dom.window.close(); }
+}
+run().catch(error => { console.error(error.message); process.exitCode = 1; });
 """
+
+
+class SyntheticReadyStateWaitTests(unittest.TestCase):
+    def test_wait_checks_actual_state_and_has_a_bounded_failure(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node unavailable; synthetic readiness helper test not run')
+        script = WAIT_FOR_COMPLETE + r"""
+          const assert = require('node:assert/strict');
+          (async () => {
+            const w = new EventTarget();
+            w.document = {readyState:'complete'};
+            await waitForComplete(w, 100); // Already loaded is accepted without a new event.
+            w.document.readyState = 'loading';
+            let settled = false;
+            const pending = waitForComplete(w, 1000).then(() => { settled = true; });
+            await Promise.resolve();
+            assert.equal(settled, false);
+            w.document.readyState = 'interactive';
+            w.dispatchEvent(new Event('load'));
+            await Promise.resolve();
+            assert.equal(settled, false); // The event alone is insufficient.
+            w.document.readyState = 'complete';
+            w.dispatchEvent(new Event('load'));
+            await pending;
+            assert.equal(settled, true);
+            w.document.readyState = 'loading';
+            await assert.rejects(waitForComplete(w, 20), /did not reach readyState complete/);
+            process.stdout.write('readiness checks passed');
+          })().catch(error => { console.error(error); process.exitCode = 1; });
+        """
+        result = subprocess.run([node, '-e', script], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'readiness checks passed')
+
+    def test_runner_closes_window_on_timeout_and_post_load_failure(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node unavailable; synthetic runner cleanup test not run')
+        script = r"""
+          const assert = require('node:assert/strict'), vm = require('node:vm');
+          const runner = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+          (async () => {
+            // Test doubles exercise the exact runner's failure cleanup, not DOM
+            // qualification. No real jsdom readiness property is overwritten.
+            for (const state of ['loading', 'complete']) {
+              let closed = 0;
+              const errors = [], delays = [], output = [], processState = {stdout:{write:x=>output.push(x)}};
+              const w = new EventTarget();
+              w.document = {readyState:state};
+              w.close = () => { closed++; };
+              w.Element = class {};
+              w.Function = () => { throw new Error('Synthetic post-load setup failure'); };
+              const context = {
+                require: name => {
+                  if (name === 'node:fs') return {readFileSync:()=>JSON.stringify({html:'', setup:'synthetic'})};
+                  if (name === 'jsdom') return {JSDOM:class { constructor() { this.window = w; } }};
+                  throw new Error('Unexpected dependency');
+                },
+                setTimeout: (callback, delay) => { delays.push(delay); return setTimeout(callback, Math.min(delay, 20)); },
+                clearTimeout, console:{error:x=>errors.push(x)}, process:processState
+              };
+              await vm.runInNewContext(runner, context);
+              assert.deepEqual(delays, [2000]);
+              assert.equal(w.document.readyState, state);
+              assert.equal(closed, 1);
+              assert.equal(processState.exitCode, 1);
+              assert.deepEqual(output, []);
+              assert.deepEqual(errors, [state === 'loading'
+                ? 'Synthetic document did not reach readyState complete' : 'Synthetic post-load setup failure']);
+            }
+            process.stdout.write('runner cleanup checks passed');
+          })().catch(error => { console.error(error); process.exitCode = 1; });
+        """
+        result = subprocess.run([node, '-e', script], input=json.dumps(RUNNER),
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'runner cleanup checks passed')
 
 
 class SegmentedDateRuntimeTests(unittest.TestCase):
@@ -66,7 +166,9 @@ class SegmentedDateRuntimeTests(unittest.TestCase):
             "script": READ_PAGE_SCRIPT, "setup": setup, "deny_values": list(deny_values)}),
             capture_output=True, text=True, timeout=30)
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        return json.loads(completed.stdout)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result['ready_state'], 'complete')
+        return result
 
     def dates(self, result):
         return [field for field in result["fields"] if field.get("type") == DATE_TYPE]
