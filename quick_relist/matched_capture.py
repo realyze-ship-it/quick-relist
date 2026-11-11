@@ -97,8 +97,8 @@ class MatchedHubCapture(PartialHubCapture):
         if not isinstance(identity, dict):
             raise CaptureSafetyError("The visible editor identity could not be verified.")
         pairs = [(identity.get(prefix + '_count'), identity.get(prefix + '_matches')) for prefix in ('outer', 'inner')]
-        # Missing headings may hydrate. A visible different/ambiguous reference
-        # is never retried, even if it would later change to the expected one.
+        # Missing headings may hydrate. A visible or qualified duplicate-title
+        # conflict is never retried, even if it later changes to the expected one.
         if any(type(count) is not int or count not in (0, 1) or
                (count == 1 and match is not True) or
                (count == 0 and match is not False) for count, match in pairs):
@@ -341,7 +341,8 @@ class MatchedHubCapture(PartialHubCapture):
         guarded = bool(self._pages) and all(p.get('matched_source') for p in self._pages)
         result['capture_kind'] = 'matched_partial_visible_dom'
         result['identity'].update(reference_verified=guarded)
-        # Visible headings bind the observation attempt, not every server value.
+        # The visible main title and qualifying outer-title consistency bind
+        # the observation attempt, not every server value or two visible titles.
         # Do not promote the older broad page-fidelity flag to verified.
         if guarded:
             result['blindspots'] = [item for item in result['blindspots'] if item['code'] != 'reference_unverified']

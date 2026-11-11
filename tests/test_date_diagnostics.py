@@ -45,6 +45,22 @@ class Driver:
 
 
 class DateDiagnosticTests(unittest.TestCase):
+    def test_false_container_segment_diagnostic_requires_explicit_bounded_evidence(self):
+        item = diagnostic()
+        item['counts']['contenteditable'] = 4
+        self.assertFalse(segmented_date_diagnostic_valid(item))
+        item['contenteditable_binding'] = 'container_false_and_three_true_segments'
+        self.assertTrue(segmented_date_diagnostic_valid(item))
+        self.assertEqual(_validate_observation(observation(item), BASE)['discovery'], [item])
+        for key, value in (('contenteditable', 3), ('contenteditable_true', 2), ('segments', 4), ('containers', 2)):
+            bad = deepcopy(item)
+            bad['counts'][key] = value
+            self.assertFalse(segmented_date_diagnostic_valid(bad))
+        for value in ('PRIVATE_MARKER', None, True, {}, []):
+            bad = deepcopy(item)
+            bad['contenteditable_binding'] = value
+            self.assertFalse(segmented_date_diagnostic_valid(bad))
+
     def test_closed_diagnostic_survives_capture_without_resolved_values(self):
         raw = observation()
         before = deepcopy(raw)

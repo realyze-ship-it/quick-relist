@@ -21,6 +21,7 @@ import unittest
 
 from quick_relist.capture import parse_editor_url
 from quick_relist.hub_readonly import IDENTITY_SCRIPT, SOURCE_CONTEXT_SCRIPT
+from editor_identity_fixture import identity_cases, identity_style_faults, page
 
 
 @contextmanager
@@ -107,9 +108,20 @@ class EditorIdentityChromeTests(unittest.TestCase):
             row = self.driver.find_element("id", "source-row")
             return self.checked_script(SOURCE_CONTEXT_SCRIPT, root, row, "RXCU12345")
 
-    def identity_read(self, html):
+    def identity_read(self, html, *, style_fault=None):
         with serve_synthetic_html(html) as url:
             self.driver.get(url)
+            if style_fault is not None:
+                # Synthetic fixture-only fault injection, not a production
+                # workaround: model an unreadable computed response in Chrome.
+                self.driver.execute_script("""
+                  const fault = arguments[0], original = window.getComputedStyle.bind(window);
+                  window.getComputedStyle = e => {
+                    const style = original(e);
+                    return e.tagName === fault.tag ? new Proxy(style, {get:(target, key) =>
+                      key === fault.property ? fault.value : Reflect.get(target, key)}) : style;
+                  };
+                """, {key: style_fault[key] for key in ("tag", "property", "value")})
             # Executing scripts directly must not weaken controller route checks.
             with self.assertRaises(ValueError):
                 parse_editor_url(url)
@@ -138,6 +150,18 @@ class EditorIdentityChromeTests(unittest.TestCase):
         self.assertEqual(wrong, {**matched, "outer_matches": False})
         duplicate = self.identity_read(matching + "<h2>Edit listing - RXCU-12345 (Synthetic)</h2>")
         self.assertEqual(duplicate, {**matched, "outer_count": 2, "outer_matches": False})
+
+    def test_qualified_transparent_duplicate_and_all_native_negative_cases(self):
+        # Same generated cases as canonical jsdom, but actual Chrome geometry
+        # and computed styles, including zero-width/height and hidden ancestors.
+        for name, (html, expected) in identity_cases().items():
+            with self.subTest(case=name):
+                self.assertEqual(self.identity_read(html), expected)
+
+    def test_unreadable_fallback_styles_never_infer_authoritative_visibility(self):
+        for name, fault in identity_style_faults().items():
+            with self.subTest(case=name):
+                self.assertEqual(self.identity_read(fault.get("html", page()), style_fault=fault), fault["expected"])
 
     def test_heading_ancestor_hiding_is_not_the_source_menu_exception(self):
         headings = "<h2>Edit listing - RXCU-12345 (Synthetic)</h2><main><h4>Edit listing - RXCU-12345 (Synthetic)</h4></main>"

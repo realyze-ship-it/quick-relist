@@ -49,12 +49,55 @@ const visibleText = heading => {
   }
   return text.trim();
 };
-const identity = e => {
-  const match = visibleText(e).match(/^Edit listing\s*-\s*(RXCU-?[0-9]{3,20})\s*\(/i);
+const identityText = text => {
+  const match = text.match(/^Edit listing\s*-\s*(RXCU-?[0-9]{3,20})\s*\(/i);
   return match ? match[1].toUpperCase().replace('-', '') : null;
 };
-const outer = [...document.querySelectorAll('h2')].filter(e => visible(e) && !e.closest('main')).map(identity).filter(Boolean);
-const inner = [...document.querySelectorAll('main h4')].filter(visible).map(identity).filter(Boolean);
+const identity = e => identityText(visibleText(e));
+const outerHeadings = [...document.querySelectorAll('h2')].filter(e => !e.closest('main'));
+const outerVisible = outerHeadings.filter(visible).map(identity).filter(Boolean);
+const innerEvidence = [...document.querySelectorAll('main h4')].filter(visible)
+  .map(e => ({element:e, reference:identity(e)})).filter(item => item.reference);
+let inner = innerEvidence.map(item => item.reference);
+const positiveBox = e => [...e.getClientRects()].some(r =>
+  Number.isFinite(r.width) && Number.isFinite(r.height) && r.width > 0 && r.height > 0);
+const readableVisibleStyles = (e, transparentSelf=false) => {
+  for (let p = e; p; p = p.parentElement) {
+    if (p.hasAttribute('hidden') || p.getAttribute('aria-hidden') === 'true') return false;
+    const s = getComputedStyle(p);
+    if (typeof s.display !== 'string' || !s.display.trim() || s.display === 'none' || s.visibility !== 'visible') return false;
+    if (!(transparentSelf && p === e)) {
+      if (typeof s.opacity !== 'string' || !s.opacity.trim()) return false;
+      const opacity = Number(s.opacity);
+      if (!Number.isFinite(opacity) || opacity <= 0 || opacity > 1) return false;
+    }
+  }
+  return true;
+};
+// The observed page can keep its duplicate outer H2 at self opacity:0 while
+// the main H4 is visible. Qualify that exact direct-text shape as consistency
+// evidence only. Never override wrong/duplicate visible outer identities.
+const transparentDuplicate = e => {
+  if (e.children.length !== 0 || e.hasAttribute('hidden') || e.hasAttribute('aria-hidden') ||
+      !positiveBox(e)) return false;
+  const self = getComputedStyle(e);
+  if (self.display !== 'block' || self.visibility !== 'visible' || self.opacity !== '0') return false;
+  return readableVisibleStyles(e, true);
+};
+// With no element children, textContent is direct text only. No arbitrary
+// hidden descendants, attribute values or browser state are read. All four
+// fields must still match; the main H4 remains fully visible and authoritative.
+const outer = outerVisible.length ? outerVisible : outerHeadings.filter(transparentDuplicate)
+  .map(e => identityText(e.textContent.trim())).filter(Boolean);
+// In fallback mode, a sole matching main H4 must also be the observed direct-
+// text leaf, with positive-area geometry and readable visible self/ancestor
+// styles. Nested text cannot supply the authoritative reference. Keep raw wrong or
+// duplicate identities intact so stricter eligibility cannot hide a conflict.
+if (!outerVisible.length && innerEvidence.length === 1 && inner[0] === wanted &&
+    (innerEvidence[0].element.children.length !== 0 || !positiveBox(innerEvidence[0].element) ||
+     !readableVisibleStyles(innerEvidence[0].element))) inner = [];
+// outer_count/matches describe qualifying identity evidence, not visibility.
+// Callers must still require both exact counts/matches and their binding guards.
 return {outer_count: outer.length, inner_count: inner.length,
         outer_matches: outer.length === 1 && outer[0] === wanted,
         inner_matches: inner.length === 1 && inner[0] === wanted};
@@ -383,7 +426,7 @@ class ReadOnlyHub:
 
         Only an additional tab from this session's verified click can bind.
         A blank/loading target remains pending; any observed context, route or
-        identity conflict permanently blocks this intent until confirmed close.
+        qualifying title conflict blocks this intent until confirmed close.
         """
         state = self.editor_open_state(rxcu)
         if state != "pending":
@@ -415,8 +458,8 @@ class ReadOnlyHub:
             intent.route_observed = True
             result = self._read_editor_identity(intent.reference, intent.listing_id)
             self._check_editor_target(intent, handles, url)
-            # Missing headings can load later. A visible wrong or duplicate
-            # reference is a conflict, not a transient loading condition.
+            # Missing headings can load later. A wrong or duplicate qualifying
+            # title is a conflict, not a transient loading condition.
             pending_headings = self._editor_headings_pending(result)
             self._check_editor_source(intent, handles)
             driver.switch_to.window(intent.target_handle)
@@ -490,10 +533,12 @@ class ReadOnlyHub:
         self.driver.switch_to.window(matches[0])
 
     def _read_editor_identity(self, expected_rxcu, expected_listing_id):
-        """Verify both observed editor headings and the current numeric route.
+        """Read exact editor titles and the current numeric route.
 
         This does not prove which account owns the record or independently bind
-        the route to a results-row link. No address text leaves the browser.
+        the route to a results-row link. The main H4 must be fully visible; the
+        outer H2 may be the qualified transparent direct-text duplicate. This
+        does not claim two visible titles. No address text leaves the browser.
         """
         if self.driver is None:
             raise RuntimeError("Open the Hub browser first")
@@ -521,7 +566,7 @@ class ReadOnlyHub:
         return result
 
     def verify_editor_reference(self, expected_rxcu, expected_listing_id):
-        """Require both exact visible headings and a stable numeric editor route."""
+        """Require exact main-title/outer-title identity and a stable numeric route."""
         result = self._read_editor_identity(expected_rxcu, expected_listing_id)
         return self._verified_editor_identity(result)
 

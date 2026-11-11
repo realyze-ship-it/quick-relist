@@ -47,8 +47,8 @@ class SegmentedDateChromeTests(unittest.TestCase):
         cls.driver.set_page_load_timeout(10)
         cls.driver.set_script_timeout(5)
 
-    def read_fixture(self, setup='', *, reject_first=False):
-        with serve_synthetic_html(fixture_html()) as url:
+    def read_fixture(self, setup='', *, reject_first=False, false_container=False):
+        with serve_synthetic_html(fixture_html(false_container=false_container)) as url:
             self.driver.get(url)
             # Script-only qualification must not relax the production Hub guard.
             with self.assertRaises(CaptureSafetyError):
@@ -104,6 +104,29 @@ class SegmentedDateChromeTests(unittest.TestCase):
             expected['dom_order'] = index + 1  # Ordinary native date precedes appended date records.
             self.assertEqual(field, expected)
         self.assertFalse(any(item.get('kind') == DATE_DIAGNOSTIC_KIND for item in result['discovery']))
+
+    def test_exact_false_container_variant_and_unrelated_extra_node(self):
+        result = self.read_fixture(false_container=True)
+        dates = [field for field in result['fields'] if field.get('type') == DATE_TYPE]
+        self.assertEqual([field['name'] for field in dates], list(DATE_NAMES))
+        for index, field in enumerate(dates):
+            expected = date_record(index, false_container=True)
+            expected['dom_order'] = index + 1
+            self.assertEqual(field, expected)
+            self.assertTrue(segmented_date_record_valid(field))
+        self.assertFalse(any(item.get('kind') == DATE_DIAGNOSTIC_KIND for item in result['discovery']))
+        for code in ('date_semantics_unresolved', 'date_business_validation_unverified', 'date_requiredness_unverified'):
+            self.assertIn(code, result['limitations'])
+        # The same count and false value on another node must not qualify.
+        rejected = self.read_fixture("""
+          const group=document.getElementById('fixture-input-0').parentElement;
+          group.querySelector('.MuiPickersSectionList-root').removeAttribute('contenteditable');
+          group.insertAdjacentHTML('beforeend','<i contenteditable=false>PRIVATE_MARKER_5467</i>');
+        """, reject_first=True, false_container=True)
+        item = self.first_diagnostic(rejected)
+        self.assertEqual(item['counts']['contenteditable'], 4)
+        self.assertIn('segmented_date_contenteditable_count_not_three', item['reasons'])
+        self.assertNotIn('PRIVATE_MARKER_5467', json.dumps(item))
 
     def test_segment_rejection_excludes_privacy_marker_from_projection(self):
         marker = 'PRIVATE_MARKER_5467'

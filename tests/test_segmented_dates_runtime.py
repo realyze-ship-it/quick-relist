@@ -196,6 +196,78 @@ class SegmentedDateRuntimeTests(unittest.TestCase):
         self.assertIn("date_requiredness_unverified", result["limitations"])
         self.assertEqual(self.diagnostics(result), [])
 
+    def test_false_container_variant_matches_explicit_saved_evidence(self):
+        result = self.extract(fixture_html(false_container=True))
+        dates = self.dates(result)
+        self.assertEqual([field['name'] for field in dates], list(DATE_NAMES))
+        self.assertEqual([field['value'] for field in dates], list(RAW_DATES))
+        for index, field in enumerate(dates):
+            expected = date_record(index, false_container=True)
+            expected['dom_order'] = index + 1
+            self.assertEqual(field, expected)
+            self.assertTrue(segmented_date_record_valid(field))
+        self.assertEqual(self.diagnostics(result), [])
+        for code in ('date_semantics_unresolved', 'date_business_validation_unverified', 'date_requiredness_unverified'):
+            self.assertIn(code, result['limitations'])
+        legacy = self.extract(fixture_html(false_container=True), setup="""
+          for(const container of document.querySelectorAll('.MuiPickersSectionList-root'))
+            container.removeAttribute('contenteditable');
+        """)
+        self.assertEqual(self.dates(legacy), self.dates(self.extract()))
+
+    def test_false_container_variant_rejects_other_values_nodes_and_relations(self):
+        prefix = """const native=document.getElementById('fixture-input-0');
+          const group=native.parentElement,wrapper=group.parentElement;
+          const container=group.querySelector('.MuiPickersSectionList-root');
+          const segment=container.querySelector('[role=spinbutton]');
+        """
+        setups = [f"container.setAttribute('contenteditable',{json.dumps(value)})"
+                  for value in ('', 'true', 'plaintext-only', 'FALSE', ' false ', 'PRIVATE_MARKER_5467')]
+        setups += [
+            "container.removeAttribute('contenteditable'); group.setAttribute('contenteditable','false')",
+            "container.removeAttribute('contenteditable'); segment.parentElement.setAttribute('contenteditable','false')",
+            "container.removeAttribute('contenteditable'); wrapper.insertAdjacentHTML('beforeend','<i contenteditable=false>Extra</i>')",
+            "wrapper.insertAdjacentHTML('beforeend','<i contenteditable=false>Extra</i>')",
+            "const extra=document.createElement('div');group.insertBefore(extra,container);extra.appendChild(container)",
+            "container.hidden=true",
+            "container.classList.remove('MuiPickersInputBase-sectionsContainer')",
+            "container.outerHTML=container.outerHTML.replace(/^<div/, '<section').replace(/div>$/, 'section>')",
+            "segment.setAttribute('contenteditable','false')",
+            "segment.removeAttribute('contenteditable')",
+            "segment.setAttribute('aria-readonly','true')",
+            "group.appendChild(segment.parentElement)",
+            "document.getElementById('fixture-label-0').textContent='Unbound date label'",
+        ]
+        for setup in setups:
+            with self.subTest(setup=setup):
+                result = self.extract('<main>' + picker_html(false_container=True) + '</main>', setup=prefix+setup,
+                                      deny_values=['fixture-input-0'])
+                self.assertEqual(self.dates(result), [])
+                self.assertTrue(any(code.startswith('segmented_date_') for code in result['limitations']))
+                self.assertNotIn('PRIVATE_MARKER_5467', json.dumps(self.diagnostics(result)))
+
+    def test_false_container_rejection_preserves_value_free_segment_diagnostics(self):
+        result = self.extract('<main>' + picker_html(raw='PRIVATE_RAW_VALUE', false_container=True) + '</main>',
+            setup="""const part=document.querySelector('[role=spinbutton]');
+              part.setAttribute('aria-readonly','PRIVATE_ATTRIBUTE_VALUE');
+              part.textContent='PRIVATE_TEXT_VALUE';
+            """, deny_values=['fixture-input-0'])
+        item, = self.diagnostics(result)
+        self.assertEqual(item['contenteditable_binding'], 'container_false_and_three_true_segments')
+        self.assertEqual(item['counts']['contenteditable'], 4)
+        self.assertEqual(item['counts']['contenteditable_true'], 3)
+        self.assertEqual(item['segment_rejections'], [{'dom_order':0,
+                         'reasons':['segmented_date_segment_aria_readonly_not_false']}])
+        self.assertNotIn('PRIVATE_', json.dumps(item))
+        self.assertNotIn('PRIVATE_RAW_VALUE', json.dumps(result))
+
+    def test_false_container_raw_sanitization_still_omits_unpreservable_values(self):
+        for raw in ('X'*1001, 'https://example.invalid/date?private=synthetic', 'javascript:synthetic'):
+            with self.subTest(raw_kind=raw[:15]):
+                result = self.extract('<main>' + picker_html(raw=raw, false_container=True) + '</main>')
+                self.assertEqual(self.dates(result), [])
+                self.assertIn('segmented_date_raw_observation_omitted', result['limitations'])
+
     def test_rejection_counts_identify_each_container_and_control_condition(self):
         cases = {
             'segment_count_not_three': 'segment.remove()',

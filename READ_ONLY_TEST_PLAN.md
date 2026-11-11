@@ -46,6 +46,34 @@ recheckable. Recheck is a usability safeguard around an uncertain opening, not
 a diagnosis of the original timeout or a native-crash fix. Account ownership,
 complete source coverage, original media and live relisting remain unverified.
 
+### Qualified transparent duplicate title
+
+The observed editor can show its main H4 title while keeping the matching
+outer H2 title transparent. A qualified build may use that outer title only
+as consistency evidence. The main H4 must still be fully visible and exactly
+match the selected reference, with the original row/link, numeric route,
+browser session, tabs and local job guards unchanged. This is not proof of
+two visible titles, account ownership or complete source capture.
+
+The exception is limited to one H2 outside MAIN with direct text and no child
+elements or hidden/aria-hidden attributes, block/visible computed style,
+self opacity exactly zero and positive-area rectangles. Every ancestor must
+have readable display/visibility and a finite positive computed opacity.
+The authoritative main H4 must also be the observed direct-text leaf with no
+element children. Nested elements cannot supply its reference, even if they
+appear visible. It needs positive-area rectangles and readable,
+visible styles with finite positive opacity on itself and its ancestors.
+Wrong or duplicate visible H4 identities remain contradictions even when
+their geometry or style evidence is unqualified; they are not filtered away.
+Hidden or otherwise unqualified ancestors, wrong or duplicate eligible
+titles, missing/hidden main titles and changed bindings cannot approve a
+match. The normal visible-title branch is unchanged; a transparent fallback
+never overrides wrong or duplicate visible outer-title evidence.
+
+Do not change page styles or fields to satisfy these checks. A pending or
+blocked result remains unverified. Saved captures are still partial, and no
+listing mutation or live readiness is enabled by either title presentation.
+
 ## Capture and check
 
 5. Choose **Capture matched editor tabs**. Read the confirmation. Supported

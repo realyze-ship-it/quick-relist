@@ -16,6 +16,8 @@ DATE_LABELS = (
     "Mandate signed date", "Mandate expiry date", "Date listed", "Listing expiry date", "On market since",
 )
 DATE_SCHEMA = "mui-segmented-date-dom/v1"
+DATE_FALSE_CONTAINER_SCHEMA = "mui-segmented-date-dom/v2"
+DATE_FALSE_CONTAINER_VARIANT = "bound-false-container"
 DATE_TYPE = "mui-segmented-date"
 DATE_DIAGNOSTIC_KIND = "segmented_date_rejection"
 DATE_DIAGNOSTIC_SCHEMA = "mui-segmented-date-rejection/v1"
@@ -61,6 +63,13 @@ _BINDING_RELATIONS = (
     "input_parent_is_group", "group_parent_is_wrapper", "label_in_wrapper",
     "sections_in_group", "calendar_in_group", "capture_root_contains_wrapper",
 )
+_FALSE_CONTAINER_COUNTS = {
+    "wrapper_contenteditable_true_count": 3, "wrapper_contenteditable_false_count": 1,
+    "wrapper_contenteditable_other_count": 0,
+}
+_FALSE_CONTAINER_RELATIONS = (
+    "container_parent_is_group", "contenteditable_nodes_are_container_and_segments",
+)
 
 # This fragment is intentionally not a standalone browser task. It is injected
 # once before fieldsFor; calls use the supplied capture root, including dialogs.
@@ -93,7 +102,7 @@ DATE_CAPTURE_HELPERS = r"""
       || (Array.isArray(value) && value.every(exactTree))
       || (value && typeof value === 'object' && Object.values(value).every(exactTree));
     const reject = code => limitations.add(code);
-    const diagnoseSegments = (name, wrapper, group, segments, containers, buttons, checkSegments) => {
+    const diagnoseSegments = (name, wrapper, group, segments, containers, buttons, checkSegments, falseContainer) => {
       const reasons = [], segmentRejections = [];
       const note = (list, failed, code) => { if (failed) list.push('segmented_date_' + code); };
       const editable = all(wrapper, '[contenteditable]');
@@ -101,7 +110,7 @@ DATE_CAPTURE_HELPERS = r"""
         note(reasons, segments.length !== 3, 'segment_count_not_three');
         note(reasons, containers.length !== 1, 'container_count_not_one');
         note(reasons, buttons.length !== 1, 'button_count_not_one');
-        note(reasons, editable.length !== 3, 'contenteditable_count_not_three');
+        note(reasons, editable.length !== 3 && !falseContainer, 'contenteditable_count_not_three');
         if (buttons.length === 1) {
           note(reasons, !safeVisible(buttons[0]), 'button_not_safe_visible');
           note(reasons, !group.contains(buttons[0]), 'button_outside_group');
@@ -149,7 +158,8 @@ DATE_CAPTURE_HELPERS = r"""
         count_cap:100, counts:{segments:cap(segments.length), contenteditable:cap(editable.length),
           contenteditable_true:cap(editable.filter(el => attr(el, 'contenteditable') === 'true').length),
           containers:cap(containers.length), buttons:cap(buttons.length), visible_buttons:cap(buttons.filter(visible).length)},
-        reasons:Array.from(new Set(reasons)), segment_rejections:segmentRejections});
+        reasons:Array.from(new Set(reasons)), segment_rejections:segmentRejections,
+        ...(falseContainer ? {contenteditable_binding:'container_false_and_three_true_segments'} : {})});
     };
     const inputs = within(root, 'input');
     const wrappers = within(root, '.MuiPickersTextField-root');
@@ -204,13 +214,20 @@ DATE_CAPTURE_HELPERS = r"""
       const segments = all(wrapper, '[role="spinbutton"]');
       const containers = all(group, '.MuiPickersSectionList-root');
       const buttons = all(wrapper, 'button,[role="button"]');
+      const editable = all(wrapper, '[contenteditable]');
+      // A separate read-only variant, not a general allowance for four nodes.
+      // The exact extra node must be this directly bound section-list container.
+      const falseContainer = segments.length === 3 && containers.length === 1 && editable.length === 4
+        && containers[0].parentElement === group && attr(containers[0], 'contenteditable') === 'false'
+        && editable.includes(containers[0])
+        && segments.every(segment => editable.includes(segment) && attr(segment, 'contenteditable') === 'true');
       if (segments.length !== 3 || containers.length !== 1 || buttons.length !== 1
           || !safeVisible(buttons[0]) || !group.contains(buttons[0])
-          || all(wrapper, '[contenteditable]').length !== 3
+          || (editable.length !== 3 && !falseContainer)
           || !safeVisible(containers[0]) || containers[0].tagName !== 'DIV'
           || !hasClasses(containers[0], ['MuiPickersSectionList-root','MuiPickersInputBase-sectionsContainer'])) {
         reject('segmented_date_segments_unresolved');
-        diagnoseSegments(name, wrapper, group, segments, containers, buttons, false); continue;
+        diagnoseSegments(name, wrapper, group, segments, containers, buttons, false, falseContainer); continue;
       }
       const container = containers[0];
       const parts = [];
@@ -242,7 +259,7 @@ DATE_CAPTURE_HELPERS = r"""
       }
       if (!valid) {
         reject('segmented_date_segments_unresolved');
-        diagnoseSegments(name, wrapper, group, segments, containers, buttons, true); continue;
+        diagnoseSegments(name, wrapper, group, segments, containers, buttons, true, falseContainer); continue;
       }
       const raw = input.value;
       const record = {dom_order:startOrder + records.length, tag:'input', type:'mui-segmented-date',
@@ -268,6 +285,15 @@ DATE_CAPTURE_HELPERS = r"""
             wrapper_spinbutton_count:3, wrapper_contenteditable_count:3, wrapper_button_count:1, group_section_list_count:1,
             input_parent_is_group:true, group_parent_is_wrapper:true, label_in_wrapper:true,
             sections_in_group:true, calendar_in_group:true, capture_root_contains_wrapper:true}}};
+      if (falseContainer) {
+        record.date_picker.schema_version = 'mui-segmented-date-dom/v2';
+        record.date_picker.shape_variant = 'bound-false-container';
+        record.date_picker.container.contenteditable = 'false';
+        Object.assign(record.date_picker.binding, {wrapper_contenteditable_count:4,
+          wrapper_contenteditable_true_count:3, wrapper_contenteditable_false_count:1,
+          wrapper_contenteditable_other_count:0, container_parent_is_group:true,
+          contenteditable_nodes_are_container_and_segments:true});
+      }
       if (!exactTree(record)) { reject('segmented_date_raw_observation_omitted'); continue; }
       records.push(record);
       reject('date_semantics_unresolved'); reject('date_business_validation_unverified'); reject('date_requiredness_unverified');
@@ -285,7 +311,8 @@ def segmented_date_diagnostic_valid(item: dict) -> bool:
     """
     keys = {"kind", "schema_version", "status", "field_key", "complete", "date_value_observed",
             "count_cap", "counts", "reasons", "segment_rejections"}
-    if (not isinstance(item, dict) or set(item) != keys or item["kind"] != DATE_DIAGNOSTIC_KIND
+    if (not isinstance(item, dict) or set(item) not in (keys, keys | {"contenteditable_binding"})
+            or item["kind"] != DATE_DIAGNOSTIC_KIND
             or item["schema_version"] != DATE_DIAGNOSTIC_SCHEMA
             or item["status"] != "unresolved_structural_diagnostic" or item["field_key"] not in DATE_NAMES
             or item["complete"] is not False or item["date_value_observed"] is not False
@@ -296,6 +323,11 @@ def segmented_date_diagnostic_valid(item: dict) -> bool:
             or any(type(value) is not int or not 0 <= value <= DATE_DIAGNOSTIC_COUNT_CAP for value in counts.values())
             or counts["contenteditable_true"] > counts["contenteditable"]
             or counts["visible_buttons"] > counts["buttons"]):
+        return False
+    false_container = "contenteditable_binding" in item
+    if false_container and (item["contenteditable_binding"] != "container_false_and_three_true_segments"
+            or counts["contenteditable"] != 4 or counts["contenteditable_true"] != 3
+            or counts["segments"] != 3 or counts["containers"] != 1):
         return False
 
     def reasons_valid(reasons, allowed):
@@ -315,7 +347,7 @@ def segmented_date_diagnostic_valid(item: dict) -> bool:
             return False
         previous = segment["dom_order"]
     if segments:
-        return (counts["segments"] == counts["contenteditable"] == 3
+        return (counts["segments"] == 3 and counts["contenteditable"] == (4 if false_container else 3)
                 and counts["containers"] == counts["buttons"] == counts["visible_buttons"] == 1
                 and set(reasons) == {reason for segment in segments for reason in segment["reasons"]})
     return all(reason in DATE_DIAGNOSTIC_SHAPE_REASONS for reason in reasons)
@@ -355,7 +387,7 @@ def segmented_date_record_valid(field: dict) -> bool:
     data = field.get("date_picker")
     if (field.get("name") not in DATE_NAMES or field.get("tag") != "input" or field.get("type") != DATE_TYPE
             or not string(field.get("value")) or not identifier(field.get("id"))
-            or not isinstance(data, dict) or data.get("schema_version") != DATE_SCHEMA
+            or not isinstance(data, dict) or data.get("schema_version") not in (DATE_SCHEMA, DATE_FALSE_CONTAINER_SCHEMA)
             or data.get("status") != "observed_supported"
             or any(data.get(key) is not False for key in
                    ("semantics_verified", "business_validation_verified", "requiredness_verified"))):
@@ -392,7 +424,17 @@ def segmented_date_record_valid(field: dict) -> bool:
             or any(node.get("tag") != "div" or not visible(node) for node in (wrapper, container))
             or not has_classes(wrapper, _WRAPPER_CLASSES) or not has_classes(container, _CONTAINER_CLASSES)):
         return False
-    if (any(type(binding.get(k)) is not int or binding[k] != value for k, value in _BINDING_COUNTS.items())
+    false_container = data["schema_version"] == DATE_FALSE_CONTAINER_SCHEMA
+    if false_container:
+        if (data.get("shape_variant") != DATE_FALSE_CONTAINER_VARIANT or container.get("contenteditable") != "false"
+                or any(type(binding.get(k)) is not int or binding[k] != value for k, value in _FALSE_CONTAINER_COUNTS.items())
+                or any(binding.get(k) is not True for k in _FALSE_CONTAINER_RELATIONS)):
+            return False
+    elif ("shape_variant" in data or "contenteditable" in container
+            or any(key in binding for key in (*_FALSE_CONTAINER_COUNTS, *_FALSE_CONTAINER_RELATIONS))):
+        return False  # A new variant cannot be laundered through legacy validation.
+    expected_counts = dict(_BINDING_COUNTS, wrapper_contenteditable_count=4) if false_container else _BINDING_COUNTS
+    if (any(type(binding.get(k)) is not int or binding[k] != value for k, value in expected_counts.items())
             or any(binding.get(k) is not True for k in _BINDING_RELATIONS)):
         return False
     parts = data.get("segments")

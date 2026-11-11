@@ -3,15 +3,18 @@ from copy import deepcopy
 from html import escape
 
 from quick_relist.capture import SCHEMA_VERSION, _digest
-from quick_relist.date_capture import DATE_NAMES, DATE_LABELS, DATE_SCHEMA, DATE_TYPE
+from quick_relist.date_capture import (
+    DATE_NAMES, DATE_LABELS, DATE_SCHEMA, DATE_TYPE, DATE_FALSE_CONTAINER_SCHEMA, DATE_FALSE_CONTAINER_VARIANT,
+)
 
 RAW_DATES = ("2040-01-02", " 2041/03/04 ", "05.06.2042", "2043-07-08T09:10:11+02:00", "\u200e2044-09-10")
 
 
-def picker_html(index=0, raw=None, *, name=None):
+def picker_html(index=0, raw=None, *, name=None, false_container=False):
     name = DATE_NAMES[index] if name is None else name
     raw = RAW_DATES[index] if raw is None else raw
     label = DATE_LABELS[index] + ("*" if index in (2, 3) else "")
+    container_attribute = ' contenteditable="false"' if false_container else ''
     parts = []
     for position, (part, value, text) in enumerate((("Year", "2099", "2099"), ("Month", "11", "November"), ("Day", "19", "19th"))):
         value_text = '' if position == 0 else f' aria-valuetext="{text}"'
@@ -19,23 +22,23 @@ def picker_html(index=0, raw=None, *, name=None):
     return f'''<div class="MuiFormControl-root MuiPickersTextField-root" data-fixture="date-{index}">
 <label id="fixture-label-{index}" for="fixture-input-{index}">{label}</label>
 <div class="MuiPickersInputBase-root MuiPickersOutlinedInput-root" role="group" aria-labelledby="fixture-label-{index}">
-<div class="MuiPickersSectionList-root MuiPickersInputBase-sectionsContainer">{''.join(parts)}</div>
+<div class="MuiPickersSectionList-root MuiPickersInputBase-sectionsContainer"{container_attribute}>{''.join(parts)}</div>
 <button type="button" aria-label="Choose date">Calendar (synthetic)</button>
 <input id="fixture-input-{index}" name="{escape(name, quote=True)}" aria-hidden="true" tabindex="-1" class="MuiPickersInputBase-input MuiPickersOutlinedInput-input" value="{escape(raw, quote=True)}">
 </div></div>'''
 
 
-def fixture_html():
+def fixture_html(*, false_container=False):
     return '''<!doctype html><html lang="en"><meta charset="utf-8"><title>Synthetic segmented date capture fixture</title>
 <style>body{font:16px system-ui} .MuiPickersTextField-root{margin:16px;padding:12px;border:1px solid #bbb}
 .MuiPickersInputBase-input{position:absolute;opacity:0;pointer-events:none;width:1px;height:1px}
 .MuiPickersSectionList-section{display:inline-block;margin-right:12px}</style>
-<main><h1>Synthetic date observations</h1><p>Offline fixture only. Raw inputs deliberately differ from segments. No calendar logic or network.</p>''' + ''.join(picker_html(i) for i in range(5)) + '''
+<main><h1>Synthetic date observations</h1><p>Offline fixture only. Raw inputs deliberately differ from segments. No calendar logic or network.</p>''' + ''.join(picker_html(i, false_container=false_container) for i in range(5)) + '''
 <label for="ordinary-date">Ordinary native date</label><input id="ordinary-date" type="date" value="2045-12-31">
 <div contenteditable="true" aria-label="Unrelated editable">Retain this observation</div></main></html>'''
 
 
-def date_record(index=0, raw=None):
+def date_record(index=0, raw=None, *, false_container=False):
     name = DATE_NAMES[index]
     label = DATE_LABELS[index] + ("*" if index in (2, 3) else "")
     raw = RAW_DATES[index] if raw is None else raw
@@ -49,7 +52,7 @@ def date_record(index=0, raw=None):
             "aria_valuenow": value, "aria_valuetext": None if position == 0 else text, "text": text,
             "visible": True, "sensitive_context": False, "child_element_count": 0})
     visible = {"visible": True, "sensitive_context": False}
-    return {"dom_order": index, "tag": "input", "type": DATE_TYPE, "id": f"fixture-input-{index}", "name": name,
+    record = {"dom_order": index, "tag": "input", "type": DATE_TYPE, "id": f"fixture-input-{index}", "name": name,
         "label": label, "section": "", "value": raw, "checked": None, "disabled": False, "read_only": False,
         "selected_options": None, "option_count": None,
         "date_picker": {"schema_version": DATE_SCHEMA, "status": "observed_supported", "semantics_verified": False,
@@ -72,6 +75,14 @@ def date_record(index=0, raw=None):
                 "wrapper_button_count": 1, "group_section_list_count": 1, "input_parent_is_group": True,
                 "group_parent_is_wrapper": True, "label_in_wrapper": True, "sections_in_group": True,
                 "calendar_in_group": True, "capture_root_contains_wrapper": True}}}
+    if false_container:
+        record['date_picker'].update(schema_version=DATE_FALSE_CONTAINER_SCHEMA, shape_variant=DATE_FALSE_CONTAINER_VARIANT)
+        record['date_picker']['container']['contenteditable'] = 'false'
+        record['date_picker']['binding'].update(wrapper_contenteditable_count=4,
+            wrapper_contenteditable_true_count=3, wrapper_contenteditable_false_count=1,
+            wrapper_contenteditable_other_count=0, container_parent_is_group=True,
+            contenteditable_nodes_are_container_and_segments=True)
+    return record
 
 
 def capture(fields, *, replacement=False, rich_text=None):

@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 
 from quick_relist.capture import READ_PAGE_SCRIPT, CaptureReadError, _validate_observation
-from quick_relist.date_capture import (DATE_NAMES, DATE_TYPE, DATE_UNRESOLVED_ISSUES,
+from quick_relist.date_capture import (DATE_NAMES, DATE_TYPE, DATE_SCHEMA, DATE_FALSE_CONTAINER_SCHEMA, DATE_UNRESOLVED_ISSUES,
     date_observed_parts, segmented_date_record_valid)
 from quick_relist.source_fields import extract_source_fields
 from quick_relist.replacement_review import compare_replacement_fields
@@ -21,6 +21,75 @@ def compare(a, b):
 
 
 class SegmentedDateTests(unittest.TestCase):
+    def test_false_container_variant_preserves_raw_observations_and_unresolved_semantics(self):
+        fields = [date_record(i, false_container=True) for i in range(5)]
+        result = extract_source_fields(capture(fields))
+        for index, field in enumerate(fields):
+            self.assertTrue(segmented_date_record_valid(field))
+            row = entries(result)[DATE_NAMES[index]]
+            self.assertEqual(row['value'], RAW_DATES[index])
+            self.assertEqual(row['date_parts'], date_observed_parts(field))
+            self.assertEqual(row['status'], 'unresolved')
+            self.assertEqual(row['issues'], list(DATE_UNRESOLVED_ISSUES))
+        for flag in ('complete', 'live_ready'):
+            self.assertFalse(result[flag])
+        # The variant differs only in explicit new structural evidence.
+        new = fields[0]['date_picker']
+        old = date_record()['date_picker']
+        for key in ('input', 'label', 'group', 'wrapper', 'segments'):
+            self.assertEqual(new[key], old[key])
+        self.assertEqual(old['schema_version'], DATE_SCHEMA)
+        self.assertEqual(new['schema_version'], DATE_FALSE_CONTAINER_SCHEMA)
+
+    def test_false_container_variant_requires_all_additional_binding_evidence(self):
+        good = date_record(false_container=True)
+        mutations = [
+            lambda f: f['date_picker'].pop('shape_variant'),
+            lambda f: f['date_picker'].update(shape_variant='other'),
+            lambda f: f['date_picker'].update(schema_version=DATE_SCHEMA),
+            lambda f: f['date_picker']['container'].pop('contenteditable'),
+            lambda f: f['date_picker']['binding'].update(wrapper_contenteditable_count=3),
+            lambda f: f['date_picker']['binding'].update(wrapper_contenteditable_count=True),
+            lambda f: f['date_picker']['segments'][0].update(contenteditable='false'),
+            lambda f: f['date_picker']['segments'][1].update(aria_label='Day'),
+        ]
+        for value in (None, '', 'true', 'FALSE', ' false ', 'invalid', False):
+            mutations.append(lambda f, value=value: f['date_picker']['container'].update(contenteditable=value))
+        for key in ('wrapper_contenteditable_true_count', 'wrapper_contenteditable_false_count',
+                    'wrapper_contenteditable_other_count', 'container_parent_is_group',
+                    'contenteditable_nodes_are_container_and_segments'):
+            mutations.append(lambda f, key=key: f['date_picker']['binding'].pop(key))
+            mutations.append(lambda f, key=key: f['date_picker']['binding'].update({key:'invalid'}))
+            mutations.append(lambda f, key=key: f['date_picker']['binding'].update({key:False}))
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                field = deepcopy(good)
+                mutate(field)
+                self.assertFalse(segmented_date_record_valid(field))
+                row = entries(extract_source_fields(capture([field])))[DATE_NAMES[0]]
+                self.assertEqual(row['issues'], ['segmented_date_shape_invalid'])
+                self.assertNotIn('value', row)
+        count_only = date_record()
+        count_only['date_picker'].update(schema_version=DATE_FALSE_CONTAINER_SCHEMA, shape_variant='bound-false-container')
+        count_only['date_picker']['binding']['wrapper_contenteditable_count'] = 4
+        self.assertFalse(segmented_date_record_valid(count_only))
+        # Resetting only the schema/count cannot turn new-variant evidence into v1.
+        downgraded = deepcopy(good)
+        downgraded['date_picker'].update(schema_version=DATE_SCHEMA)
+        downgraded['date_picker'].pop('shape_variant')
+        downgraded['date_picker']['binding']['wrapper_contenteditable_count'] = 3
+        self.assertFalse(segmented_date_record_valid(downgraded))
+
+    def test_false_container_collector_boundary_keeps_strict_variant_validation(self):
+        raw = {key: [] for key in ('rich_text', 'dialogs', 'sections', 'lists', 'tables',
+                                   'media', 'editor_links', 'discovery', 'limitations')}
+        raw.update(href='https://hub.remax.co.za/app/listings/edit/123456', ready_state='complete',
+                   fields=[date_record(false_container=True)])
+        self.assertEqual(_validate_observation(raw, raw['href'])['fields'], raw['fields'])
+        raw['fields'][0]['date_picker']['binding']['contenteditable_nodes_are_container_and_segments'] = False
+        with self.assertRaises(CaptureReadError):
+            _validate_observation(raw, raw['href'])
+
     def test_all_five_preserve_raw_dates_parts_and_provenance(self):
         fields = [date_record(i) for i in range(5)]
         original = capture(fields)
