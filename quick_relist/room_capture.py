@@ -37,6 +37,31 @@ ROOM_OPTIONS = (
 ESCAPE = '\ue00c'  # WebDriver Escape; no Selenium import required for offline use.
 
 
+@dataclass(frozen=True)
+class _FractionalBathroomCount:
+    # An exact display observation, NEVER an expected number of room groups.
+    raw: str
+
+    def observation(self):
+        return {'format': 'positive_nonintegral_decimal', 'raw': self.raw}
+
+
+def _fractional_bathroom_count(descriptor, feature):
+    observation = feature.get('count_observation')
+    if (descriptor != ROOM_OPTIONS[1] or 'count' not in feature or feature['count'] is not None
+            or type(observation) is not dict or set(observation) != {'format', 'raw'}
+            or observation.get('format') != 'positive_nonintegral_decimal'):
+        return None
+    raw = observation.get('raw')
+    if (type(raw) is not str or len(raw) > 128
+            or re.fullmatch(r'[0-9]+\.[0-9]+', raw) is None):
+        return None
+    number = float(raw)
+    if not math.isfinite(number) or number <= 0 or number.is_integer():
+        return None
+    return _FractionalBathroomCount(raw)
+
+
 def _keyboard_escape(driver):
     # MUI's dialog paper is not necessarily focusable. Send one standard
     # WebDriver keyboard action to the current browser focus, as a user presses
@@ -90,6 +115,11 @@ return (() => {
     f.element=e;
     const value=String(input.value);
     if (/^[0-9]+$/.test(value) && Number.isSafeInteger(Number(value))) f.count=Number(value);
+    else if (wanted.key === 'bathroom' && wanted.count_id === 'feature-bathroom-input' &&
+        wanted.opener === 'Set bathrooms options' && wanted.noun === 'Bathroom' &&
+        value.length <= 128 && value.match(/^[0-9]+\.[0-9]+$/)?.[0] === value &&
+        Number.isFinite(Number(value)) && Number(value) > 0 && !Number.isInteger(Number(value)))
+      f.count_observation={format:'positive_nonintegral_decimal', raw:value};
   }
   return result;
 })();
@@ -105,9 +135,14 @@ return (() => {
 """ + ROOM_STATE_SCRIPT + r"""
   })(wanted);
   const f=state.feature;
+  const integer=Number.isSafeInteger(count) && count > 0 && f?.count === count;
+  const fractional=count && typeof count === 'object' && !Array.isArray(count) &&
+    Object.keys(count).length === 2 && count.format === 'positive_nonintegral_decimal' &&
+    typeof count.raw === 'string' && f?.count === null &&
+    f.count_observation?.format === count.format && f.count_observation?.raw === count.raw;
   if (!state.ready || state.busy || state.overlays.length || !f ||
       f.opener_count !== 1 || f.count_count !== 1 || !f.shape_ok ||
-      f.element !== expected || f.count !== count || !Number.isSafeInteger(count) || count <= 0)
+      f.element !== expected || (!integer && !fractional))
     return 'changed';
   const e=f.element;
   if (!e.isConnected || e.ownerDocument !== document || e.getRootNode() !== document) return 'changed';
@@ -393,8 +428,10 @@ class _RoomCapture:
             raise _Stop('main_changed')
         self.identity()
         feature = self.checked_feature(self.state())
-        if (feature['element'] != original['element'] or type(feature.get('count')) is not int
-                or feature['count'] != count):
+        same_count = (_fractional_bathroom_count(self.descriptor, feature) == count
+                      if isinstance(count, _FractionalBathroomCount) else
+                      type(feature.get('count')) is int and feature['count'] == count)
+        if feature['element'] != original['element'] or not same_count:
             raise _Stop('opener_ambiguous')
         return feature
 
@@ -402,7 +439,8 @@ class _RoomCapture:
         self.guard()
         try:
             status = self.rpc(lambda: self.driver.execute_script(ROOM_POSITION_SCRIPT,
-                asdict(self.descriptor), feature['element'], count, scroll))
+                asdict(self.descriptor), feature['element'],
+                count.observation() if isinstance(count, _FractionalBathroomCount) else count, scroll))
         except _Stop:
             raise
         except Exception:
@@ -418,7 +456,11 @@ class _RoomCapture:
         self.identity()
         feature = self.checked_feature(self.state())
         count = feature.get('count')
-        if type(count) is not int or count < 0:
+        if 'count_observation' in feature:
+            count = _fractional_bathroom_count(self.descriptor, feature)
+        elif type(count) is not int or count < 0:
+            count = None
+        if count is None:
             self.result['observations'].append({'key': self.descriptor.key, 'status': 'skipped', 'reason': 'count_unqualified'})
             return None
         if count == 0:
@@ -477,16 +519,28 @@ class _RoomCapture:
                     self.guard()
                     dialog['source'] = {'rxcu': self.reference, 'listing_id': self.listing_id,
                         'page_key': 'details', 'opener': self.descriptor.opener, 'title': self.descriptor.opener,
-                        'feature_count': count, 'main_fields_sha256': self.baseline,
+                        'feature_count': None if isinstance(count, _FractionalBathroomCount) else count,
+                        'main_fields_sha256': self.baseline,
                         'reference_checked_before': True,
                         'reference_checked_before_and_after': False, 'pinned_tab_checked': True,
                         'main_fields_unchanged_verified': False, 'close_verified': False,
                         'dom_stability_seconds': self.stable, 'observed_at': page['observed_at'],
                         'limitations': deepcopy(page['limitations']), 'complete': False,
                         'server_writes_verified': False}
-                    self.result['pending_dialogs'].append(dialog)
                     groups = dialog.get('room_groups')
-                    if (not isinstance(groups, list) or len(groups) != count
+                    fractional = isinstance(count, _FractionalBathroomCount)
+                    if fractional:
+                        dialog['source'].update(feature_count_observation=count.observation(),
+                            observed_room_group_count=len(groups) if isinstance(groups, list) else None,
+                            display_count_relationship_verified=False)
+                    self.result['pending_dialogs'].append(dialog)
+                    # The decimal is not rounded, floored or converted to an
+                    # expected cardinality. The existing parser owns structure;
+                    # only a bounded contiguous observed set may be retained.
+                    if (not isinstance(groups, list)
+                            or (not 1 <= len(groups) <= 200 if fractional else len(groups) != count)
+                            or (fractional and any(code in page['limitations'] for code in
+                                ('dom_items_truncated', 'dom_text_truncated', 'rich_text_truncated')))
                             or 'room_group_structure_unresolved' in page['limitations']
                             or any(not isinstance(g, dict) or type(g.get('index')) is not int
                                    or g.get('index') != i or g.get('title') != f'{self.descriptor.noun} {i}'
@@ -543,7 +597,13 @@ class _RoomCapture:
                     main_fields_unchanged_verified=True, close_verified=True)
                 self.result['dialogs'].append(dialog)
                 self.result['pending_dialogs'].remove(dialog)
-                self.result['observations'].append({'key': descriptor.key, 'status': 'observed', 'count': count})
+                if isinstance(count, _FractionalBathroomCount):
+                    # Summary/diagnostic records must not duplicate the raw value.
+                    self.result['observations'].append({'key': descriptor.key, 'status': 'observed',
+                        'observed_room_group_count': len(dialog['room_groups']),
+                        'display_count_relationship_verified': False})
+                else:
+                    self.result['observations'].append({'key': descriptor.key, 'status': 'observed', 'count': count})
         except (Exception, KeyboardInterrupt) as exc:
             code = exc.code if isinstance(exc, _Stop) else 'cancelled' if isinstance(exc, KeyboardInterrupt) else 'browser_failure'
             # Cleanup is permissible only for a previously verified, still unique
@@ -576,7 +636,10 @@ def capture_existing_room_options(hub, rxcu, *, expected_listing_id, expected_ur
     ``expected_main_fingerprint`` binds to an already captured details page:
     pass _digest({k: page[k] for k in ('fields', 'rich_text')}). A mismatch stops
     before any click, preventing new dialogs being paired with stale fields.
-    Zero/unsupported counts are explicit gaps. Only verified descriptors from
+    Zero/unsupported counts are explicit gaps. The narrowly supported positive
+    decimal bathroom display is retained separately from observed room groups;
+    their relationship remains unverified and no expected count is inferred.
+    Only verified descriptors from
     ROOM_OPTIONS may be selected. Commands in flight cannot be cancelled, and
     driver transport stalls cannot be bounded by the polling timeout.
     """

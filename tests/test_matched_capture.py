@@ -40,6 +40,11 @@ class Driver:
         self.after_navigation = lambda: None
 
     def execute_script(self, script, *args):
+        from quick_relist.tab_positioning import TAB_POSITION_SCRIPT
+        if script == TAB_POSITION_SCRIPT:
+            self.calls.append(('tab_position', args[-1]))
+            self.hook('tab_position')
+            return 'clear'
         assert script in (READ_PAGE_SCRIPT, IDENTITY_SCRIPT, READINESS_SCRIPT)
         self.calls.append(('read', script))
         if script == IDENTITY_SCRIPT:
