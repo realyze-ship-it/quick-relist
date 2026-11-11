@@ -26,3 +26,16 @@ jobs:
         run: python -c "from PySide6 import QtWidgets, QtTest"
       - run: python -m compileall -q quick_relist
       - run: NODE_PATH="$RUNNER_TEMP/quick-relist-dom/node_modules" python -m pytest -q
+      - name: Qualify integrated native Chrome workflow
+        timeout-minutes: 6
+        env:
+          QUICK_RELIST_CHROME_TESTS: '1'
+        run: |
+          driver="${CHROMEWEBDRIVER:?Existing runner ChromeDriver is required}/chromedriver"
+          test -x "$driver"
+          chrome="$(command -v google-chrome)"
+          "$chrome" --version
+          "$driver" --version
+          export QUICK_RELIST_CHROMEDRIVER="$driver"
+          export QUICK_RELIST_CHROME_BINARY="$chrome"
+          python -m pytest -q --maxfail=1 tests/test_draft_pipeline_chrome.py tests/test_media_metadata_chrome.py

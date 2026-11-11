@@ -287,34 +287,48 @@ class MetadataWorkflow:
                               pending['operation_id'] if pending else None,
                               'terminal_not_applied_no_retry' if rejected else 'synthetic_only')
 
+    def _reconcile_locked(self):
+        """Private composition helper; caller must hold this store's lock."""
+        try:
+            state = self._load(); state = self._observe(*state)
+            return self._report(state, len(self.request.stages()))
+        except (Exception, KeyboardInterrupt):
+            return MetadataReport('blocked', code='reconciliation_unverified')
+
     def reconcile_for_testing(self):
         try:
             with self.store.operation_lock():
-                state = self._load(); state = self._observe(*state)
-                return self._report(state, len(self.request.stages()))
+                return self._reconcile_locked()
         except (Exception, KeyboardInterrupt):
             return MetadataReport('blocked', code='reconciliation_unverified')
+
+    def _advance_locked(self):
+        """Private composition helper; caller must hold this store's lock."""
+        try:
+            state = self._load(create=True)
+            if state[3] is not None or state[4]:
+                return self._report(state, len(self.request.stages()))
+            state = self._observe(*state)
+            cards, revision, ordinal, pending, rejected = state
+            if pending or rejected or ordinal == len(self.request.stages()):
+                return self._report(state, len(self.request.stages()))
+            command = self.request.command(ordinal, revision, cards)
+            self.provider.preflight(command, cards)
+            self._append({'phase':'intent','command':command})
+            try:
+                self.provider.perform(command, cards)
+            except (Exception, KeyboardInterrupt):
+                return MetadataReport('uncertain', ordinal, command['operation_id'], 'interaction_uncertain')
+            try:
+                return self._report(self._observe(*self._load()), len(self.request.stages()))
+            except (Exception, KeyboardInterrupt):
+                return MetadataReport('uncertain', ordinal, command['operation_id'], 'post_interaction_readback_unverified')
+        except (Exception, KeyboardInterrupt):
+            return MetadataReport('blocked', code='metadata_preflight_or_journal_rejected')
 
     def advance_for_testing(self):
         try:
             with self.store.operation_lock():
-                state = self._load(create=True)
-                if state[3] is not None or state[4]:
-                    return self._report(state, len(self.request.stages()))
-                state = self._observe(*state)
-                cards, revision, ordinal, pending, rejected = state
-                if pending or rejected or ordinal == len(self.request.stages()):
-                    return self._report(state, len(self.request.stages()))
-                command = self.request.command(ordinal, revision, cards)
-                self.provider.preflight(command, cards)
-                self._append({'phase':'intent','command':command})  # Durable before first native interaction.
-                try:
-                    self.provider.perform(command, cards)
-                except (Exception, KeyboardInterrupt):
-                    return MetadataReport('uncertain', ordinal, command['operation_id'], 'interaction_uncertain')
-                try:
-                    return self._report(self._observe(*self._load()), len(self.request.stages()))
-                except (Exception, KeyboardInterrupt):
-                    return MetadataReport('uncertain', ordinal, command['operation_id'], 'post_interaction_readback_unverified')
+                return self._advance_locked()
         except (Exception, KeyboardInterrupt):
             return MetadataReport('blocked', code='metadata_preflight_or_journal_rejected')
