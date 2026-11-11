@@ -211,6 +211,10 @@ def test_opens_only_the_exact_result_editor_and_verifies_reference():
         def find_elements(self, by, value):
             return [self.row] if value == '[role="row"]' else ([self.menu] if self.menu_open and value == '[role="listbox"]' else [])
         def execute_script(self, script, *args):
+            from quick_relist.hub_readonly import SOURCE_CONTEXT_SCRIPT
+            if script == "return document.documentElement;": return self.row
+            if script == SOURCE_CONTEXT_SCRIPT:
+                return args == (self.row, self.row, "RXCU12345")
             if "row.isConnected" in script:
                 return args == (self.row, self.combo, self.menu, self.edit, "RXCU12345")
             assert args == ("RXCU12345",)

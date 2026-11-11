@@ -1025,6 +1025,54 @@ def test_browser_errors_never_expose_private_exception_text(draft_window, applic
     assert "read-only" in draft_window.test_errors[-1][1]
 
 
+@pytest.mark.parametrize("state", ["none", "pending", "other", "blocked"])
+def test_editor_recheck_controls_and_guidance(draft_window, state):
+    _add_batch(draft_window, "RXCU-000123")
+    draft_window._editor_open_job_id = draft_window.selected_job["id"]
+    draft_window.hub = SimpleNamespace(editor_bindings={}, editor_open_state=lambda _: state)
+    draft_window.refresh()
+    assert draft_window.recheck_editor_button.isEnabled() is (state == "pending")
+    assert draft_window.open_editor_button.isEnabled() is (state == "none")
+    assert draft_window.search_hub_button.isEnabled() is (state == "none")
+    assert bool(draft_window.editor_open_guidance.text()) is (state != "none")
+    assert draft_window.capture_page_button.isEnabled()
+    assert not draft_window.capture_button.isEnabled()
+    assert not draft_window.advance_button.isEnabled()
+
+
+def test_editor_recheck_worker_keeps_pending_then_enables_matched_capture(draft_window, application):
+    _add_batch(draft_window, "RXCU-000123")
+    draft_window._editor_open_job_id = draft_window.selected_job["id"]
+    calls = []
+    hub = SimpleNamespace(editor_bindings={}, pending=True)
+    hub.editor_open_state = lambda _: "pending" if hub.pending else "none"
+    def recheck(reference):
+        calls.append(reference)
+        if len(calls) == 1:
+            return {"editor_pending": True, "complete": False}
+        hub.editor_bindings[reference] = {"listing_id": "123", "handle": "synthetic"}
+        hub.pending = False
+        return {"row_link_verified": True, "complete": False}
+    hub.recheck_opened_editor = recheck
+    draft_window.hub = hub
+    draft_window.refresh()
+    draft_window._recheck_selected_editor()
+    draft_window._recheck_selected_editor()  # Busy worker blocks a repeated press.
+    _finish_worker(application, draft_window)
+    assert calls == ["RXCU000123"]
+    assert draft_window.recheck_editor_button.isEnabled()
+    assert "still unverified" in draft_window.statusBar().currentMessage()
+    assert not draft_window.capture_all_pages_button.isEnabled()
+    draft_window._recheck_selected_editor()
+    _finish_worker(application, draft_window)
+    assert calls == ["RXCU000123", "RXCU000123"]
+    assert not draft_window.recheck_editor_button.isEnabled()
+    assert draft_window.capture_all_pages_button.isEnabled()
+    assert not draft_window.capture_button.isEnabled()
+    assert not draft_window.advance_button.isEnabled()
+    assert draft_window.store.get_job(draft_window.selected_job["id"])["snapshot"] is None
+
+
 def test_hyphenated_and_unhyphenated_references_deduplicate(window):
     _add_batch(window, "RXCU-000123 RXCU000123")
     assert [job["rxcu"] for job in window.jobs] == ["RXCU000123"]

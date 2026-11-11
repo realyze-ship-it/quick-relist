@@ -17,6 +17,31 @@ DATE_LABELS = (
 )
 DATE_SCHEMA = "mui-segmented-date-dom/v1"
 DATE_TYPE = "mui-segmented-date"
+DATE_DIAGNOSTIC_KIND = "segmented_date_rejection"
+DATE_DIAGNOSTIC_SCHEMA = "mui-segmented-date-rejection/v1"
+DATE_DIAGNOSTIC_COUNT_CAP = 100  # A count of 100 means 100 or more.
+DATE_DIAGNOSTIC_COUNTS = (
+    "segments", "contenteditable", "contenteditable_true", "containers", "buttons", "visible_buttons",
+)
+DATE_DIAGNOSTIC_SHAPE_REASONS = (
+    "segmented_date_segment_count_not_three", "segmented_date_container_count_not_one",
+    "segmented_date_button_count_not_one", "segmented_date_button_not_safe_visible",
+    "segmented_date_button_outside_group", "segmented_date_contenteditable_count_not_three",
+    "segmented_date_container_not_safe_visible", "segmented_date_container_tag_not_div",
+    "segmented_date_container_classes_missing",
+)
+DATE_DIAGNOSTIC_SEGMENT_REASONS = (
+    "segmented_date_segment_tag_not_span", "segmented_date_section_tag_not_span",
+    "segmented_date_section_parent_not_container", "segmented_date_segment_group_mismatch",
+    "segmented_date_section_class_missing", "segmented_date_segment_classes_missing",
+    "segmented_date_section_not_safe_visible", "segmented_date_segment_not_safe_visible",
+    "segmented_date_segment_has_children", "segmented_date_segment_contenteditable_not_true",
+    "segmented_date_segment_aria_label_order_mismatch", "segmented_date_segment_aria_labelledby_present",
+    "segmented_date_segment_aria_hidden_present", "segmented_date_segment_style_present",
+    "segmented_date_segment_aria_readonly_not_false", "segmented_date_segment_aria_disabled_not_false",
+    "segmented_date_segment_tabindex_mismatch", "segmented_date_segment_aria_valuenow_missing",
+    "segmented_date_segment_aria_valuetext_presence_mismatch",
+)
 DATE_UNRESOLVED_ISSUES = (
     "date_semantics_unresolved", "date_business_validation_unverified", "date_requiredness_unverified",
 )
@@ -42,6 +67,9 @@ _BINDING_RELATIONS = (
 DATE_CAPTURE_HELPERS = r"""
   const dateNames = ['mandate_signed_date','mandate_expiry','date_listed','expiry_date','on_market_since'];
   const dateLabels = ['Mandate signed date','Mandate expiry date','Date listed','Listing expiry date','On market since'];
+  // Rejections only, one record per known name across repeated root/dialog
+  // scans. Counts saturate at 100. No values, identifiers or arbitrary strings.
+  const dateRejectionDiagnostics = [];
   const isSegmentedDateControl = el => !!(el && el.tagName === 'INPUT' && (
     el.classList.contains('MuiPickersInputBase-input') || el.classList.contains('MuiPickersOutlinedInput-input')
     || el.closest('.MuiPickersTextField-root,.MuiPickersInputBase-root,.MuiPickersOutlinedInput-root')));
@@ -65,6 +93,64 @@ DATE_CAPTURE_HELPERS = r"""
       || (Array.isArray(value) && value.every(exactTree))
       || (value && typeof value === 'object' && Object.values(value).every(exactTree));
     const reject = code => limitations.add(code);
+    const diagnoseSegments = (name, wrapper, group, segments, containers, buttons, checkSegments) => {
+      const reasons = [], segmentRejections = [];
+      const note = (list, failed, code) => { if (failed) list.push('segmented_date_' + code); };
+      const editable = all(wrapper, '[contenteditable]');
+      if (!checkSegments) {
+        note(reasons, segments.length !== 3, 'segment_count_not_three');
+        note(reasons, containers.length !== 1, 'container_count_not_one');
+        note(reasons, buttons.length !== 1, 'button_count_not_one');
+        note(reasons, editable.length !== 3, 'contenteditable_count_not_three');
+        if (buttons.length === 1) {
+          note(reasons, !safeVisible(buttons[0]), 'button_not_safe_visible');
+          note(reasons, !group.contains(buttons[0]), 'button_outside_group');
+        }
+        if (containers.length === 1) {
+          note(reasons, !safeVisible(containers[0]), 'container_not_safe_visible');
+          note(reasons, containers[0].tagName !== 'DIV', 'container_tag_not_div');
+          note(reasons, !hasClasses(containers[0], ['MuiPickersSectionList-root','MuiPickersInputBase-sectionsContainer']),
+            'container_classes_missing');
+        }
+      } else {
+        // This branch is reached only after the original exact count gate.
+        // Record failed predicates, not the unexpected attribute contents.
+        segments.slice(0, 3).forEach((segment, index) => {
+          const section = segment.parentElement, failed = [];
+          note(failed, segment.tagName !== 'SPAN', 'segment_tag_not_span');
+          note(failed, !section || section.tagName !== 'SPAN', 'section_tag_not_span');
+          note(failed, !section || section.parentElement !== containers[0], 'section_parent_not_container');
+          note(failed, segment.closest('[role="group"]') !== group, 'segment_group_mismatch');
+          note(failed, !hasClasses(section, ['MuiPickersSectionList-section']), 'section_class_missing');
+          note(failed, !hasClasses(segment, ['MuiPickersSectionList-sectionContent','MuiPickersInputBase-sectionContent']),
+            'segment_classes_missing');
+          note(failed, !safeVisible(section), 'section_not_safe_visible');
+          note(failed, !safeVisible(segment), 'segment_not_safe_visible');
+          note(failed, !!segment.children.length, 'segment_has_children');
+          note(failed, attr(segment, 'contenteditable') !== 'true', 'segment_contenteditable_not_true');
+          note(failed, attr(segment, 'aria-label') !== ['Year','Month','Day'][index], 'segment_aria_label_order_mismatch');
+          note(failed, segment.hasAttribute('aria-labelledby'), 'segment_aria_labelledby_present');
+          note(failed, segment.hasAttribute('aria-hidden'), 'segment_aria_hidden_present');
+          note(failed, segment.hasAttribute('style'), 'segment_style_present');
+          note(failed, attr(segment, 'aria-readonly') !== 'false', 'segment_aria_readonly_not_false');
+          note(failed, attr(segment, 'aria-disabled') !== 'false', 'segment_aria_disabled_not_false');
+          note(failed, attr(segment, 'tabindex') !== (index === 0 ? '0' : '-1'), 'segment_tabindex_mismatch');
+          note(failed, !segment.hasAttribute('aria-valuenow'), 'segment_aria_valuenow_missing');
+          note(failed, segment.hasAttribute('aria-valuetext') !== (index !== 0), 'segment_aria_valuetext_presence_mismatch');
+          if (failed.length) segmentRejections.push({dom_order:index, reasons:failed});
+          reasons.push(...failed);
+        });
+      }
+      reasons.forEach(reject);
+      if (dateRejectionDiagnostics.some(item => item.field_key === name)) return;
+      const cap = count => Math.min(count, 100);
+      dateRejectionDiagnostics.push({kind:'segmented_date_rejection', schema_version:'mui-segmented-date-rejection/v1',
+        status:'unresolved_structural_diagnostic', field_key:name, complete:false, date_value_observed:false,
+        count_cap:100, counts:{segments:cap(segments.length), contenteditable:cap(editable.length),
+          contenteditable_true:cap(editable.filter(el => attr(el, 'contenteditable') === 'true').length),
+          containers:cap(containers.length), buttons:cap(buttons.length), visible_buttons:cap(buttons.filter(visible).length)},
+        reasons:Array.from(new Set(reasons)), segment_rejections:segmentRejections});
+    };
     const inputs = within(root, 'input');
     const wrappers = within(root, '.MuiPickersTextField-root');
     const groups = within(root, '.MuiPickersInputBase-root[role="group"],.MuiPickersOutlinedInput-root[role="group"]');
@@ -123,7 +209,8 @@ DATE_CAPTURE_HELPERS = r"""
           || all(wrapper, '[contenteditable]').length !== 3
           || !safeVisible(containers[0]) || containers[0].tagName !== 'DIV'
           || !hasClasses(containers[0], ['MuiPickersSectionList-root','MuiPickersInputBase-sectionsContainer'])) {
-        reject('segmented_date_segments_unresolved'); continue;
+        reject('segmented_date_segments_unresolved');
+        diagnoseSegments(name, wrapper, group, segments, containers, buttons, false); continue;
       }
       const container = containers[0];
       const parts = [];
@@ -153,7 +240,10 @@ DATE_CAPTURE_HELPERS = r"""
           aria_valuetext:attr(segment,'aria-valuetext'), text:segment.textContent,
           visible:true, sensitive_context:false, child_element_count:segment.children.length});
       }
-      if (!valid) { reject('segmented_date_segments_unresolved'); continue; }
+      if (!valid) {
+        reject('segmented_date_segments_unresolved');
+        diagnoseSegments(name, wrapper, group, segments, containers, buttons, true); continue;
+      }
       const raw = input.value;
       const record = {dom_order:startOrder + records.length, tag:'input', type:'mui-segmented-date',
         id:input.id, name, label:textOf(label), section:scopeFor(group), value:raw,
@@ -185,6 +275,50 @@ DATE_CAPTURE_HELPERS = r"""
     return records;
   };
 """
+
+
+def segmented_date_diagnostic_valid(item: dict) -> bool:
+    """Closed, value-free rejection schema, never evidence of a resolved date.
+
+    Exact keys and static reasons prevent this additive discovery type becoming
+    a channel for arbitrary DOM strings. This validates shape, not authenticity.
+    """
+    keys = {"kind", "schema_version", "status", "field_key", "complete", "date_value_observed",
+            "count_cap", "counts", "reasons", "segment_rejections"}
+    if (not isinstance(item, dict) or set(item) != keys or item["kind"] != DATE_DIAGNOSTIC_KIND
+            or item["schema_version"] != DATE_DIAGNOSTIC_SCHEMA
+            or item["status"] != "unresolved_structural_diagnostic" or item["field_key"] not in DATE_NAMES
+            or item["complete"] is not False or item["date_value_observed"] is not False
+            or type(item["count_cap"]) is not int or item["count_cap"] != DATE_DIAGNOSTIC_COUNT_CAP):
+        return False
+    counts = item["counts"]
+    if (not isinstance(counts, dict) or set(counts) != set(DATE_DIAGNOSTIC_COUNTS)
+            or any(type(value) is not int or not 0 <= value <= DATE_DIAGNOSTIC_COUNT_CAP for value in counts.values())
+            or counts["contenteditable_true"] > counts["contenteditable"]
+            or counts["visible_buttons"] > counts["buttons"]):
+        return False
+
+    def reasons_valid(reasons, allowed):
+        return (isinstance(reasons, list) and 0 < len(reasons) <= len(allowed)
+                and all(isinstance(reason, str) and reason in allowed for reason in reasons)
+                and len(reasons) == len(set(reasons)))
+
+    reasons, segments = item["reasons"], item["segment_rejections"]
+    if (not reasons_valid(reasons, DATE_DIAGNOSTIC_SHAPE_REASONS + DATE_DIAGNOSTIC_SEGMENT_REASONS)
+            or not isinstance(segments, list) or len(segments) > 3):
+        return False
+    previous = -1
+    for segment in segments:
+        if (not isinstance(segment, dict) or set(segment) != {"dom_order", "reasons"}
+                or type(segment["dom_order"]) is not int or not previous < segment["dom_order"] < 3
+                or not reasons_valid(segment["reasons"], DATE_DIAGNOSTIC_SEGMENT_REASONS)):
+            return False
+        previous = segment["dom_order"]
+    if segments:
+        return (counts["segments"] == counts["contenteditable"] == 3
+                and counts["containers"] == counts["buttons"] == counts["visible_buttons"] == 1
+                and set(reasons) == {reason for segment in segments for reason in segment["reasons"]})
+    return all(reason in DATE_DIAGNOSTIC_SHAPE_REASONS for reason in reasons)
 
 
 def is_segmented_date_record(field: dict) -> bool:

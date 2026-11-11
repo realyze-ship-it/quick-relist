@@ -5,6 +5,7 @@ controls on one editor tab and cannot certify that a listing backup is complete.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 from pathlib import Path
 from uuid import uuid4
@@ -82,6 +83,60 @@ return refs.length === 1 && refs[0] === wanted.toUpperCase();
 """
 
 
+SOURCE_CONTEXT_SCRIPT = r"""
+const [root, row, wanted] = arguments;
+if (root !== document.documentElement || !row.isConnected || row.ownerDocument !== document) return false;
+const references = candidate => {
+  if (!candidate.isConnected || !candidate.getClientRects().length) return [];
+  for (let ancestor = candidate.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    const style = getComputedStyle(ancestor);
+    if (ancestor.hasAttribute('hidden') || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity || 1) === 0) return [];
+  }
+  const textWithinRow = p => {
+    const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+    let text = '', node;
+    while ((node = walker.nextNode())) {
+      let el = node.parentElement, allowed = true;
+      while (el) {
+        const style = getComputedStyle(el);
+        if (el.hasAttribute('hidden') || el.getAttribute('aria-hidden') === 'true' || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity || 1) === 0) { allowed = false; break; }
+        if (el === candidate) break;
+        el = el.parentElement;
+      }
+      if (allowed && el === candidate) text += node.nodeValue || '';
+    }
+    return text.trim();
+  };
+  return [...candidate.querySelectorAll('p')].map(p => textWithinRow(p).match(/^Ref:\s*(RXCU-?[0-9]{3,20})$/i)).filter(Boolean).map(m => m[1].toUpperCase().replace('-', ''));
+};
+// The old actions menu may have closed. It is not a recovery precondition.
+// Ignore accessibility hiding ABOVE the row caused by that menu, as at click.
+const refs = references(row);
+const matches = [...document.querySelectorAll('[role="row"]')].filter(candidate => {
+  const values = references(candidate);
+  return values.length === 1 && values[0] === wanted;
+});
+return refs.length === 1 && refs[0] === wanted && matches.length === 1 && matches[0] === row;
+"""
+
+
+@dataclass
+class _EditorOpening:
+    """Session-only evidence for one attempted, already-verified link click."""
+    driver: object
+    reference: str
+    listing_id: str
+    source_handle: str
+    source_handles: frozenset[str]
+    source_url: str
+    source_root: object
+    source_row: object
+    target_url: str
+    target_handle: str | None = None
+    route_observed: bool = False
+    blocked: bool = False
+
+
 class DownloadOutcomeUnknown(RuntimeError):
     """A download may have started. Files in directory must be checked first."""
     def __init__(self, directory):
@@ -105,13 +160,14 @@ class ReadOnlyHub:
     def __init__(self, driver=None):
         self.driver = driver
         self.editor_bindings = {}
+        self._pending_editor: _EditorOpening | None = None
         self._managed_default_driver = None
         self._profile_path = None
         self._profile_identity = None
         self._browser_closed = False
 
     def open(self):
-        if self.driver is not None or self._profile_path is not None:
+        if self.driver is not None or self._profile_path is not None or self._pending_editor is not None:
             raise RuntimeError("A browser session is already open or awaiting cleanup")
         try:
             from selenium import webdriver
@@ -143,6 +199,8 @@ class ReadOnlyHub:
         Hub filters may hide listings, so an empty result never proves absence.
         The exact displayed search prompt and button must be unique and visible.
         """
+        if self._pending_editor is not None:
+            raise RuntimeError("An editor opening is unresolved. Recheck it before starting another search, or safely close and restart the browser session.")
         if self.driver is None:
             raise RuntimeError("Open the Hub browser first")
         from .core import normalize_rxcu
@@ -188,6 +246,8 @@ class ReadOnlyHub:
         links, new tabs, or headings stop the operation without a blind retry.
         Account ownership and complete source coverage remain unverified.
         """
+        if self._pending_editor is not None:
+            raise RuntimeError("An editor opening is unresolved. Recheck the existing opening; do not open another editor.")
         if self.driver is None:
             raise RuntimeError("Open the Hub browser first")
         if not (0.01 <= poll_interval <= 2 and 0.05 <= timeout <= 120):
@@ -267,32 +327,143 @@ class ReadOnlyHub:
         # within the same controlled menu without exposing address text.
         if self.driver.execute_script(ROW_BINDING_SCRIPT, rows[0], controls[0], current_menus[0], link, reference) is not True:
             raise ValueError("The selected row or menu changed. Inspect Hub before continuing.")
-        current_route = parse_editor_url(link.get_attribute("href"))
+        target_url = link.get_attribute("href")
+        current_route = parse_editor_url(target_url)
         if current_route["page_key"] != "details" or current_route["listing_id"] != listing_id:
             raise ValueError("The editor link changed. Inspect Hub before continuing.")
-        old_handles = set(self.driver.window_handles)
+        source_handle = self.driver.current_window_handle
+        old_handles = frozenset(self.driver.window_handles)
+        source_url = self.driver.current_url
+        source_root = self.driver.execute_script("return document.documentElement;")
+        # Store the intent BEFORE clicking. A thrown click can still have opened
+        # a tab, so neither an exception nor a timeout permits a second click.
+        intent = _EditorOpening(self.driver, reference, listing_id, source_handle,
+                                old_handles, source_url, source_root, rows[0], target_url)
+        if (source_url != parsed.geturl() or source_handle not in old_handles
+                or self.driver.execute_script(SOURCE_CONTEXT_SCRIPT, source_root, rows[0], reference) is not True
+                or self.driver.current_window_handle != source_handle
+                or frozenset(self.driver.window_handles) != old_handles or self.driver.current_url != source_url
+                or link.get_attribute("href") != target_url):
+            raise ValueError("The source results changed before opening. No editor link was clicked.")
+        self._pending_editor = intent
+        self.editor_bindings.pop(reference, None)
         try:
             link.click()  # Exactly once. Never click Archive or retry an uncertain click.
         except Exception:
-            raise RuntimeError("Opening the editor is uncertain. Inspect Hub before continuing.") from None
+            raise RuntimeError("Opening the editor is uncertain. Use Recheck opened editor (read only) for this selected job; do not open it again.") from None
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            new_handles = set(self.driver.window_handles) - old_handles
-            if len(new_handles) > 1:
-                raise RuntimeError("More than one new tab appeared. Inspect Hub before continuing.")
-            if len(new_handles) == 1:
-                handle = next(iter(new_handles))
-                self.driver.switch_to.window(handle)
-                try:
-                    identity = self.verify_editor_reference(reference, listing_id)
-                except ValueError:
-                    # Page may be loading, but never repeat the link click.
-                    time.sleep(poll_interval)
-                    continue
-                self.editor_bindings[reference] = {"listing_id": listing_id, "handle": handle}
-                return {**identity, "row_link_verified": True, "listing_id": listing_id, "complete": False}
+            result = self.recheck_opened_editor(reference)
+            if not result.get("editor_pending"):
+                return result
             time.sleep(poll_interval)
-        raise RuntimeError("The editor did not become verifiable. Inspect the new tab before continuing.")
+        raise RuntimeError("The editor is still unverified. Leave its tabs and results unchanged, then use Recheck opened editor (read only) for this selected job.")
+
+    def editor_open_state(self, rxcu=None):
+        """In-memory UI eligibility only; browser checks run in the worker.
+
+        Observed conflicts are sticky. No reset, forced binding or cross-session
+        recovery is supported. A different selection does not consume intent.
+        """
+        intent = self._pending_editor
+        if intent is None:
+            return "none"
+        if self.driver is not intent.driver or self.driver is None:
+            intent.blocked = True
+        if intent.blocked:
+            return "blocked"
+        from .core import normalize_rxcu
+        try:
+            return "pending" if normalize_rxcu(rxcu) == intent.reference else "other"
+        except (TypeError, ValueError):
+            return "other"
+
+    def recheck_opened_editor(self, rxcu):
+        """Read one outstanding opening, never click or navigate a URL.
+
+        Only an additional tab from this session's verified click can bind.
+        A blank/loading target remains pending; any observed context, route or
+        identity conflict permanently blocks this intent until confirmed close.
+        """
+        state = self.editor_open_state(rxcu)
+        if state != "pending":
+            raise RuntimeError("There is no safely recheckable opening for this selected job. Select the original job, or safely close and restart the browser session.")
+        intent = self._pending_editor
+        try:
+            driver = intent.driver
+            handles = frozenset(driver.window_handles)
+            new_handles = handles - intent.source_handles
+            if (not intent.source_handles.issubset(handles) or len(new_handles) > 1
+                    or (intent.target_handle is not None and new_handles != {intent.target_handle})):
+                raise ValueError("Changed tabs")
+            # Pin the first observed additional tab, even while it is blank.
+            if intent.target_handle is None and new_handles:
+                intent.target_handle = next(iter(new_handles))
+            if driver.current_window_handle not in {intent.source_handle, intent.target_handle}:
+                raise ValueError("Changed active context")
+            self._check_editor_source(intent, handles)
+            if intent.target_handle is None:
+                return {"editor_pending": True, "complete": False}
+            driver.switch_to.window(intent.target_handle)
+            url = driver.current_url
+            if url == "about:blank" and not intent.route_observed:
+                self._editor_headings_pending(driver.execute_script(IDENTITY_SCRIPT, intent.reference))
+                self._check_editor_target(intent, handles, url)
+                return {"editor_pending": True, "complete": False}
+            if url != intent.target_url:
+                raise ValueError("Changed editor route")
+            intent.route_observed = True
+            result = self._read_editor_identity(intent.reference, intent.listing_id)
+            self._check_editor_target(intent, handles, url)
+            # Missing headings can load later. A visible wrong or duplicate
+            # reference is a conflict, not a transient loading condition.
+            pending_headings = self._editor_headings_pending(result)
+            self._check_editor_source(intent, handles)
+            driver.switch_to.window(intent.target_handle)
+            self._check_editor_target(intent, handles, url)
+            if pending_headings:
+                return {"editor_pending": True, "complete": False}
+            # Repeat the guarded identity read after the source round trip.
+            # Headings can disappear while loading even after an earlier match.
+            final_identity = self._read_editor_identity(intent.reference, intent.listing_id)
+            self._check_editor_target(intent, handles, url)
+            if self._editor_headings_pending(final_identity):
+                return {"editor_pending": True, "complete": False}
+            identity = self._verified_editor_identity(final_identity)
+            self.editor_bindings[intent.reference] = {"listing_id": intent.listing_id, "handle": intent.target_handle}
+            self._pending_editor = None
+            return {**identity, "row_link_verified": True, "listing_id": intent.listing_id, "complete": False}
+        except Exception:
+            intent.blocked = True
+            raise RuntimeError("The opened editor cannot be safely matched in this session. Do not retry opening it. Safely close the dedicated browser and restart; no listing was changed.") from None
+
+    @staticmethod
+    def _editor_headings_pending(result):
+        if not isinstance(result, dict):
+            raise ValueError("Unreadable editor identity")
+        for prefix in ("outer", "inner"):
+            count, matches = result.get(prefix + "_count"), result.get(prefix + "_matches")
+            if (type(count) is not int or count not in (0, 1)
+                    or type(matches) is not bool or matches != (count == 1)):
+                raise ValueError("Conflicting editor identity")
+        return result["outer_count"] == 0 or result["inner_count"] == 0
+
+    def _check_editor_source(self, intent, handles):
+        driver = intent.driver
+        if self.driver is not driver or frozenset(driver.window_handles) != handles:
+            raise ValueError("Changed browser context")
+        driver.switch_to.window(intent.source_handle)
+        if (driver.current_url != intent.source_url
+                or driver.execute_script(SOURCE_CONTEXT_SCRIPT, intent.source_root, intent.source_row, intent.reference) is not True
+                or driver.current_window_handle != intent.source_handle or driver.current_url != intent.source_url
+                or frozenset(driver.window_handles) != handles):
+            raise ValueError("Changed source context")
+
+    def _check_editor_target(self, intent, handles, url):
+        driver = intent.driver
+        if (self.driver is not driver or driver.current_window_handle != intent.target_handle
+                or frozenset(driver.window_handles) != handles or driver.current_url != url):
+            raise ValueError("Changed target context")
 
     @staticmethod
     def _is_editor_url(url):
@@ -318,7 +489,7 @@ class ReadOnlyHub:
             raise ValueError("Open exactly one Hub listing editor tab before inspecting")
         self.driver.switch_to.window(matches[0])
 
-    def verify_editor_reference(self, expected_rxcu, expected_listing_id):
+    def _read_editor_identity(self, expected_rxcu, expected_listing_id):
         """Verify both observed editor headings and the current numeric route.
 
         This does not prove which account owns the record or independently bind
@@ -345,6 +516,17 @@ class ReadOnlyHub:
             raise
         except Exception:
             raise ValueError("The editor identity could not be verified") from None
+        if not isinstance(result, dict):
+            raise ValueError("The editor identity could not be verified")
+        return result
+
+    def verify_editor_reference(self, expected_rxcu, expected_listing_id):
+        """Require both exact visible headings and a stable numeric editor route."""
+        result = self._read_editor_identity(expected_rxcu, expected_listing_id)
+        return self._verified_editor_identity(result)
+
+    @staticmethod
+    def _verified_editor_identity(result):
         if (not isinstance(result, dict) or result.get("outer_count") != 1 or result.get("inner_count") != 1
                 or result.get("outer_matches") is not True or result.get("inner_matches") is not True):
             raise ValueError("The editor headings do not uniquely match the selected RXCU")
@@ -539,6 +721,9 @@ class ReadOnlyHub:
         return PartialHubCapture(self.driver).capture_current_page()
 
     def close(self):
+        if self._pending_editor is not None and self.driver is not self._pending_editor.driver:
+            self._pending_editor.blocked = True
+            raise RuntimeError("The original Hub browser session cannot be confirmed closed. Close every Quick Relist browser manually and restart Quick Relist.")
         if self.driver is not None:
             # Preserve the driver and bindings if quit has an uncertain outcome.
             # Recovery must not mistake a failed close for a stopped browser.
@@ -549,6 +734,7 @@ class ReadOnlyHub:
             self.driver = None
             self._managed_default_driver = None
             self.editor_bindings.clear()
+            self._pending_editor = None
             self._browser_closed = True
         if self._profile_path is not None and self._browser_closed:
             try:

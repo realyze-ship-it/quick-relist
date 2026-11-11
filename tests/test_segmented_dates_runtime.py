@@ -9,8 +9,9 @@ import shutil
 import subprocess
 import unittest
 
-from quick_relist.capture import READ_PAGE_SCRIPT
-from quick_relist.date_capture import DATE_NAMES, DATE_TYPE, segmented_date_record_valid
+from quick_relist.capture import READ_PAGE_SCRIPT, _validate_observation
+from quick_relist.date_capture import (DATE_DIAGNOSTIC_KIND, DATE_NAMES, DATE_TYPE,
+    segmented_date_diagnostic_valid, segmented_date_record_valid)
 from segmented_date_fixtures import RAW_DATES, date_record, fixture_html, picker_html
 
 RUNNER = r"""
@@ -70,6 +71,13 @@ class SegmentedDateRuntimeTests(unittest.TestCase):
     def dates(self, result):
         return [field for field in result["fields"] if field.get("type") == DATE_TYPE]
 
+    def diagnostics(self, result):
+        records = [item for item in result['discovery'] if item.get('kind') == DATE_DIAGNOSTIC_KIND]
+        self.assertTrue(all(segmented_date_diagnostic_valid(item) for item in records))
+        cleaned = _validate_observation(result, result['href'])
+        self.assertEqual([item for item in cleaned['discovery'] if item.get('kind') == DATE_DIAGNOSTIC_KIND], records)
+        return records
+
     def test_all_five_exact_fields_and_parts_match_saved_schema(self):
         result = self.extract()
         dates = self.dates(result)
@@ -84,6 +92,130 @@ class SegmentedDateRuntimeTests(unittest.TestCase):
         self.assertEqual(result["fields"][0]["id"], "ordinary-date")
         self.assertIn("date_semantics_unresolved", result["limitations"])
         self.assertIn("date_requiredness_unverified", result["limitations"])
+        self.assertEqual(self.diagnostics(result), [])
+
+    def test_rejection_counts_identify_each_container_and_control_condition(self):
+        cases = {
+            'segment_count_not_three': 'segment.remove()',
+            'container_count_not_one': "container.classList.remove('MuiPickersSectionList-root')",
+            'button_count_not_one': "group.insertAdjacentHTML('beforeend','<button>Extra</button>')",
+            'contenteditable_count_not_three': "wrapper.insertAdjacentHTML('beforeend','<i contenteditable=false>Extra</i>')",
+            'button_not_safe_visible': 'button.hidden=true',
+            'button_outside_group': 'wrapper.appendChild(button)',
+            'container_not_safe_visible': 'container.hidden=true',
+            'container_tag_not_div': "container.outerHTML=container.outerHTML.replace(/^<div/, '<section').replace(/div>$/, 'section>')",
+            'container_classes_missing': "container.classList.remove('MuiPickersInputBase-sectionsContainer')",
+        }
+        prefix = """const native=document.getElementById('fixture-input-0');
+        const group=native.parentElement, wrapper=group.parentElement;
+        const segment=wrapper.querySelector('[role=spinbutton]');
+        const container=group.querySelector('.MuiPickersSectionList-root'), button=group.querySelector('button');
+        """
+        for reason, setup in cases.items():
+            with self.subTest(reason=reason):
+                result = self.extract('<main>' + picker_html() + '</main>', setup=prefix+setup,
+                                      deny_values=['fixture-input-0'])
+                self.assertEqual(self.dates(result), [])
+                item, = self.diagnostics(result)
+                code = 'segmented_date_' + reason
+                self.assertIn(code, item['reasons'])
+                self.assertIn(code, result['limitations'])
+                self.assertIn('segmented_date_segments_unresolved', result['limitations'])
+                self.assertEqual(item['segment_rejections'], [])
+
+    def test_segment_rejections_identify_strict_predicates_without_values(self):
+        cases = {
+            'segment_tag_not_span': "segment.outerHTML=segment.outerHTML.replace(/^<span/, '<div').replace(/span>$/, 'div>')",
+            'section_tag_not_span': "section.outerHTML=section.outerHTML.replace(/^<span/, '<div').replace(/span>$/, 'div>')",
+            'section_parent_not_container': "group.insertBefore(section, group.querySelector('.MuiPickersSectionList-root'))",
+            'section_class_missing': "section.classList.remove('MuiPickersSectionList-section')",
+            'segment_classes_missing': "segment.classList.remove('MuiPickersInputBase-sectionContent')",
+            'section_not_safe_visible': 'section.hidden=true',
+            'segment_not_safe_visible': 'segment.hidden=true',
+            'segment_has_children': "segment.innerHTML='<b>SYNTHETIC_CHILD_VALUE</b>'",
+            'segment_contenteditable_not_true': "segment.setAttribute('contenteditable','false')",
+            'segment_aria_label_order_mismatch': "segment.setAttribute('aria-label','Unknown synthetic label')",
+            'segment_aria_labelledby_present': "segment.setAttribute('aria-labelledby','SYNTHETIC_REFERENCE')",
+            'segment_aria_hidden_present': "segment.setAttribute('aria-hidden','false')",
+            'segment_style_present': "segment.setAttribute('style','color:red')",
+            'segment_aria_readonly_not_false': "segment.setAttribute('aria-readonly','true')",
+            'segment_aria_disabled_not_false': "segment.setAttribute('aria-disabled','true')",
+            'segment_tabindex_mismatch': "segment.setAttribute('tabindex','9')",
+            'segment_aria_valuenow_missing': "segment.removeAttribute('aria-valuenow')",
+            'segment_aria_valuetext_presence_mismatch': "segment.setAttribute('aria-valuetext','SYNTHETIC_YEAR_VALUE')",
+        }
+        prefix = """const native=document.getElementById('fixture-input-0');
+        const group=native.parentElement, wrapper=group.parentElement;
+        const segment=wrapper.querySelector('[role=spinbutton]'), section=segment.parentElement;
+        """
+        for reason, setup in cases.items():
+            with self.subTest(reason=reason):
+                result = self.extract('<main>' + picker_html() + '</main>', setup=prefix+setup,
+                                      deny_values=['fixture-input-0'])
+                self.assertEqual(self.dates(result), [])
+                item, = self.diagnostics(result)
+                code = 'segmented_date_' + reason
+                self.assertIn(code, item['reasons'])
+                self.assertTrue(any(part['dom_order'] == 0 and code in part['reasons']
+                                    for part in item['segment_rejections']))
+                self.assertNotIn('SYNTHETIC_', json.dumps(item))
+
+    def test_diagnostics_exclude_all_arbitrary_values_and_attributes(self):
+        marker = 'PRIVATE_MARKER_5467'
+        setup = """const native=document.getElementById('fixture-input-0');
+        const group=native.parentElement,wrapper=group.parentElement;
+        native.setAttribute('data-marker','PRIVATE_MARKER_5467');
+        for(const segment of wrapper.querySelectorAll('[role=spinbutton]')) {
+          segment.textContent='PRIVATE_MARKER_5467';
+          segment.classList.add('PRIVATE_MARKER_5467');
+          segment.id='PRIVATE_MARKER_5467_'+segment.getAttribute('aria-label');
+          for (const attr of ['aria-valuenow','aria-valuetext','aria-label','contenteditable',
+                             'aria-readonly','aria-disabled','tabindex','aria-labelledby','style'])
+            segment.setAttribute(attr,'PRIVATE_MARKER_5467');
+        }
+        """
+        result = self.extract('<main>' + picker_html(raw=marker) + '</main>', setup=setup,
+                              deny_values=['fixture-input-0'])
+        item, = self.diagnostics(result)
+        self.assertNotIn(marker, json.dumps(item))
+        self.assertNotIn(marker, json.dumps(result['limitations']))
+        self.assertEqual(item['counts']['contenteditable_true'], 0)
+        self.assertEqual(len(item['segment_rejections']), 3)
+        self.assertEqual([part['dom_order'] for part in item['segment_rejections']], [0, 1, 2])
+        self.assertFalse(item['date_value_observed'])
+
+    def test_diagnostic_counts_saturate_and_repeated_roots_deduplicate(self):
+        result = self.extract('<main><div role="dialog">' + ''.join(picker_html(i) for i in range(5)) + '</div></main>',
+            setup="""for(const wrapper of document.querySelectorAll('.MuiPickersTextField-root')) {
+              const segment=wrapper.querySelector('[role=spinbutton]');
+              for(let n=0;n<150;n++) {
+                segment.parentElement.appendChild(segment.cloneNode(true));
+                wrapper.insertAdjacentHTML('beforeend','<button hidden>Extra</button>');
+              }
+            }""", deny_values=['fixture-input-'+str(i) for i in range(5)])
+        records = self.diagnostics(result)
+        self.assertEqual([item['field_key'] for item in records], list(DATE_NAMES))
+        for item in records:
+            self.assertEqual(item['count_cap'], 100)
+            self.assertEqual(item['counts'], {'segments':100, 'contenteditable':100, 'contenteditable_true':100,
+                                             'containers':1, 'buttons':100, 'visible_buttons':1})
+            self.assertEqual(item['segment_rejections'], [])
+            self.assertLess(len(json.dumps(item)), 1500)
+
+    def test_diagnostics_never_bypass_earlier_binding_or_visibility_gates(self):
+        setups = (
+            "document.getElementById('fixture-input-0').name='unrecognized_date'",
+            "document.body.insertAdjacentHTML('beforeend','<input name=mandate_signed_date>')",
+            "document.getElementById('fixture-input-0').classList.remove('MuiPickersOutlinedInput-input')",
+            "document.getElementById('fixture-label-0').textContent='Unknown date label'",
+            "document.querySelector('.MuiPickersTextField-root').hidden=true",
+        )
+        for setup in setups:
+            with self.subTest(setup=setup):
+                result = self.extract('<main>' + picker_html() + '</main>', setup=setup,
+                                      deny_values=['fixture-input-0'])
+                self.assertEqual(self.dates(result), [])
+                self.assertEqual(self.diagnostics(result), [])
 
     def test_live_input_property_and_segment_values_are_read_separately(self):
         result = self.extract(setup="""

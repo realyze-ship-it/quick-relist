@@ -875,6 +875,7 @@ class MainWindow(QMainWindow):
         self.drafts = drafts
         self.media_root = Path(media_root) if media_root is not None else None
         self._capture_sessions: dict[str, tuple[Any, Any]] = {}
+        self._editor_open_job_id: str | None = None
         self.batch_id: str | None = None
         self.jobs: list[dict[str, Any]] = []
         self.batches: list[dict[str, Any]] = []
@@ -1148,6 +1149,11 @@ class MainWindow(QMainWindow):
         self.open_editor_button = _button("Open exact matching editor", self._open_selected_editor)
         self.open_editor_button.setToolTip("Open the unique exact RXCU result's Edit Listing link and verify the editor headings. No listing is changed.")
         details.addWidget(self.open_editor_button)
+        self.recheck_editor_button = _button("Recheck opened editor (read only)", self._recheck_selected_editor)
+        self.recheck_editor_button.setToolTip("Read the existing tab from this job's unresolved opening. Never click its link again or open another browser.")
+        details.addWidget(self.recheck_editor_button)
+        self.editor_open_guidance = _label("", "muted", True)
+        details.addWidget(self.editor_open_guidance)
         self.capture_all_pages_button = _button("Capture matched editor tabs", self._capture_all_pages)
         self.capture_all_pages_button.setToolTip("Read each observed editor tab with RXCU and tab checks. Saves incomplete private source data; never changes Hub.")
         details.addWidget(self.capture_all_pages_button)
@@ -1497,6 +1503,9 @@ class MainWindow(QMainWindow):
         self.capture_button.setEnabled(False)
         self.search_hub_button.setEnabled(False)
         self.open_editor_button.setEnabled(False)
+        self.recheck_editor_button.setEnabled(False)
+        self.editor_open_guidance.setText("")
+        self.editor_open_guidance.hide()
         self.review_button.setEnabled(False)
         self.capture_page_button.setEnabled(False)
         self.capture_all_pages_button.setEnabled(False)
@@ -1523,14 +1532,23 @@ class MainWindow(QMainWindow):
             self.detail_address.setText("Original address appears only after a complete Hub capture.")
             return
         state = str(job.get("state", "queued"))
-        self.search_hub_button.setEnabled(self.hub is not None and not self._is_busy)
-        self.open_editor_button.setEnabled(self.hub is not None and not self._is_busy)
+        opening = self._editor_open_state(str(job.get("rxcu")))
+        self.search_hub_button.setEnabled(self.hub is not None and opening == "none" and not self._is_busy)
+        self.open_editor_button.setEnabled(self.hub is not None and opening == "none" and not self._is_busy)
+        self.recheck_editor_button.setEnabled(opening == "pending" and not self._is_busy)
+        guidance = {
+            "pending": "The last editor opening is still unverified. Leave its tabs and results unchanged, then choose Recheck opened editor (read only). It reads the existing tab without clicking the link again. Partial page observations remain incomplete and unverified.",
+            "other": "Another local job has an unresolved editor opening. Select its original job to recheck the existing tab. Do not open another editor or change the results.",
+            "blocked": "The opened editor cannot be safely matched in this session. Close every dedicated Quick Relist browser and restart Quick Relist. No force or reset can approve this opening. Saved partial observations remain incomplete and unverified.",
+        }.get(opening, "")
+        self.editor_open_guidance.setText(guidance)
+        self.editor_open_guidance.setVisible(bool(guidance))
         unstarted = state in ("queued", "awaiting_address", "ready", "blocked")
         self.capture_page_button.setEnabled(self.hub is not None and self.drafts is not None and unstarted and not self._is_busy)
         self.import_media_button.setEnabled(self.drafts is not None and self.media_root is not None and unstarted and not self._is_busy)
         bindings = getattr(self.hub, "editor_bindings", {}) if self.hub is not None else {}
-        self.capture_all_pages_button.setEnabled(bool(bindings.get(str(job.get("rxcu")))) and self.drafts is not None and unstarted and not self._is_busy)
-        self.download_media_button.setEnabled(bool(bindings.get(str(job.get("rxcu")))) and self.drafts is not None and self.media_root is not None and unstarted and not self._is_busy and not pending)
+        self.capture_all_pages_button.setEnabled(opening == "none" and bool(bindings.get(str(job.get("rxcu")))) and self.drafts is not None and unstarted and not self._is_busy)
+        self.download_media_button.setEnabled(opening == "none" and bool(bindings.get(str(job.get("rxcu")))) and self.drafts is not None and self.media_root is not None and unstarted and not self._is_busy and not pending)
         self.download_media_button.setToolTip("Automatic downloads are paused after an attempt. Use Review previous download to preserve files and reset the pause after checking the browser." if pending else "Request a photo pack from the matched editor. Its listing association and completeness remain unverified.")
         if self.drafts is not None:
             try:
@@ -1967,15 +1985,46 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _open_selected_editor(self) -> None:
-        if self.hub is None or not self.selected_job or self._is_busy:
+        if self.hub is None or not self.selected_job or self._is_busy or not self.open_editor_button.isEnabled():
             return
         reference = str(self.selected_job["rxcu"])
+        self._editor_open_job_id = str(self.selected_job["id"])
         self._run_operation("Opening the exact matching editor…", lambda: self._safe_readonly_call(lambda: self.hub.open_listing_editor(reference)),
                             "Matching row, editor link and headings verified. Account and complete source remain unverified.")
 
+    def _editor_open_state(self, reference: str) -> str:
+        status = getattr(self.hub, "editor_open_state", None)
+        if status is None:
+            return "none"
+        try:
+            result = status(reference)  # In-memory only; never read a browser on the UI thread.
+            if result == "pending" and self._editor_open_job_id != str((self.selected_job or {}).get("id")):
+                return "other"
+            return result if result in ("none", "pending", "other", "blocked") else "blocked"
+        except Exception:
+            return "blocked"
+
+    @Slot()
+    def _recheck_selected_editor(self) -> None:
+        if (self.hub is None or not self.selected_job or self._is_busy
+                or not self.recheck_editor_button.isEnabled()):
+            return
+        reference = str(self.selected_job["rxcu"])
+        if self._editor_open_state(reference) != "pending":
+            self._select_job()
+            return
+
+        def finished(result):
+            if isinstance(result, dict) and result.get("editor_pending") is True:
+                self.statusBar().showMessage("The existing editor is still unverified. Leave its tabs and results unchanged, then recheck when it has loaded. No link was clicked again.")
+
+        self._run_operation("Rechecking the existing editor without navigating…",
+                            lambda: self._safe_readonly_call(lambda: self.hub.recheck_opened_editor(reference)),
+                            "Existing editor verified against the original row and link. Account and complete source remain unverified.", finished)
+
     @Slot()
     def _search_selected_reference(self) -> None:
-        if self.hub is None or not self.selected_job or self._is_busy:
+        if self.hub is None or not self.selected_job or self._is_busy or not self.search_hub_button.isEnabled():
             return
         reference = str(self.selected_job["rxcu"])
         self._run_operation("Searching Manage Listings in the Hub browser…", lambda: self._safe_readonly_call(lambda: self.hub.search_reference(reference)), "Hub search submitted. Review matches and active filters in the browser; a matching listing has not been verified.")

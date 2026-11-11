@@ -29,7 +29,10 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from .date_capture import DATE_CAPTURE_HELPERS, is_segmented_date_record, segmented_date_record_valid
+from .date_capture import (
+    DATE_CAPTURE_HELPERS, DATE_NAMES, is_segmented_date_record,
+    segmented_date_diagnostic_valid, segmented_date_record_valid,
+)
 
 SCHEMA_VERSION = "hub-visible-capture/v1"
 _URLISH = re.compile(r"(?:https?://|www\.|/)[^\s<>\"']+|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+(?:[/?#][^\s<>\"']*)|(?:data|javascript):[^\s<>\"']+", re.IGNORECASE)
@@ -475,7 +478,9 @@ return (() => {
   const discovery = limited(root.querySelectorAll('button,[role="button"],[aria-expanded]'), 1000).filter(visible)
     .filter(el => !sensitiveContext(el)).map((el, index) => ({dom_order: index, label: labelFor(el) || textOf(el), expanded: el.getAttribute('aria-expanded'),
       controls: cut(el.getAttribute('aria-controls')), inspected: false}));
-  return {href, ready_state: document.readyState, fields: fieldsFor(root), rich_text: richFor(root), dialogs,
+  const fields = fieldsFor(root);
+  discovery.push(...dateRejectionDiagnostics);
+  return {href, ready_state: document.readyState, fields, rich_text: richFor(root), dialogs,
     sections, lists, tables, media, editor_links, discovery, limitations: Array.from(limitations)};
 })();
 """.replace("/* __SEGMENTED_DATE_CAPTURE_HELPERS__ */", DATE_CAPTURE_HELPERS)
@@ -607,6 +612,16 @@ def _validate_observation(raw: Any, expected_url: str) -> dict:
         raise CaptureReadError("The editor returned malformed observation entries.")
     if any(not isinstance(item, str) for item in result["limitations"]):
         raise CaptureReadError("The editor returned malformed limitation entries.")
+    diagnostic_names = set()
+    for item in result["discovery"]:
+        if any(key in item for key in ("kind", "schema_version", "field_key", "count_cap", "counts",
+                                      "status", "complete", "date_value_observed", "reasons", "segment_rejections")):
+            if (not segmented_date_diagnostic_valid(item) or item["field_key"] in diagnostic_names
+                    or len(diagnostic_names) >= len(DATE_NAMES)
+                    or "segmented_date_segments_unresolved" not in result["limitations"]
+                    or any(reason not in result["limitations"] for reason in item["reasons"])):
+                raise CaptureReadError("The editor returned malformed segmented date diagnostics.")
+            diagnostic_names.add(item["field_key"])
 
     def clean_fields(fields):
         if not isinstance(fields, list) or any(not isinstance(f, dict) for f in fields):
