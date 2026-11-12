@@ -2,7 +2,7 @@
 
 A Windows app for collecting Hub listings, reviewing each address, and processing a batch one listing at a time.
 
-**Pilot status:** the Windows app has processed an authorized rental through collection, reviewed address, portal removal, withdrawal, creation, all 13 original photos, saved-content comparison and publication requests. Portal completion is recorded only when Hub returns the destination identifiers. An authorized sale replacement was also completed manually through Hub and recorded locally; the automated sale path still needs a live qualification run. See [live validation](LIVE_TEST_READINESS.md) for the evidence and remaining limits.
+**Pilot status:** the Windows app has processed an authorized rental through collection, reviewed address, portal removal, withdrawal, creation, all 13 original photos, saved-content comparison and confirmed publication to all four original portals. Portal completion is recorded only when Hub returns the destination identifiers. An authorized sale replacement was also completed manually through Hub and recorded locally; the automated sale path still needs a live qualification run. See [live validation](LIVE_TEST_READINESS.md) for the evidence and remaining limits.
 
 ## Workflow
 

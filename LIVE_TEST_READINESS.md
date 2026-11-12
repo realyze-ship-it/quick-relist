@@ -13,6 +13,7 @@ An operator-authorized rental pilot has used the app to:
 - Upload all 13 images individually, check downloaded content and order, and avoid repeating an upload whose receipt was confirmed by a fresh read.
 - Save the full main description with its original formatting and literal heading markers, plus an explicitly reviewed shorter brochure summary required by Hub's 250-character limit.
 - Reopen the replacement and verify particulars, room options, descriptions, captions and all photos before submitting publication to the original four destinations.
+- Confirm publication identifiers on all four original destinations, including Private Property after moderation completed.
 
 Portal requests can remain pending. The app only records a completed relist when Hub returns all required destination identifiers; **Check publication** checks existing requests without resubmitting them. Exact references, addresses, receipts and screenshots remain in the private local workspace.
 
