@@ -97,7 +97,7 @@ class SegmentedDateChromeTests(unittest.TestCase):
     def test_accepted_dates_match_existing_fixture_exactly(self):
         result = self.read_fixture()
         dates = [field for field in result['fields'] if field.get('type') == DATE_TYPE]
-        self.assertEqual([field['name'] for field in dates], list(DATE_NAMES))
+        self.assertEqual([field['name'] for field in dates], list(DATE_NAMES[:5]))
         for index, field in enumerate(dates):
             self.assertTrue(segmented_date_record_valid(field))
             expected = date_record(index)
@@ -108,7 +108,7 @@ class SegmentedDateChromeTests(unittest.TestCase):
     def test_exact_false_container_variant_and_unrelated_extra_node(self):
         result = self.read_fixture(false_container=True)
         dates = [field for field in result['fields'] if field.get('type') == DATE_TYPE]
-        self.assertEqual([field['name'] for field in dates], list(DATE_NAMES))
+        self.assertEqual([field['name'] for field in dates], list(DATE_NAMES[:5]))
         for index, field in enumerate(dates):
             expected = date_record(index, false_container=True)
             expected['dom_order'] = index + 1

@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 from .core import REQUIRED_ADAPTER_QUALIFICATIONS
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, QUrl, Signal, Slot, QMimeData
 from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -230,6 +230,47 @@ def _address_summary(address: Any) -> str:
 
 def _state_label(state: Any) -> str:
     return STATE_LABELS.get(str(state), str(state or "Unknown").replace("_", " ").capitalize())
+
+
+def _collected_job_view(drafts, job):
+    """Show collected data without changing the engine's write approval state."""
+    if drafts is None:
+        return None
+    from .collection import latest_collection
+    from .address import propose_address_fields
+    record = latest_collection(drafts, job['id'])
+    if not record:
+        return None
+    capture = record['capture']
+    source = drafts.get_capture(capture['source_capture_id'])['capture']
+    revisions = drafts.list_addresses(capture['source_capture_id'])
+    edited = revisions[0]['edited'] if revisions else {}
+    address = {}
+    for key, proposed in propose_address_fields(source)['fields'].items():
+        field = edited.get(proposed['path'], proposed['field'])
+        address['unit_number' if key == 'ss_unit_number' else key] = field.get('value')
+    return {'address': address, 'reviewed': bool(revisions),
+            'state': 'Address review saved' if revisions else 'Ready for address review',
+            'media_count': capture['media_count']}
+
+
+def _run_status(runs, job):
+    record = runs.get(job['id']) if runs is not None else None
+    if record:
+        for event in reversed(record['events']):
+            if event['kind'] == 'status':
+                return event['data']
+        return {'state':'needs_review'}
+    return None
+
+
+def _relist_state_label(status):
+    if status.get('state')=='published':
+        return 'Relisted · '+status['target_reference']
+    labels={'portals_removed':'Original removed from portals','archived':'Original archived; copy pending',
+            'created':'Replacement saved; checking content','verified':'Replacement checked; publishing',
+            'publication_pending':'Waiting for portals','needs_review':'Previous action needs checking'}
+    return labels.get(status.get('state'),'Check saved progress')
 
 
 class _Worker(QObject):
@@ -865,14 +906,17 @@ class DownloadReviewDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    collection_progress = Signal(str)
+    clipboard_requested = Signal(object)
     """Desktop shell over the safety-enforcing Engine/Store API."""
 
-    def __init__(self, engine: Any = None, store: Any = None, hub: Any = None, drafts: Any = None, media_root: Any = None):
+    def __init__(self, engine: Any = None, store: Any = None, hub: Any = None, drafts: Any = None, media_root: Any = None, runs: Any = None):
         super().__init__()
         self.engine = engine
         self.store = store if store is not None else getattr(engine, "store", None)
         self.hub = hub
         self.drafts = drafts
+        self.runs = runs
         self.media_root = Path(media_root) if media_root is not None else None
         self._capture_sessions: dict[str, tuple[Any, Any]] = {}
         self._editor_open_job_id: str | None = None
@@ -894,6 +938,7 @@ class MainWindow(QMainWindow):
         self.resize(1360, 900)
         self.setStyleSheet(STYLE)
         self._build_shell()
+        self.clipboard_requested.connect(self._set_description_clipboard)
         self.refresh()
 
     def _fit_detail_actions(self):
@@ -1021,7 +1066,7 @@ class MainWindow(QMainWindow):
         self.progress.setTextVisible(False)
         self.progress.hide()
         outer.addWidget(self.progress)
-        self.stop_operation_button = _button("Stop source capture", self._stop_operation)
+        self.stop_operation_button = _button("Stop processing", self._stop_operation)
         self.stop_operation_button.hide()
         outer.addWidget(self.stop_operation_button)
         horizontal.addWidget(main, 1)
@@ -1081,6 +1126,17 @@ class MainWindow(QMainWindow):
         input_row.addLayout(input_actions)
         compose_layout.addLayout(input_row)
         layout.addWidget(compose)
+
+        collect_actions = QHBoxLayout()
+        collect_actions.addWidget(_button('Open Hub for sign-in', self._open_readonly_hub))
+        self.collect_batch_button = _button('Collect batch and photos', self._collect_batch, True)
+        collect_actions.addWidget(self.collect_batch_button)
+        self.relist_batch_button = _button('Relist reviewed batch', self._relist_reviewed_batch, True)
+        self.relist_batch_button.setToolTip('Remove and archive each original, then create, check and publish its reviewed replacement.')
+        collect_actions.addWidget(self.relist_batch_button)
+        collect_actions.addStretch()
+        layout.addLayout(collect_actions)
+        self.collection_progress.connect(self.statusBar().showMessage)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -1143,6 +1199,22 @@ class MainWindow(QMainWindow):
         self.detail_error.hide()
         details.addWidget(self.detail_error)
         details.addSpacing(2)
+        self.verify_captured_address_button = _button('Verify address', self._verify_captured_address, True)
+        details.addWidget(self.verify_captured_address_button)
+        self.check_publication_button = _button('Check publication', self._check_publication)
+        self.check_publication_button.hide()
+        details.addWidget(self.check_publication_button)
+        self.collection_summary = _label('Collect this batch to load its details and original photos.', 'muted', True)
+        details.addWidget(self.collection_summary)
+        self.diagnostics_toggle = QCheckBox('Show collection tools')
+        details.addWidget(self.diagnostics_toggle)
+        self.diagnostics_panel = QWidget()
+        outer_details = details
+        details = QVBoxLayout(self.diagnostics_panel)
+        details.setContentsMargins(0, 0, 0, 0)
+        outer_details.addWidget(self.diagnostics_panel)
+        self.diagnostics_panel.hide()
+        self.diagnostics_toggle.toggled.connect(self.diagnostics_panel.setVisible)
         self.search_hub_button = _button("Find RXCU in Hub (read only)", self._search_selected_reference)
         self.search_hub_button.setToolTip("Search Manage Listings in the dedicated Hub browser. Review results and filters manually.")
         details.addWidget(self.search_hub_button)
@@ -1183,6 +1255,7 @@ class MainWindow(QMainWindow):
         self.reconcile_button = _button("Check uncertain outcome", self._reconcile)
         self.reconcile_button.hide()
         details.addWidget(self.reconcile_button)
+        details = outer_details
         self.cancel_job_button = _button("Cancel unstarted job", self._cancel_job)
         self.cancel_job_button.setObjectName("danger")
         self.cancel_job_button.setToolTip("Cancel this local queue job before any destructive operation. Its saved reference and activity history remain.")
@@ -1396,14 +1469,25 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._show_error("Could not read local workspace", str(exc))
             return
-        self.connection_pill.setText("Verified adapter available" if self.live_ready else "Hub not connected")
+        self.connection_pill.setText("Verified adapter available" if self.live_ready else ("Hub browser open" if getattr(self.hub, 'driver', None) is not None else "Hub not connected"))
         self.notice.setVisible(not self.live_ready)
         if not self.engine or not self.store:
             self.notice_title.setText("Local backend is not available")
             self.notice_body.setText("This interface is open for review. Start Quick Relist with its Engine and local Store to save batches. No Hub actions are enabled.")
+        elif self.runs is not None:
+            self.notice_title.setText('Review addresses before relisting')
+            self.notice_body.setText('Collect the listings and photos, save each address review, then relist the batch. Each original is removed and archived before its replacement is saved and published.')
         self.stat_values["queued"].setText(str(len(self.jobs)))
-        self.stat_values["reviewed"].setText(str(sum(bool(job.get("approved")) for job in self.jobs)))
-        self.stat_values["live"].setText(str(sum(job.get("state") == "live" for job in self.jobs)))
+        self.collect_batch_button.setEnabled(bool(self.jobs) and self.hub is not None and self.drafts is not None and self.media_root is not None and not self._is_busy)
+        collected_views = {job['id']: _collected_job_view(self.drafts, job) for job in self.jobs}
+        self.stat_values["reviewed"].setText(str(sum(bool(job.get("approved")) or bool((collected_views[job['id']] or {}).get('reviewed')) for job in self.jobs)))
+        run_statuses = {job['id']: _run_status(self.runs, job) for job in self.jobs}
+        pending_jobs = [j for j in self.jobs if j.get('state')!='cancelled'
+                        and (run_statuses[j['id']] or {}).get('state')!='published']
+        self.relist_batch_button.setEnabled(bool(pending_jobs) and self.runs is not None
+            and getattr(self.hub,'driver',None) is not None and not self._is_busy
+            and all(bool((collected_views[j['id']] or {}).get('reviewed')) for j in pending_jobs))
+        self.stat_values["live"].setText(str(sum(job.get("state") == "live" or (run_statuses[job['id']] or {}).get('state') == 'published' for job in self.jobs)))
         batch = next((item for item in self.batches if str(item.get("id")) == self.batch_id), None)
         if batch:
             self.queue_subtitle.setText(f"Saved {_timestamp(batch.get('created_at'))} · {len(self.jobs)} listing{'s' if len(self.jobs) != 1 else ''}")
@@ -1416,7 +1500,10 @@ class MainWindow(QMainWindow):
             if job.get("id") == selected_id:
                 selected_row = row
             address = job.get("corrected_address") or job.get("original_address")
-            values = (str(job.get("rxcu", "")), _address_summary(address), _state_label(job.get("state")))
+            collected = collected_views[job['id']] if job.get('state') == 'queued' else None
+            run = run_statuses[job['id']]
+            state_text = _relist_state_label(run) if run else (collected['state'] if collected else _state_label(job.get("state")))
+            values = (str(job.get("rxcu", "")), _address_summary(collected['address'] if collected else address), state_text)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
@@ -1500,6 +1587,17 @@ class MainWindow(QMainWindow):
         row = self.queue_table.currentRow()
         self.selected_job = self.jobs[row] if 0 <= row < len(self.jobs) else None
         job = self.selected_job
+        self.verify_captured_address_button.setEnabled(False)
+        self.check_publication_button.hide()
+        self.collection_summary.setText('Collect this batch to load its details and original photos.')
+        if job and self.drafts:
+            from .collection import latest_collection
+            collection = latest_collection(self.drafts, job['id'])
+            if collection:
+                summary = collection['capture']
+                self.verify_captured_address_button.setEnabled(not self._is_busy)
+                reviews = self.drafts.list_addresses(summary['source_capture_id'])
+                self.collection_summary.setText(f"{summary['media_count']} original photos checked. " + ('Address review saved.' if reviews else 'Address ready for your review.'))
         self.capture_button.setEnabled(False)
         self.search_hub_button.setEnabled(False)
         self.open_editor_button.setEnabled(False)
@@ -1561,10 +1659,32 @@ class MainWindow(QMainWindow):
         self.detail_title.setText(str(job.get("rxcu", "Listing")))
         self.detail_state.setText(_state_label(state))
         self.detail_address.setText(_address_summary(job.get("corrected_address") or job.get("original_address")))
+        collected_view = _collected_job_view(self.drafts, job) if state == 'queued' else None
+        if collected_view:
+            self.detail_state.setText(collected_view['state'])
+            self.detail_address.setText(_address_summary(collected_view['address']))
+        run_status = _run_status(self.runs, job)
+        if run_status:
+            self.detail_state.setText(_relist_state_label(run_status))
+            if run_status.get('state')=='publication_pending':
+                self.detail_state.setText('Waiting for portals · ' + run_status['target_reference'])
+                names={'website':'RE/MAX','p24':'Property24','pp':'Private Property','global':'RE/MAX Global',
+                       'iol':'IOL Property','immoafrica':'ImmoAfrica','flow':'Flow Living'}
+                portals=run_status.get('publication',{}).get('portals',{})
+                confirmed=[names.get(k,k) for k,v in portals.items() if v.get('state')=='published']
+                waiting=[names.get(k,k) for k,v in portals.items() if v.get('state')!='published']
+                self.collection_summary.setText('Confirmed: '+(', '.join(confirmed) or 'none yet')+
+                    '. Waiting: '+(', '.join(waiting) or 'none')+'. Original archived; replacement checked.')
+                self.check_publication_button.setVisible(True)
+                self.check_publication_button.setEnabled(not self._is_busy and getattr(self.hub,'driver',None) is not None)
+        if run_status and run_status.get('state') == 'published':
+            self.detail_state.setText('Relisted · ' + run_status['target_reference'])
+            self.collection_summary.setText('Replacement published. Original archived. Saved source details and photos are retained locally.')
+            self.verify_captured_address_button.setEnabled(False)
         if job.get("error"):
             self.detail_error.setText(str(job["error"]))
             self.detail_error.show()
-        elif not self.live_ready and state == "queued":
+        elif not self.live_ready and state == "queued" and not collected_view:
             self.detail_error.setText("A complete, verified Hub capture is unavailable. Partial observations and tentative edits cannot approve a relist.")
             self.detail_error.show()
         snapshot = job.get("snapshot")
@@ -1583,6 +1703,135 @@ class MainWindow(QMainWindow):
                 # Do not offer cancellation when the operation history cannot be checked.
                 self.cancel_job_button.setEnabled(False)
         self.advance_button.setToolTip("A verified live Hub adapter and an approved address are required.")
+        if self.runs is not None and job and self.runs.get(job['id']):
+            self.cancel_job_button.setEnabled(False)
+            self.verify_captured_address_button.setEnabled(False)
+
+    @Slot(object)
+    def _set_description_clipboard(self, request):
+        try:
+            mime = QMimeData()
+            if sys.platform == 'win32':
+                from .html_clipboard import windows_html
+                mime.setData('application/x-qt-windows-mime;value="HTML Format"', windows_html(request['html']))
+            else:
+                mime.setHtml(request['html'])
+            if request['text'] is not None:
+                mime.setText(request['text'])
+            QApplication.clipboard().setMimeData(mime)
+            request['ok'] = True
+        finally:
+            request['done'].set()
+
+    def _description_clipboard(self, html, text):
+        request = {'html':html,'text':text,'done':threading.Event(),'ok':False}
+        self.clipboard_requested.emit(request)
+        if not request['done'].wait(15) or not request['ok']:
+            raise RuntimeError('The formatted description could not be prepared for Hub.')
+
+    @Slot()
+    def _check_publication(self):
+        if self._is_busy or not self.selected_job or self.runs is None or getattr(self.hub,'driver',None) is None:
+            return
+        job=deepcopy(self.selected_job)
+        status=_run_status(self.runs,job)
+        if not status or status.get('state')!='publication_pending':
+            return
+        from .live_relist_ui import HubRelistUI
+        provider=HubRelistUI(self.hub,self.media_root,clipboard=self._description_clipboard)
+        def check():
+            outcome=provider.recheck_publication(status)
+            status.update(state='published' if outcome['complete'] else 'publication_pending',publication=outcome)
+            self.runs.note(self.runs.get(job['id'])['id'],'status',status)
+            return status
+        self._run_operation('Checking the existing publication requests…',check,'Publication status refreshed. No new request was sent.')
+
+    @Slot()
+    def _relist_reviewed_batch(self):
+        if self._is_busy or self.runs is None or getattr(self.hub,'driver',None) is None:
+            return
+        jobs = deepcopy(self.jobs)
+        from .collection import latest_collection
+        from .relist_plan import build_relist_plan
+        from .relist_runner import RelistRunner, removal_can_be_checked, copy_can_be_checked
+        from .live_relist_ui import HubRelistUI
+        from .form_copy import CopyStopped
+        from .run_store import RunNeedsReview
+        def preflight():
+            prepared=[]
+            for job in jobs:
+                if job.get('state')=='cancelled' or (_run_status(self.runs,job) or {}).get('state')=='published':
+                    continue
+                previous = self.runs.get(job['id'])
+                if previous and not (removal_can_be_checked(previous) or copy_can_be_checked(previous)):
+                    raise RunNeedsReview('A previous run needs an outcome check. Its original will not be processed again.')
+                saved=latest_collection(self.drafts,job['id'])
+                if not saved:
+                    raise CopyStopped('Collect every listing first.')
+                reviews=self.drafts.list_addresses(saved['capture']['source_capture_id'])
+                if not reviews:
+                    raise CopyStopped('Save every address review first.')
+                build_relist_plan(saved['capture'],reviews[0])
+                prepared.append(job)
+            return prepared
+        def confirm(prepared):
+            if not prepared:
+                return
+            from .brochure_review import source_brochure, latest_review, save_review
+            for job in prepared:
+                collection = latest_collection(self.drafts, job['id'])['capture']
+                original = source_brochure(collection)
+                if len(original) <= 250 or latest_review(self.drafts, job['id'], collection):
+                    continue
+                dialog = QDialog(self)
+                dialog.setWindowTitle('Review brochure summary · ' + job['rxcu'])
+                dialog.resize(640, 370)
+                layout = QVBoxLayout(dialog)
+                layout.addWidget(_label('Hub allows 250 characters in the brochure summary. Shorten this text while preserving its facts. The full listing description stays unchanged.', 'noticeBody', True))
+                edit = QPlainTextEdit(original)
+                edit.setAccessibleName('Reviewed brochure summary')
+                layout.addWidget(edit)
+                count = QLabel()
+                layout.addWidget(count)
+                buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+                buttons.button(QDialogButtonBox.StandardButton.Save).setText('Save summary review')
+                layout.addWidget(buttons)
+                def changed():
+                    value = edit.toPlainText()
+                    count.setText(str(len(value)) + ' / 250 characters')
+                    buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(bool(value.strip()) and len(value) <= 250)
+                edit.textChanged.connect(changed)
+                changed()
+                buttons.accepted.connect(dialog.accept)
+                buttons.rejected.connect(dialog.reject)
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    dialog.deleteLater()
+                    return
+                save_review(self.drafts, job['id'], collection, edit.toPlainText())
+                dialog.deleteLater()
+            box=QMessageBox(self)
+            box.setWindowTitle('Relist the reviewed batch')
+            box.setTextFormat(Qt.TextFormat.PlainText)
+            box.setText('\n'.join(j['rxcu']+' · '+_address_summary(_collected_job_view(self.drafts,j)['address']) for j in prepared))
+            box.setInformativeText('For each listing: remove the original from its portals, archive sales as cancelled / mandate expired and rentals as withdrawn, create the replacement at the reviewed address, check its details and photos, then publish it to the same portals. A previously completed step is checked and skipped.')
+            box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
+            box.button(QMessageBox.StandardButton.Yes).setText('Relist this batch')
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if box.exec()!=QMessageBox.StandardButton.Yes:
+                return
+            stop=threading.Event()
+            provider=HubRelistUI(self.hub,self.media_root,clipboard=self._description_clipboard,
+                cancelled=stop.is_set,progress=self.collection_progress.emit)
+            runner=RelistRunner(self.drafts,self.runs,provider,cancelled=stop.is_set,progress=self.collection_progress.emit)
+            def run():
+                try:
+                    return runner.batch(prepared)
+                except (CopyStopped,RunNeedsReview):
+                    raise
+                except Exception:
+                    raise RuntimeError('Relisting stopped. Check the activity record and the existing Hub listing before continuing. No uncertain action was retried.') from None
+            self._run_operation('Relisting one listing at a time…',run,'Batch processing finished. Check each listing’s recorded result.',cancel=stop.set)
+        self._run_operation('Checking the reviewed batch…',preflight,'The reviewed batch is ready.',confirm)
 
     def _confirm_local_observation(self, purpose: str) -> bool:
         if not self.selected_job:
@@ -1597,6 +1846,59 @@ class MainWindow(QMainWindow):
         confirmation.button(QMessageBox.StandardButton.Yes).setText("Save incomplete data locally")
         confirmation.setDefaultButton(QMessageBox.StandardButton.Cancel)
         return confirmation.exec() == QMessageBox.StandardButton.Yes
+
+    @Slot()
+    def _collect_batch(self):
+        if self._is_busy or not self.hub or not self.drafts or not self.media_root:
+            return
+        if self.hub.driver is None:
+            self._show_error('Sign in first', 'Open Hub for sign-in, finish your login, then choose Collect batch and photos.')
+            return
+        # Developer launches can refresh read-only collectors between tests
+        # without discarding the operator's manual sign-in. Packaged builds do
+        # not set this flag and always use the installed, tested modules.
+        import os
+        if os.environ.get('QUICK_RELIST_DEVELOPMENT') == '1':
+            import importlib
+            for name in ('business_fields', 'date_capture', 'capture', 'general_features', 'room_capture', 'source_fields', 'form_copy', 'portal_ui', 'media_captions', 'original_media', 'matched_capture', 'collection'):
+                importlib.reload(importlib.import_module('quick_relist.' + name))
+        from .collection import collect_batch, CollectionStopped
+        from .form_copy import CopyStopped
+        from .capture import CaptureError
+        from .original_media import OriginalMediaError
+        from .downloads import DownloadReviewError
+        stop = threading.Event()
+        jobs = deepcopy(self.jobs)
+        def collect():
+            try:
+                return collect_batch(self.hub, self.drafts, jobs, self.media_root,
+                                     cancelled=stop.is_set, progress=self.collection_progress.emit)
+            except (CollectionStopped, CopyStopped, CaptureError, OriginalMediaError, DownloadReviewError):
+                raise
+            except Exception:
+                raise RuntimeError('Collection stopped. Saved information and photos have been kept. Check Hub and the collection tools before continuing; no listing was changed.') from None
+        self._run_operation('Collecting the batch one listing at a time…', collect,
+                            'Collection finished. Select a listing and verify its address.',
+                            lambda _: self._verify_captured_address(), cancel=stop.set)
+
+    @Slot()
+    def _verify_captured_address(self):
+        if self._is_busy or not self.selected_job or not self.drafts:
+            return
+        from .collection import latest_collection
+        from .address_review_ui import VerifyAddressDialog
+        collection = latest_collection(self.drafts, self.selected_job['id'])
+        if not collection:
+            return
+        capture_id = collection['capture']['source_capture_id']
+        source = self.drafts.get_capture(capture_id)['capture']
+        revisions = self.drafts.list_addresses(capture_id)
+        dialog = VerifyAddressDialog(self.selected_job['rxcu'], source, revisions[0] if revisions else None, self)
+        dialog.setStyleSheet(STYLE)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.drafts.save_address(capture_id, dialog.original, dialog.edited_address())
+            self.refresh()
+            self.statusBar().showMessage('Address review saved. Hub has not been changed.')
 
     @Slot()
     def _capture_all_pages(self) -> None:
@@ -1922,7 +2224,7 @@ class MainWindow(QMainWindow):
         self._worker.succeeded.connect(self._operation_succeeded)
         self._worker.failed.connect(self._operation_failed)
         self._worker.finished.connect(self._thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._operation_finished)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
@@ -1932,7 +2234,7 @@ class MainWindow(QMainWindow):
         if self._is_busy and self._cancel_operation_callback is not None:
             self._cancel_operation_callback()
             self.stop_operation_button.setEnabled(False)
-            self.statusBar().showMessage("Stopping source capture after the current browser read. Earlier guarded pages will be kept.")
+            self.statusBar().showMessage("Stopping between browser actions. Saved information and completed steps will be kept.")
 
     @Slot(object)
     def _operation_succeeded(self, result: Any) -> None:
@@ -1944,6 +2246,12 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _operation_finished(self) -> None:
+        # QThread.finished can reach the GUI while deferred QObject deletion
+        # and thread-local cleanup are still running. Keep both Python
+        # wrappers alive until that cleanup is complete; otherwise releasing
+        # the worker here can race its C++ destructor on the worker thread.
+        if self._thread is not None:
+            self._thread.wait()
         self._thread = None
         self._worker = None
         self._is_busy = False
@@ -1975,7 +2283,7 @@ class MainWindow(QMainWindow):
     def _open_readonly_hub(self) -> None:
         if self.hub is None or self._is_busy:
             return
-        self._run_operation("Opening the read-only Hub browser…", lambda: self._safe_readonly_call(self.hub.open), "Hub browser opened. Sign in yourself, then open a listing editor. No listing was changed.")
+        self._run_operation("Opening the Hub browser…", lambda: self._safe_readonly_call(self.hub.open), "Hub browser opened. Finish signing in, then choose Collect batch and photos.")
 
     @Slot()
     def _inspect_readonly_hub(self) -> None:
@@ -2054,7 +2362,8 @@ class MainWindow(QMainWindow):
         if not self.selected_job or not self.store or self._is_busy:
             return
         try:
-            entries = self.store.journal(self.selected_job["id"])
+            entries = {'preparation':self.store.journal(self.selected_job["id"]),
+                       'relist':self.runs.get(self.selected_job['id']) if self.runs is not None else None}
         except Exception as exc:
             self._show_error("Could not read the activity record", str(exc))
             return
@@ -2126,7 +2435,7 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
-def launch(engine: Any = None, store: Any = None, hub: Any = None, drafts: Any = None, media_root: Any = None) -> int:
+def launch(engine: Any = None, store: Any = None, hub: Any = None, drafts: Any = None, media_root: Any = None, runs: Any = None) -> int:
     """Run the desktop app. The caller owns the injected Engine and Store."""
     application = QApplication.instance()
     owns_application = application is None
@@ -2135,7 +2444,7 @@ def launch(engine: Any = None, store: Any = None, hub: Any = None, drafts: Any =
     application.setApplicationName("Quick Relist")
     application.setOrganizationName("QuickRelist")
     application.setFont(QFont("Segoe UI", 10))
-    window = MainWindow(engine=engine, store=store, hub=hub, drafts=drafts, media_root=media_root)
+    window = MainWindow(engine=engine, store=store, hub=hub, drafts=drafts, media_root=media_root, runs=runs)
     window.show()
     # Keep the window alive when embedded in an existing QApplication.
     application._quick_relist_window = window  # type: ignore[attr-defined]

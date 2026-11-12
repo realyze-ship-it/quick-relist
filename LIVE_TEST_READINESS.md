@@ -1,79 +1,44 @@
-# Live test readiness
+# Live validation and remaining coverage
 
-Quick Relist is not yet an operational Hub relisting tool. The desktop launcher
-supports read-only preparation. Synthetic browser tests exercise development
-components with generated records and images, not real listing changes.
+This records the current real Hub workflow. Older read-only and synthetic-engine design notes are historical; they do not describe the current desktop controls.
 
-## Useful checks in the next operator session
+## Verified live
 
-1. Open the existing read-only build and sign in directly in its separate Hub
-   browser. Confirm the intended account and exact listing reference.
-2. Capture and review the matched pages and supported room dialogs. Treat every
-   missing, ambiguous or unresolved item as missing evidence, not an empty value.
-3. Review existing downloaded media and its attribution. Do not repeat a download
-   after an uncertain outcome without the explicit download-review procedure.
-4. Review the tentative address separately. Nothing in this session approves a
-   live change, extends a mandate or enables removal, archive or publication.
-5. Record the remaining coverage gaps and stop. Keep real captures, photos,
-   browser profiles and diagnostic records private and outside this repository.
+An operator-authorized rental pilot has used the app to:
 
-The detailed [read-only test plan](READ_ONLY_TEST_PLAN.md) remains applicable.
-The new development components do not change the qualified launcher's behavior.
+- Collect the listing particulars, original dates, two agents, descriptions, feature options, six nonzero room dialogs and all 13 original photos.
+- Save the operator's edited address locally, then prepare and check the corresponding rental form.
+- Remove the original from its four portals and archive it using the rental-only **Listing has been withdrawn** option.
+- Create one replacement and resume that same identity after interrupted media steps.
+- Upload all 13 images individually, check downloaded content and order, and avoid repeating an upload whose receipt was confirmed by a fresh read.
+- Save the full main description with its original formatting and literal heading markers, plus an explicitly reviewed shorter brochure summary required by Hub's 250-character limit.
+- Reopen the replacement and verify particulars, room options, descriptions, captions and all photos before submitting publication to the original four destinations.
 
-## Evidence still needed before any live pilot
+Portal requests can remain pending. The app only records a completed relist when Hub returns all required destination identifiers; **Check publication** checks existing requests without resubmitting them. Exact references, addresses, receipts and screenshots remain in the private local workspace.
 
-### Complete source and target requirements
+A separate authorized sale pilot completed manually through the current Hub screens, with all 20 original photos and publication to four destinations. That proves the observed sale screens and saved result; it does not qualify the entire automated sale runner.
 
-- Verify account/agency ownership and the exact source, sale/rental branch,
-  originally selected portals and complete transferable listing data.
-- Capture and map remaining related parties, documents, notes, agents, nested
-  controls and other unknown fields. A partial inventory is not a full backup.
-- Establish full-size original media attribution, completeness, classification,
-  saved order, exact captions, cover, floorplans and any rotation or tag data.
-  Upload headings do not classify the shared grid. Missing caption/cover markup
-  does not mean an empty caption or no cover.
-- Qualify actual address/suburb selection, required fields and business date
-  rules for the replacement. Preserve source mandate facts until an explicit
-  decision supplies any legitimately required new facts. Never invent or extend
-  dates merely to make creation succeed.
+## Operational observations
 
-### Actual Hub write and recovery behavior
+Sale and rental have different fields and archive reasons. Rentals omit Deal Particulars. Sales use **Listing has been cancelled → Mandate expired**. Source dates are preserved, never renewed or invented.
 
-- Verify draft allocation, its immediate persistent identity, and each subsequent
-  save/autosave/upload transition on the real service under a controlled plan.
-- Qualify source-to-draft relationships, saved field/media readback and the
-  revision transition between upload and metadata editing. Native control
-  readback alone is not a persistence receipt.
-- Establish atomic expected-revision checks, durable operation-key behavior and
-  authoritative read-only reconciliation. A read followed by a click is not an
-  atomic precondition. An absent receipt is not proof an action never happened.
-- Verify removal and archive outcomes, full replacement comparison, and portal
-  submission versus confirmed publication. A global publication chip is not
-  independent per-portal evidence.
-- Integrate the qualified provider with the existing mutation/creation engine
-  and desktop review flow. The public live paths currently remain blocked.
+Hub can accept only part of a photo upload. The app sends one image at a time and verifies the received prefix before continuing. Explicit failure permits up to three attempts for that missing image. An uncertain missing image stops the run; absence alone does not authorize another upload.
 
-These are technical qualification gaps. Synthetic modeled guarantees must not
-be represented as capabilities that Hub is known to provide.
+The current pilot saved media while the replacement remained unpublished. The app checks that state before proceeding and after saving. Historical guides describe Media **Next** as a publishing action, so its behavior must not be generalized beyond the guarded current workflow.
 
-### Specific authorization and a controlled pilot
+Windows Chrome requires native HTML clipboard data to retain the source description. The app supplies UTF-8 CF_HTML byte offsets and handles a literal leading markdown heading without converting it to bold. Saved-page comparison, not successful paste alone, establishes fidelity.
 
-Only after the technical gates are met, obtain explicit authorization for the
-particular test listing and intended changes. Bind that approval to the exact
-source, reviewed replacement address, original portal choices, cancellation and
-mandate-expired archive reason, and intended publication. A named listing alone
-does not satisfy missing technical evidence or resolve a required mandate date.
+## Local validation
 
-Run one authorized pilot at a time. Retain the verified original and immediate
-replacement identity privately. Stop on uncertainty and reconcile before any
-further write. Do not create another replacement, retry an upload, repeat an
-archive or publish merely because a browser response was lost. Qualify sale and
-rental branches separately before claiming general readiness.
+- Broad suite: 2,050 checks passed; 83 optional browser checks skipped.
+- A later focused suite passed 159 checks covering portal moderation, Windows clipboard, brochure review, interrupted copy recovery, runner journal and Qt worker lifetime changes.
+- The Windows portable package is built with PyInstaller. Its offline self-check passed inside the actual executable: Qt window construction and bundled driver-manager availability, with no Hub or user-data access. Development attachment/reload is disabled in the packaged launcher. Native interaction with the new executable was unavailable to the automation tool; this check is not a full packaged live Hub run.
+- All committed tests use synthetic data. No real listing captures, photos, credentials, OTPs or browser profiles belong in this repository.
 
-## What a successful synthetic test does not establish
+## Limits still enforced
 
-- Real Hub persistence, revision protection, idempotency or service identity.
-- Complete real source capture or support for every business field and asset.
-- Permission to change a real listing or evidence that a replacement is valid.
-- Recovery after losing the authoritative service ledger or all local journals.
-- A production installer, signed distribution or a working live desktop relist.
+The writer currently requires empty custom-feature, party, document and note tables and no floorplans. Unsupported or unresolved fields stop before removing the original. This is not universal support for every Hub listing type.
+
+Unknown creation outcomes, unsupported interrupted states and mismatched saved content require investigation. The app does not erase uncertain journal entries or repeat creation to recover. It cannot atomically transact or roll back Hub changes, and a source recheck cannot prevent another user editing the listing afterwards.
+
+Before a broad production release, qualify an automated sale run, a live multi-listing batch, additional partial-upload failures and the excluded related-record paths. Passing synthetic checks does not establish those live outcomes.

@@ -1,4 +1,4 @@
-"""Narrow read-only observations of the five observed Hub MUI date pickers.
+"""Read-only observations of the observed sale and rental Hub date pickers.
 
 The JavaScript fragment is inserted into capture.READ_PAGE_SCRIPT, sharing its
 visible/sensitiveContext/textOf/scopeFor/cut helpers and limitations set. It
@@ -10,10 +10,10 @@ its authenticity. No observation authorizes a write or renewal.
 from __future__ import annotations
 
 DATE_NAMES = (
-    "mandate_signed_date", "mandate_expiry", "date_listed", "expiry_date", "on_market_since",
+    "mandate_signed_date", "mandate_expiry", "date_listed", "expiry_date", "on_market_since", "occupation_date",
 )
 DATE_LABELS = (
-    "Mandate signed date", "Mandate expiry date", "Date listed", "Listing expiry date", "On market since",
+    "Mandate signed date", "Mandate expiry date", "Date listed", "Listing expiry date", "On market since", "Occupation date",
 )
 DATE_SCHEMA = "mui-segmented-date-dom/v1"
 DATE_FALSE_CONTAINER_SCHEMA = "mui-segmented-date-dom/v2"
@@ -74,8 +74,8 @@ _FALSE_CONTAINER_RELATIONS = (
 # This fragment is intentionally not a standalone browser task. It is injected
 # once before fieldsFor; calls use the supplied capture root, including dialogs.
 DATE_CAPTURE_HELPERS = r"""
-  const dateNames = ['mandate_signed_date','mandate_expiry','date_listed','expiry_date','on_market_since'];
-  const dateLabels = ['Mandate signed date','Mandate expiry date','Date listed','Listing expiry date','On market since'];
+  const dateNames = ['mandate_signed_date','mandate_expiry','date_listed','expiry_date','on_market_since','occupation_date'];
+  const dateLabels = ['Mandate signed date','Mandate expiry date','Date listed','Listing expiry date','On market since','Occupation date'];
   // Rejections only, one record per known name across repeated root/dialog
   // scans. Counts saturate at 100. No values, identifiers or arbitrary strings.
   const dateRejectionDiagnostics = [];

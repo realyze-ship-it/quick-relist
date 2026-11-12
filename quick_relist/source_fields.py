@@ -23,6 +23,7 @@ import re
 from typing import Any
 
 from .capture import EDITOR_PAGES, CaptureSafetyError, _digest, parse_editor_url, verify_capture_integrity
+from .business_fields import LIFESTYLE_FIELDS, GENERAL_FIELDS
 from .date_capture import (DATE_UNRESOLVED_ISSUES, date_observed_parts,
                            is_segmented_date_record, segmented_date_record_valid)
 
@@ -37,6 +38,7 @@ _SELECTS = (
     ("floor_area_units", "Floor area units"),
     ("apartment_descriptive_property_type", "Apartment descriptive property type"),
     ("deed_office_id", "Deed office"),
+    ("rental_price_period", "Rental price period"),
 )
 _DETAILS = (
     ("land_area", "Land area"), ("floor_area", "Floor area"),
@@ -49,11 +51,14 @@ _DETAILS = (
     ("door_number", "Door number"), ("latitude", "Latitude"), ("longitude", "Longitude"),
     ("selling_price", "Selling price"), ("rates", "Rates"), ("levy", "Levy"),
     ("special_levies", "Special levies"),
+    ("ensuites", "En suites"),
+    ("rental_price", "Rental price"), ("deposit", "Deposit"),
 )
 _DATES = (
     ("mandate_signed_date", "Mandate signed date"), ("mandate_expiry", "Mandate expiry"),
     ("date_listed", "Date listed"), ("expiry_date", "Expiry date"),
     ("on_market_since", "On market since"),
+    ("occupation_date", "Occupation date"),
 )
 _CHECKBOXES = (
     ("poa", "Price on application"), ("featured", "Featured"),
@@ -61,7 +66,8 @@ _CHECKBOXES = (
     ("address_hidden", "Address visibility (raw address_hidden)"),
     ("transfer_cost", "Transfer cost"),
 )
-_FEATURES = ("bedroom", "kitchen", "bathroom", "garage", "parking", "lounge", "dining")
+_FEATURES = ("bedroom", "kitchen", "bathroom", "garage", "parking", "lounge", "dining",
+             "braai", "study", "entrance_hall")
 _MEDIA = (
     ("virtualtour_url", "Virtual tour URL"), ("videotour_url", "Video tour URL"),
     ("p24_youtube_video_id", "P24 YouTube video ID"),
@@ -80,7 +86,10 @@ def _specs():
     add(_DETAILS, "details", "text")
     add(_DATES, "details", "date", "name")
     add(_CHECKBOXES, "details", "checkbox", "name")
+    add(LIFESTYLE_FIELDS.items(), "details", "checkbox", "name")
+    add(GENERAL_FIELDS.items(), "details", "checkbox", "name")
     add((("sale_state_id", "Sale state"),), "details", "radio_group", "name")
+    add((("rental_state_id", "Rental state"),), "details", "radio_group", "name")
     add((("suburb", "Suburb"),), "details", "suburb", "label")
     for name in _FEATURES:
         result.append({"key": "feature_" + name, "label": name.capitalize() + " count",
@@ -257,6 +266,9 @@ def _matches(spec, field, rich):
         return field.get("name") == identifier or field.get("id") == identifier
     if selector in ("name", "id"):
         return field.get(selector) == identifier
+    if (spec["key"] == "rich_text_description" and field.get("observed_description_label") is True
+            and _label(field) == "listing description"):
+        return True
     return _label(field) == {"suburb": "suburb", "brochure_description": "brochure description",
                              "rich_text_description": "rdw-editor"}[spec["key"]]
 

@@ -62,6 +62,32 @@ def _finish_worker(application, window, seconds=5):
     application.processEvents()
 
 
+def test_worker_cleanup_finishes_before_gui_releases_wrappers(application, window, monkeypatch):
+    """Exercise real deferred Qt deletion on both success and failure paths."""
+    import threading
+    for attempt in range(20):
+        release = threading.Event()
+        destroyed = threading.Event()
+        completed = []
+        def operation():
+            assert release.wait(5)
+            if attempt % 2:
+                raise RuntimeError('Synthetic stopped operation')
+            return 'complete'
+        def observed_completion(*args):
+            completed.append(destroyed.is_set())
+        monkeypatch.setattr(window, '_show_error', observed_completion)
+        window._run_operation('Synthetic lifecycle', operation, 'Complete', observed_completion)
+        window._worker.destroyed.connect(destroyed.set, Qt.ConnectionType.DirectConnection)
+        # Keep shutdown in progress after finished has been emitted to the GUI.
+        # The GUI must wait before dropping its worker/thread wrappers.
+        window._thread.finished.connect(lambda: time.sleep(.01), Qt.ConnectionType.DirectConnection)
+        release.set()
+        _finish_worker(application, window)
+        assert completed == [True]
+        assert window._worker is None and window._thread is None
+
+
 def _add_batch(window, references="RXCU000001\nRXCU000002"):
     window.rxcu_input.setPlainText(references)
     window._create_batch()

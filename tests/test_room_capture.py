@@ -165,7 +165,7 @@ def test_capture_five_delayed_existing_dialogs_and_preserve_full_records(setup):
     hub, driver, clock = setup
     result = capture(hub)
     assert result['status'] == 'partial' and result['stop_reason'] is None
-    assert result['pending_dialogs'] == [] and len(result['dialogs']) == 5
+    assert result['pending_dialogs'] == [] and len(result['dialogs']) == len(ROOM_OPTIONS)
     assert actions(driver) == [(action, d.key) for d in ROOM_OPTIONS for action in ('click', 'escape')]
     for dialog, descriptor in zip(result['dialogs'], ROOM_OPTIONS):
         assert dialog['title'] == descriptor.opener

@@ -20,6 +20,7 @@ def main():
     from .core import Engine, Store
     from .hub_readonly import ReadOnlyHub
     from .drafts import DraftStore
+    from .run_store import RunStore
     from .ui import launch
 
     directory = data_directory()
@@ -27,8 +28,9 @@ def main():
     store = Store(directory / "quick-relist.sqlite3")
     hub = ReadOnlyHub()
     drafts = DraftStore(directory / "partial-captures.sqlite3")
+    runs = RunStore(directory / 'relist-runs.sqlite3')
     try:
-        return launch(engine=Engine(store), store=store, hub=hub, drafts=drafts, media_root=directory / "media")
+        return launch(engine=Engine(store), store=store, hub=hub, drafts=drafts, media_root=directory / "media", runs=runs)
     finally:
         try:
             hub.close()
@@ -36,7 +38,10 @@ def main():
             try:
                 drafts.close()
             finally:
-                store.close()
+                try:
+                    runs.close()
+                finally:
+                    store.close()
 
 
 if __name__ == "__main__":

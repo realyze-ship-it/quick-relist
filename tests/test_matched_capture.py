@@ -141,6 +141,21 @@ def test_missing_links_and_unsafe_links_do_not_guess_routes(setup):
     assert_partial(result)
 
 
+def test_capture_can_return_from_media_to_observed_particulars_link(setup):
+    hub, driver, _ = setup
+    details_url = BASE + '/particulars'
+    urls = [details_url, *URLS[1:]]
+    driver.pages = {url: observation(url, urls) for url in urls}
+    driver.current_url = BASE + '/media'
+    result = capture(hub)
+    assert result['stop_reason'] is None
+    assert set(result['coverage']['observed_pages']) == set(EDITOR_PAGES)
+    details = [page for page in result['pages'] if page['page_key'] == 'details']
+    assert len(details) == 1
+    assert details[0]['page_path'] == '/app/listings/edit/123456/particulars'
+    assert_partial(result)
+
+
 @pytest.mark.parametrize('change', ['wrong_reference', 'wrong_handle', 'wrong_route', 'no_binding', 'nonnumeric', 'missing_heading'])
 def test_stale_or_unmatched_initial_editor_rejected(setup, change):
     hub, driver, _ = setup

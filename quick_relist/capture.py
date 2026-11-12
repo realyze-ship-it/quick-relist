@@ -30,6 +30,8 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
+from .business_fields import LIFESTYLE_FIELDS, GENERAL_FIELDS
+
 from .date_capture import (
     DATE_CAPTURE_HELPERS, DATE_NAMES, is_segmented_date_record,
     segmented_date_diagnostic_valid, segmented_date_record_valid,
@@ -45,7 +47,7 @@ MEDIA_FIELDS = (
 )
 _EDITOR_PATH = re.compile(
     r"^/app/listings/edit/(?P<listing_id>[A-Za-z0-9_-]{1,128})"
-    r"(?:/(?P<page>deal_particulars|media|portals))?/?$"
+    r"(?:/(?P<page>particulars|deal_particulars|media|portals))?/?$"
 )
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SECRET_FIELD = re.compile(
@@ -84,8 +86,12 @@ def parse_editor_url(url: str) -> dict[str, str]:
             and match is not None
         )
         if valid:
+            # Hub opens an editor at its bare URL, but its Listing particulars
+            # tab returns to /particulars. Both are the same business page;
+            # retain the actual path for provenance and tab-change checks.
+            page = match.group("page")
             return {"listing_id": match.group("listing_id"),
-                    "page_key": match.group("page") or "details",
+                    "page_key": "details" if page in (None, "particulars") else page,
                     "page_path": parsed.path}
     except (AttributeError, TypeError, ValueError):
         pass
@@ -199,13 +205,51 @@ return (() => {
   // Local room ownership is established before generic dialog fields are read.
   // Neither map is a general exception for hidden or credential-like inputs.
   const roomControlLabels = new Map(), roomCheckboxProxies = new Set(), refusedRoomControls = new Set();
+  const businessProxyLabel = el => {
+    // MUI renders these native states through visible label proxies. This is
+    // not permission to read arbitrary hidden fields: only the named editor
+    // controls, their native checked state, and their containing visible label
+    // qualify. Room dialogs have a separate, explicitly scoped collector.
+    if (!/^\/app\/listings\/edit\/[A-Za-z0-9_-]{1,128}(?:\/particulars)?\/?$/.test(location.pathname)
+        || el.closest('[role="dialog"],dialog') || sensitiveContext(el)
+        || !el.classList.contains('PrivateSwitchBase-input') || el.indeterminate
+        || ['hidden','aria-hidden','aria-checked'].some(a => el.hasAttribute(a))) return null;
+    const labels = {...__LIFESTYLE_FIELDS__, poa:'Price on application', featured:'Featured',
+      address_hidden:'Show address on web', transfer_cost:'No Transfer Duty Applicable'};
+    const checkbox = el.type === 'checkbox' && Object.hasOwn(labels, el.name);
+    const radioLabels = {sale_state_id:['New','For Sale','Price Reduced','Offer Made','Sold'],
+      rental_state_id:['To Rent','Available Immediately','Price Reduced','Leased']};
+    const radio = el.type === 'radio' && Object.hasOwn(radioLabels, el.name);
+    if (!checkbox && !radio) return null;
+    const style = getComputedStyle(el), proxy = el.parentElement, label = proxy?.parentElement;
+    if (Number(style.opacity || 1) !== 0 || style.display === 'none'
+        || style.visibility !== 'visible' || style.position !== 'absolute'
+        || !Array.from(el.getClientRects()).some(r => r.width > 0 && r.height > 0)
+        || !proxy?.matches(checkbox ? 'span.MuiCheckbox-root' : 'span.MuiRadio-root')
+        || !visible(proxy) || !label?.matches('label.MuiFormControlLabel-root')
+        || !visible(label) || sensitiveContext(label) || label.hasAttribute('for')
+        || label.querySelectorAll('input,textarea,select').length !== 1
+        || ![null,'false'].includes(el.getAttribute('data-indeterminate'))) return null;
+    const caption = textOf(label);
+    if (checkbox && caption !== labels[el.name]) return null;
+    if (radio && (!label.parentElement?.matches('div[role="radiogroup"][aria-label="' + el.name + '"]')
+        || !radioLabels[el.name].includes(caption))) return null;
+    return caption;
+  };
   const fieldsFor = root => {
+    const proxies = new Map();
     const fields = limited(root.querySelectorAll('input,select,textarea'), 2000)
-      .filter(el => !refusedRoomControls.has(el) && !isSegmentedDateControl(el)
-        && (safeControl(el) || roomCheckboxProxies.has(el))).map((el, index) => ({
+      .filter(el => {
+        if (refusedRoomControls.has(el) || isSegmentedDateControl(el)) return false;
+        if (safeControl(el) || roomCheckboxProxies.has(el)) return true;
+        const label = businessProxyLabel(el);
+        if (label) { proxies.set(el, label); return true; }
+        return false;
+      }).map((el, index) => ({
         dom_order: index, tag: el.tagName.toLowerCase(), type: el.type || '',
-        id: cut(el.id), name: cut(el.name), label: roomControlLabels.get(el) || labelFor(el), section: scopeFor(el),
+        id: cut(el.id), name: cut(el.name), label: roomControlLabels.get(el) || proxies.get(el) || labelFor(el), section: scopeFor(el),
         ...(roomCheckboxProxies.has(el) ? {observed_room_checkbox_proxy: true} : {}),
+        ...(proxies.has(el) ? {observed_business_checked_proxy: true} : {}),
         value: fieldValue(el), checked: ['checkbox', 'radio'].includes(el.type) ? el.checked : null,
         disabled: !!el.disabled, read_only: !!el.readOnly,
         selected_options: el.tagName === 'SELECT' ? limited(el.selectedOptions, 1000).map(o => ({value: cut(o.value), text: cut(o.textContent)})) : null,
@@ -216,13 +260,15 @@ return (() => {
     // this exception to arbitrary hidden fields or credential-like controls.
     const observedSelects = ['country_id','property_type_id','mandate_type_id',
       'office_id','listing_type_id','land_area_units','floor_area_units',
-      'apartment_descriptive_property_type','deed_office_id'];
+      'apartment_descriptive_property_type','deed_office_id','rental_price_period'];
     for (const name of observedSelects) {
       const combos = Array.from(root.querySelectorAll('div[role="combobox"]#mui-component-select-' + name))
         .filter(el => visible(el) && !sensitiveContext(el));
       const inputs = Array.from(root.querySelectorAll('input#' + name + '[name="' + name + '"][aria-hidden="true"]'));
       const code = inputs.length === 1 ? String(inputs[0].value) : '';
-      const codeShape = name === 'country_id' ? /^[A-Za-z]{2}$/.test(code) : /^[A-Za-z0-9_.:-]{0,128}$/.test(code);
+      const codeShape = name === 'country_id' ? /^[A-Za-z]{2}$/.test(code)
+        : name === 'rental_price_period' ? /^per (day|week|month|year)$/.test(code)
+        : /^[A-Za-z0-9_.:-]{0,128}$/.test(code);
       if (combos.length === 1 && inputs.length === 1 && combos[0].nextElementSibling === inputs[0]
           && combos[0].parentElement === inputs[0].parentElement && inputs[0].type === 'text'
           && !sensitiveContext(inputs[0]) && codeShape && textOf(combos[0])) {
@@ -237,6 +283,22 @@ return (() => {
       } else if (combos.length || inputs.length) {
         limitations.add(name === 'country_id' ? 'country_selector_unresolved' : 'business_selector_unresolved');
       }
+    }
+    // Bank mandate is an observed nameless MUI selector. Bind it by its
+    // own visible form-control label, never by a fabricated HTML name.
+    const bankControls = Array.from(root.querySelectorAll('div.MuiFormControl-root'))
+      .filter(el => Array.from(el.children).some(c => c.matches('label') && textOf(c) === 'Bank mandate'));
+    for (const container of bankControls) {
+      const combos = Array.from(container.querySelectorAll('div[role="combobox"]')).filter(visible);
+      const native = combos.length === 1 ? combos[0].nextElementSibling : null;
+      if (bankControls.length === 1 && native?.matches('input.MuiSelect-nativeInput[aria-hidden="true"]')
+          && !native.name && !native.id && !sensitiveContext(container) && /^\d{1,8}$/.test(native.value)) {
+        fields.push({dom_order: fields.length, tag:'div', type:'custom-combobox', id:'', name:'',
+          label:'Bank mandate', section:scopeFor(container), value:textOf(combos[0]), checked:null,
+          disabled:!!native.disabled, read_only:false, option_count:null,
+          selected_options:[{value:cut(native.value), text:textOf(combos[0])}],
+          observed_business_selection_code:true, observed_label_bound_selector:'Bank mandate'});
+      } else limitations.add('bank_mandate_selector_unresolved');
     }
     fields.push(...dateFieldsFor(root, fields.length));
     return fields;
@@ -259,12 +321,47 @@ return (() => {
     };
     return cut(Array.from(root.childNodes).map(node => serialize(node)).join(''));
   };
+  const descriptionLabel = el => {
+    const explicit = labelFor(el);
+    if (explicit) return {label: explicit};
+    // Current Hub uses TipTap with a visible label in the adjacent form
+    // control, not DraftJS's aria-label. Bind that one observed relationship.
+    if (!/^\/app\/listings\/edit\/[A-Za-z0-9_-]{1,128}\/media\/?$/.test(location.pathname)
+        || !el.matches('div.tiptap.ProseMirror[role="textbox"][contenteditable="true"]'))
+      return {label: ''};
+    const editor = el.closest('.html-editor'), form = el.closest('.MuiFormControl-root');
+    const row = form?.parentElement;
+    if (!editor || !form || !row?.classList.contains('MuiGrid-root')
+        || row.children.length !== 2 || row.children[1] !== form
+        || !row.children[0].classList.contains('MuiFormControl-root')
+        || !visible(row.children[0]) || sensitiveContext(row.children[0])
+        || textOf(row.children[0]) !== 'Listing description'
+        || row.querySelectorAll('[contenteditable="true"]').length !== 1
+        || form.querySelectorAll('.html-editor').length !== 1)
+      return {label: ''};
+    return {label: 'Listing description', observed_description_label: true};
+  };
   const richFor = root => {
     const found = limited(root.querySelectorAll('[contenteditable="true"],.rdw-editor-main,.rdw-editor'), 200).filter(visible);
-    return found.filter(el => !found.some(other => other !== el && other.contains(el)))
-      .filter(el => !sensitiveContext(el))
+    // Prefer the actual editable over an unlabelled presentation wrapper.
+    // Labels belong to the selected element only: never borrow from siblings,
+    // a toolbar, or an arbitrary labelled descendant. Separate editables stay
+    // separate, so the inventory can report duplicate labels as ambiguous.
+    const editables = found.filter(el => el.getAttribute('contenteditable') === 'true');
+    const selected = found.filter(el => {
+      if (el.getAttribute('contenteditable') === 'true') {
+        if (el.querySelector('[contenteditable="true"]'))
+          limitations.add('rich_text_nested_editables_unresolved');
+        return !editables.some(other => other !== el && other.contains(el));
+      }
+      // Keep legacy wrapper-only observations, but do not fall back to a
+      // wrapper when its editable is hidden, sensitive, or outside the limit.
+      return !el.querySelector('[contenteditable="true"]')
+        && !found.some(other => other !== el && other.contains(el));
+    });
+    return selected.filter(el => !sensitiveContext(el))
       .map((el, index) => ({dom_order: index, id: cut(el.id), name: cut(el.getAttribute('name')),
-        label: labelFor(el), section: scopeFor(el), text: textOf(el),
+        ...descriptionLabel(el), section: scopeFor(el), text: textOf(el),
         sanitized_html: richHTML(el), format_fidelity_verified: false}));
   };
   const unsupportedRoomNode = (node, dialog) => node.hasAttribute('aria-checked')
@@ -364,7 +461,9 @@ return (() => {
   };
   const roomGroups = (dialog, title) => {
     const roomLabels = {'Set bedrooms options': 'Bedroom', 'Set bathrooms options': 'Bathroom',
-      'Set kitchens options': 'Kitchen', 'Set parkings options': 'Parking', 'Set lounges options': 'Lounge'};
+      'Set kitchens options': 'Kitchen', 'Set parkings options': 'Parking', 'Set lounges options': 'Lounge',
+      'Set dining rooms options': 'Dining room', 'Set garages options':'Garage',
+      'Set braais options':'Braai', 'Set studies options':'Study', 'Set entrance halls options':'Entrance hall'};
     if (!Object.prototype.hasOwnProperty.call(roomLabels, title)) return [];
     const label = roomLabels[title];
     // Run before structural early returns. Unsupported native/local proxy state
@@ -387,6 +486,9 @@ return (() => {
       'Kitchen': ['Kitchen options', 'Room options', 'Floor options'],
       'Parking': ['Parking options', 'Room options', 'Floor options'],
       'Lounge': ['Room options', 'Floor options'],
+      'Dining room': ['Room options', 'Floor options'],
+      'Garage': ['Garage options', 'Room options', 'Floor options'],
+      'Braai': ['Braai options'], 'Study': ['Study options'], 'Entrance hall': ['Entrance hall options'],
     };
     const seen = new Set(), groups = [];
     if (contents[0].children.length > 200) limitations.add('room_group_structure_unresolved');
@@ -452,6 +554,29 @@ return (() => {
   const tableSelector = 'table,[role="table"],[role="grid"]';
   const rowSelector = 'tr,[role="row"]';
   const cellSelector = 'th,td,[role="cell"],[role="gridcell"],[role="columnheader"],[role="rowheader"]';
+  const agentsFor = table => {
+    if (!/^\/app\/listings\/edit\/[0-9]+(?:\/particulars)?\/?$/.test(location.pathname)
+        || table.tagName !== 'TABLE' || table.closest('[role="dialog"],dialog')) return null;
+    const headers = Array.from(table.querySelectorAll('thead th')).filter(e => e.closest('table') === table);
+    if (headers.map(textOf).join('|') !== 'Is primary agent?|Name|Action') return null;
+    const rows = Array.from(table.querySelectorAll('tbody tr')).filter(e => e.closest('table') === table);
+    if (!rows.length || rows.length > 100) return null;
+    const agents = [];
+    for (const row of rows) {
+      const cells = Array.from(row.cells);
+      if (!visible(row) || cells.length !== 3 || !cells.every(visible)) return null;
+      const inputs = cells[0].querySelectorAll('input');
+      if (inputs.length !== 1) return null;
+      const input = inputs[0], proxy = input.parentElement;
+      if (input.type !== 'checkbox' || input.name || input.indeterminate || sensitiveContext(input)
+          || input.hasAttribute('hidden') || input.hasAttribute('aria-hidden')
+          || !input.classList.contains('PrivateSwitchBase-input')
+          || !proxy?.matches('span.MuiCheckbox-root') || !visible(proxy)
+          || !textOf(cells[1])) return null;
+      agents.push({name:textOf(cells[1]), primary:input.checked});
+    }
+    return agents;
+  };
   const tables = limited(root.querySelectorAll(tableSelector), 100)
     .filter(el => visible(el) && !sensitiveContext(el)).map((el, index) => {
       const notes = new Set(['table_semantics_unverified', 'grid_positions_not_inferred',
@@ -574,7 +699,9 @@ return (() => {
       const captions = take(Array.from(el.children).filter(node => node.tagName === 'CAPTION'
         && visible(node) && !sensitiveContext(node)), 100);
       for (const note of notes) limitations.add(note);
+      const observedAgents = agentsFor(el);
       return {dom_order: index, section: scopeFor(el),
+        ...(observedAgents ? {observed_agents:observedAgents} : {}),
         rows: observations.map(row => row.cells.map(cell => cell.text)),
         structure: {schema_version: 'table-dom/v1', tag: el.tagName.toLowerCase(), role: attr(el, 'role'),
           captions: captions.map(node => textWithin(node, ownTable)), status, mapping_verified: false,
@@ -627,7 +754,8 @@ return (() => {
   return {href, ready_state: document.readyState, fields, rich_text: richFor(root), dialogs,
     sections, lists, tables, media, editor_links, discovery, limitations: Array.from(limitations)};
 })();
-""".replace("/* __SEGMENTED_DATE_CAPTURE_HELPERS__ */", DATE_CAPTURE_HELPERS)
+""".replace("/* __SEGMENTED_DATE_CAPTURE_HELPERS__ */", DATE_CAPTURE_HELPERS).replace(
+    "__LIFESTYLE_FIELDS__", json.dumps({**LIFESTYLE_FIELDS, **GENERAL_FIELDS}))
 
 _BASE_BLINDSPOTS = (
     ("partial_not_backup", "Visible DOM observations are not a complete listing backup and cannot authorize relisting."),
@@ -785,6 +913,13 @@ def _validate_observation(raw: Any, expected_url: str) -> dict:
 
     for table in result["tables"]:
         _validate_table_structure(table)
+        if 'observed_agents' in table:
+            agents = table['observed_agents']
+            if (not isinstance(agents, list) or not 0 < len(agents) <= 100
+                    or any(not isinstance(a, dict) or set(a) != {'name', 'primary'}
+                           or not isinstance(a['name'], str) or not a['name']
+                           or type(a['primary']) is not bool for a in agents)):
+                raise CaptureReadError('The listing agent observations are malformed.')
 
     result["fields"] = clean_fields(result["fields"])
     for dialog in result["dialogs"]:

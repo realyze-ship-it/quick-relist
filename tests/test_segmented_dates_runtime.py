@@ -164,7 +164,7 @@ class SegmentedDateRuntimeTests(unittest.TestCase):
     def extract(self, html=None, *, setup="", deny_values=()):
         completed = subprocess.run([self.node, "-e", RUNNER], input=json.dumps({"html": html or fixture_html(),
             "script": READ_PAGE_SCRIPT, "setup": setup, "deny_values": list(deny_values)}),
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, encoding='utf-8', timeout=30)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         result = json.loads(completed.stdout)
         self.assertEqual(result['ready_state'], 'complete')
@@ -183,7 +183,7 @@ class SegmentedDateRuntimeTests(unittest.TestCase):
     def test_all_five_exact_fields_and_parts_match_saved_schema(self):
         result = self.extract()
         dates = self.dates(result)
-        self.assertEqual([field["name"] for field in dates], list(DATE_NAMES))
+        self.assertEqual([field["name"] for field in dates], list(DATE_NAMES[:5]))
         self.assertEqual([field["value"] for field in dates], list(RAW_DATES))
         for index, field in enumerate(dates):
             self.assertTrue(segmented_date_record_valid(field))
@@ -199,7 +199,7 @@ class SegmentedDateRuntimeTests(unittest.TestCase):
     def test_false_container_variant_matches_explicit_saved_evidence(self):
         result = self.extract(fixture_html(false_container=True))
         dates = self.dates(result)
-        self.assertEqual([field['name'] for field in dates], list(DATE_NAMES))
+        self.assertEqual([field['name'] for field in dates], list(DATE_NAMES[:5]))
         self.assertEqual([field['value'] for field in dates], list(RAW_DATES))
         for index, field in enumerate(dates):
             expected = date_record(index, false_container=True)
@@ -368,7 +368,7 @@ class SegmentedDateRuntimeTests(unittest.TestCase):
               }
             }""", deny_values=['fixture-input-'+str(i) for i in range(5)])
         records = self.diagnostics(result)
-        self.assertEqual([item['field_key'] for item in records], list(DATE_NAMES))
+        self.assertEqual([item['field_key'] for item in records], list(DATE_NAMES[:5]))
         for item in records:
             self.assertEqual(item['count_cap'], 100)
             self.assertEqual(item['counts'], {'segments':100, 'contenteditable':100, 'contenteditable_true':100,

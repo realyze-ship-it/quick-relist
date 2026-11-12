@@ -63,6 +63,14 @@ def entries(result):
     return {entry["key"]: entry for entry in result["entries"]}
 
 
+def test_particulars_alias_keeps_copied_fields_reviewable():
+    original = capture(page(page_path="/app/listings/edit/123456/particulars"))
+    result = extract_source_fields(original, expected_listing_id="123456", expected_rxcu="RXCU12345")
+    assert result["status"] == "partial"
+    assert entries(result)["street_name"]["value"] == "Synthetic street"
+    assert "page_route_invalid" not in result["issues"]
+
+
 def test_exact_native_fields_dates_prices_and_counts_are_lossless():
     names = ["land_area", "floor_area", "street_number", "street_name", "street_type", "estate_name",
              "lightstone_erf_number", "lightstone_sectional_scheme_unit_number", "scheme_number", "scheme_name",

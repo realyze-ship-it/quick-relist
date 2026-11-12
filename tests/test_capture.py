@@ -101,12 +101,31 @@ def test_unsafe_routes_refused_without_dom_read(url):
 
 
 @pytest.mark.parametrize("suffix,key", [("", "details"), ("/", "details"),
+                                          ("/particulars", "details"),
+                                          ("/particulars/", "details"),
                                           ("/deal_particulars", "deal_particulars"),
                                           ("/media", "media"), ("/portals", "portals")])
 def test_only_observed_route_families_are_accepted(suffix, key):
     parsed = parse_editor_url(BASE + suffix)
     assert parsed["listing_id"] == "synthetic-123"
     assert parsed["page_key"] == key
+    assert parsed["page_path"] == "/app/listings/edit/synthetic-123" + suffix
+
+
+def test_return_to_particulars_remains_same_listing_and_records_real_path():
+    from quick_relist.hub_readonly import ReadOnlyHub
+    details_url = BASE + "/particulars"
+    driver = Driver(pages={BASE: observation(), details_url: observation(details_url)})
+    capture = PartialHubCapture(driver)
+    capture.capture_current_page()
+    driver.current_url = details_url
+    result = capture.capture_current_page()
+    assert result["listing_id"] == "synthetic-123"
+    assert result["pages"][-1]["page_key"] == "details"
+    assert result["pages"][-1]["page_path"].endswith("/particulars")
+    assert verify_capture_integrity(result)
+    assert ReadOnlyHub._is_editor_url(details_url)
+    assert not ReadOnlyHub._is_editor_url(details_url + "?listing=another")
 
 
 def test_wrong_expected_listing_rejected_before_read():

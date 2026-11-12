@@ -99,7 +99,7 @@ class SegmentedDateTests(unittest.TestCase):
         self.assertEqual(result["status"], "partial")
         self.assertFalse(result["complete"])
         self.assertFalse(result["live_ready"])
-        for index, name in enumerate(DATE_NAMES):
+        for index, name in enumerate(DATE_NAMES[:5]):
             row = entries(result)[name]
             self.assertEqual(row["value"], RAW_DATES[index])
             self.assertEqual(row["date_parts"], date_observed_parts(fields[index]))
@@ -261,10 +261,7 @@ class SegmentedDateTests(unittest.TestCase):
         self.assertNotIn("__SEGMENTED_DATE_CAPTURE_HELPERS__", READ_PAGE_SCRIPT)
         # Date controls must be excluded before either the ordinary-control or
         # room-proxy branch. Keep the parentheses so neither branch can bypass it.
-        guarded_filter = (
-            ".filter(el => !refusedRoomControls.has(el) && !isSegmentedDateControl(el) "
-            "&& (safeControl(el) || roomCheckboxProxies.has(el)))"
-        )
+        guarded_filter = "if (refusedRoomControls.has(el) || isSegmentedDateControl(el)) return false;"
         self.assertEqual(" ".join(READ_PAGE_SCRIPT.split()).count(guarded_filter), 1)
         self.assertIn("fields.push(...dateFieldsFor(root, fields.length))", READ_PAGE_SCRIPT)
         fixture = Path(__file__).parent / "fixtures" / "segmented_dates.html"

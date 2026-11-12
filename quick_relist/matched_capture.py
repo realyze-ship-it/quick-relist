@@ -143,7 +143,7 @@ class MatchedHubCapture(PartialHubCapture):
     """
 
     def __init__(self, hub, rxcu, *, timeout=15.0, poll_interval=0.2,
-                 stable_for=1.0, cancelled=None, include_room_options=False):
+                 stable_for=1.0, cancelled=None, include_room_options=False, include_media_captions=False, include_general_features=False):
         super().__init__(hub.driver)
         self.hub = hub
         self.reference = normalize_rxcu(rxcu)
@@ -154,6 +154,12 @@ class MatchedHubCapture(PartialHubCapture):
         if type(include_room_options) is not bool:
             raise ValueError("Room capture mode must be explicit")
         self.include_room_options = include_room_options
+        if type(include_general_features) is not bool:
+            raise ValueError('General feature capture must be explicitly enabled or disabled')
+        self.include_general_features = include_general_features
+        if type(include_media_captions) is not bool:
+            raise ValueError("Caption capture mode must be explicit")
+        self.include_media_captions = include_media_captions
         self._room_results = []
         self._pending_rooms = []
         self._binding = None
@@ -440,12 +446,29 @@ class MatchedHubCapture(PartialHubCapture):
             while True:
                 self._failure_phase = 'page_read'
                 sample = self._settled_page(url)
+                if self.include_general_features and sample['page_key'] == 'details':
+                    from .general_features import expand_general_features
+                    expand_general_features(self.driver, guard=lambda: self._identity(url), timeout=self.timeout)
+                    sample = self._settled_page(url)
+                    sample['general_features_expanded'] = True
+                    sample.pop('integrity')
+                    sample['integrity'] = {'algorithm': 'sha256', 'sha256': _digest(sample)}
                 self._pages.append(sample)
                 self._last_url = url
                 visited.add(sample['page_key'])
                 if self.include_room_options and sample['page_key'] == 'details':
                     self._failure_phase = 'room_capture'
                     self._capture_rooms(sample, url)
+                if self.include_media_captions and sample['page_key'] == 'media':
+                    from .media_captions import capture_captions
+                    sample['photo_captions'] = []
+                    try:
+                        capture_captions(self.driver, sample['media'], self._listing_id,
+                            identity=lambda: self._identity(url, allow_loading=True), guard=lambda: self._guard(url), timeout=self.timeout,
+                            accepted=lambda item: sample['photo_captions'].append(deepcopy(item)))
+                    finally:
+                        sample.pop('integrity')
+                        sample['integrity'] = {'algorithm': 'sha256', 'sha256': _digest(sample)}
                 self._failure_phase = 'tab_probe'
                 tabs, ready = self._tabs(url)
                 tab_candidates = [key for key in TAB_PAGES.values() if key in tabs and key not in visited]

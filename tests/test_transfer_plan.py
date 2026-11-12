@@ -9,7 +9,7 @@ from quick_relist.date_capture import DATE_NAMES
 from quick_relist.hub_form_writer import TEXT_FIELDS, COUNT_IDS, COMBO_NAMES, CHECKBOX_NAMES, _validate_value
 from quick_relist.source_fields import extract_source_fields
 from quick_relist.transfer_plan import build_transfer_plan, _canonical
-from segmented_date_fixtures import capture, date_record
+from segmented_date_fixtures import RAW_DATES, capture, date_record
 
 
 def field(name, value="000.00", **kwargs):
@@ -33,7 +33,9 @@ def full_capture(replacement=False):
     fs += [field("sale_state_id", str(i), type="radio", checked=i == 1, label="State " + str(i), id="radio-" + str(i)) for i in range(5)]
     fs += [field(n, "Option", tag="div", type="custom-combobox", observed_business_selection_code=True,
                  selected_options=[{"value": "ZA" if n == "country_id" else "007", "text": "Option"}]) for n in COMBO_NAMES]
-    fs += [date_record(i) for i in range(5)]
+    date_values = (*RAW_DATES, '2046-12-03')  # Rental occupation date.
+    assert len(date_values) == len(DATE_NAMES)
+    fs += [date_record(i, raw=value) for i, value in enumerate(date_values)]
     c = capture(fs, replacement=replacement)
     for number, page in enumerate(("deal_particulars", "media"), 2):
         p = deepcopy(c["pages"][0])

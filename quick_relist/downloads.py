@@ -181,3 +181,47 @@ def _sync_directory(root):
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+def finish_verified_download(download_root, download, verified_media):
+    """Retire one completed, event-matched and byte-checked download attempt.
+
+    Uncertain attempts still require the existing manual review. This path is
+    for sequential collection in the same browser, after its event observer has
+    closed successfully and every archive image matched the observed originals.
+    """
+    evidence = download.get('download_evidence', {})
+    if (download.get('attribution_verified') is not True
+            or evidence.get('method') != 'browser_frame_guid_and_reference'
+            or evidence.get('completion_observed') is not True
+            or verified_media.get('source_bytes_verified') is not True
+            or verified_media.get('listing_id') != evidence.get('listing_id')
+            or verified_media.get('pack_archive_sha256') != evidence.get('archive_sha256')):
+        raise DownloadReviewError('The download still needs manual review; its pause was kept.')
+    root = Path(os.path.abspath(download_root))
+    with download_lock(root):
+        current = _read_review(root)
+        path = Path(download['candidate_path'])
+        if (path.parent != Path(current['directory']) or len(current['files']) != 1
+                or current['files'][0]['name'] != path.name
+                or current['files'][0]['kind'] != 'zip_candidate'
+                or current['files'][0]['size'] != evidence.get('archive_size')):
+            raise DownloadReviewError('The completed download folder changed; its pause was kept.')
+        digest = hashlib.sha256()
+        with path.open('rb') as stream:
+            while chunk := stream.read(64 * 1024):
+                digest.update(chunk)
+        if digest.hexdigest() != evidence.get('archive_sha256'):
+            raise DownloadReviewError('The completed download bytes changed; its pause was kept.')
+        directory = root / ('download-verified-' + uuid4().hex)
+        _private_directory(directory)
+        with _private_file(directory / 'review.json') as stream:
+            stream.write(json.dumps({'state': 'completed_and_original_bytes_verified',
+                'download_evidence': evidence, 'review': current,
+                'verified_at': datetime.now(timezone.utc).isoformat()}, indent=2).encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+        if _read_review(root)['review_token'] != current['review_token']:
+            raise DownloadReviewError('The completed download changed during verification; its pause was kept.')
+        (root / MARKER_NAME).unlink()
+        _sync_directory(root)

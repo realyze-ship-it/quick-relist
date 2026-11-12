@@ -21,3 +21,4 @@ browser-profile/
 media/
 data/
 .pytest_cache/
+*.egg-info/

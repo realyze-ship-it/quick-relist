@@ -1,4 +1,4 @@
-"""Bounded observation of five verified existing-room dialogs.
+"""Bounded observation of the ten observed existing-room dialog types.
 
 Only exact observed caption openers are clicked, once each. Escape is the sole
 close action. This observes DOM field equality, never proves no server writes.
@@ -33,6 +33,11 @@ ROOM_OPTIONS = (
     RoomOptionDescriptor('kitchen', 'Set kitchens options', 'feature-kitchen-input', 'Kitchen'),
     RoomOptionDescriptor('parking', 'Set parkings options', 'feature-parking-input', 'Parking'),
     RoomOptionDescriptor('lounge', 'Set lounges options', 'feature-lounge-input', 'Lounge'),
+    RoomOptionDescriptor('dining', 'Set dining rooms options', 'feature-dining-input', 'Dining room'),
+    RoomOptionDescriptor('garage', 'Set garages options', 'feature-garage-input', 'Garage'),
+    RoomOptionDescriptor('braai', 'Set braais options', 'feature-braai-input', 'Braai'),
+    RoomOptionDescriptor('study', 'Set studies options', 'feature-study-input', 'Study'),
+    RoomOptionDescriptor('entrance_hall', 'Set entrance halls options', 'feature-entrance_hall-input', 'Entrance hall'),
 )
 ESCAPE = '\ue00c'  # WebDriver Escape; no Selenium import required for offline use.
 

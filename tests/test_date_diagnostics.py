@@ -154,7 +154,7 @@ class DateDiagnosticTests(unittest.TestCase):
             _validate_observation(raw, BASE)
         raw = observation()
         raw['discovery'] = [dict(diagnostic(), field_key=name) for name in DATE_NAMES]
-        self.assertEqual(len(_validate_observation(raw, BASE)['discovery']), 5)
+        self.assertEqual(len(_validate_observation(raw, BASE)['discovery']), len(DATE_NAMES))
         for code in ('segmented_date_segments_unresolved', REASON):
             raw = observation()
             raw['limitations'].remove(code)

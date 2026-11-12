@@ -31,7 +31,10 @@ def production_methods():
     for node in methods:
         node.decorator_list = []
     extracted = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *methods], type_ignores=[])
-    namespace = {"_state_label": str, "_address_summary": lambda _: "Synthetic address placeholder"}
+    namespace = {"__name__": "quick_relist.ui", "__package__": "quick_relist",
+                 "_state_label": str, "_address_summary": lambda _: "Synthetic address placeholder",
+                 "_collected_job_view": lambda *_: None, "_run_status": lambda *_: None,
+                 "_relist_state_label": str}
     exec(compile(ast.fix_missing_locations(extracted), "<production UI methods>", "exec"), namespace)
     return {name: namespace[name] for name in names}
 
@@ -45,7 +48,7 @@ class UI:
         self._editor_open_job_id = "synthetic-job"
         self.row = 0
         self.queue_table = SimpleNamespace(currentRow=lambda: self.row)
-        self.media_root = self.engine = self.store = None
+        self.media_root = self.engine = self.store = self.runs = None
         self.drafts = SimpleNamespace(list_captures=lambda _: [])
         self.hub = SimpleNamespace(editor_open_state=lambda ref: self.status,
                                    editor_bindings={},
@@ -57,7 +60,8 @@ class UI:
                      "saved_captures_button", "import_media_button", "download_media_button", "observation_status",
                      "advance_button", "reconcile_button", "cancel_job_button", "audit_button", "detail_error",
                      "review_download_button", "review_download_session_button", "detail_title", "detail_state",
-                     "detail_address", "status_bar"):
+                     "detail_address", "status_bar", "verify_captured_address_button",
+                     "check_publication_button", "collection_summary"):
             setattr(self, name, Widget())
         self._select_job()
 

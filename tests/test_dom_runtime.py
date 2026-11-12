@@ -110,16 +110,16 @@ def extract() -> Callable[..., dict]:
             pytest.skip("Optional jsdom unavailable; see test_dom_runtime.py for the /tmp-only setup")
         pytest.fail(f"Node/jsdom availability check failed: {probe.stderr}")
 
-    def run(html: str, *, updates: list[dict] | None = None) -> dict:
+    def run(html: str, *, updates: list[dict] | None = None, url: str = BASE) -> dict:
         completed = subprocess.run(
             [node, "-e", NODE_RUNNER],
-            input=json.dumps({"html": html, "url": BASE,
+            input=json.dumps({"html": html, "url": url,
                               "script": READ_PAGE_SCRIPT, "updates": updates or []}),
             capture_output=True, text=True, timeout=30, check=False,
         )
         assert completed.returncode == 0, completed.stderr
         result = json.loads(completed.stdout)
-        assert result["href"] == BASE
+        assert result["href"] == url
         return result
 
     return run

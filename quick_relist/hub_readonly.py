@@ -20,7 +20,6 @@ import time
 import zipfile
 
 MANAGE_URL = "https://hub.remax.co.za/app/listings"
-_EDITOR_PATH = re.compile(r"^/app/listings/edit/[^/]+(?:/(?:deal_particulars|media|portals))?/?$")
 
 
 
@@ -216,6 +215,28 @@ class ReadOnlyHub:
             from selenium import webdriver
         except ImportError as exc:
             raise RuntimeError("Install the browser extra to open Chrome: pip install 'quick-relist[browser]'") from exc
+        reconnect = os.environ.get('QUICK_RELIST_EXISTING_PROFILE')
+        if os.environ.get('QUICK_RELIST_DEVELOPMENT') == '1' and reconnect:
+            # Development recovery attaches only to our explicitly selected,
+            # already-running disposable Chrome; never a normal user profile.
+            profile = Path(reconnect)
+            if (profile.parent.resolve() != Path(tempfile.gettempdir()).resolve()
+                    or not re.fullmatch(r'quick-relist-browser-[0-9a-f]{32}', profile.name)
+                    or profile.is_symlink() or not profile.is_dir()):
+                raise RuntimeError('The selected recovery browser is not a Quick Relist session.')
+            port_file = profile / 'DevToolsActivePort'
+            if port_file.is_symlink():
+                raise RuntimeError('The recovery browser address is invalid.')
+            port = port_file.read_text().splitlines()[0]
+            if not port.isdigit() or not 1024 <= int(port) <= 65535:
+                raise RuntimeError('The recovery browser is no longer available.')
+            options = webdriver.ChromeOptions()
+            options.debugger_address = '127.0.0.1:' + port
+            options.page_load_strategy = 'eager'
+            self.driver = webdriver.Chrome(options=options)
+            self._managed_default_driver = self.driver
+            self.driver.set_page_load_timeout(30)
+            return
         from .media import _private_directory
         profile = Path(tempfile.gettempdir()) / ("quick-relist-browser-" + uuid4().hex)
         _private_directory(profile)
@@ -223,6 +244,8 @@ class ReadOnlyHub:
         self._profile_path, self._profile_identity = profile, (info.st_dev, info.st_ino)
         self._browser_closed = False
         options = webdriver.ChromeOptions()
+        options.page_load_strategy = 'eager'
+        options.add_argument('--start-maximized')
         options.add_argument("--user-data-dir=" + str(profile))
         options.add_experimental_option("prefs", {"credentials_enable_service": False,
                                                    "profile.password_manager_enabled": False})
@@ -232,11 +255,12 @@ class ReadOnlyHub:
         try:
             self.driver = webdriver.Chrome(options=options)
             self._managed_default_driver = self.driver
+            self.driver.set_page_load_timeout(30)
             self.driver.get(MANAGE_URL)
         except Exception:
             raise RuntimeError("The dedicated Hub browser could not be opened. Close any new browser window and restart Quick Relist before trying again. Protected temporary session files may remain.") from None
 
-    def search_reference(self, rxcu):
+    def search_reference(self, rxcu, *, all_listing_types=False):
         """Submit a read-only Manage Listings search; do not infer a match.
 
         Hub filters may hide listings, so an empty result never proves absence.
@@ -260,6 +284,37 @@ class ReadOnlyHub:
             self.driver.switch_to.window(original)
             raise ValueError("Open exactly one Manage Listings tab in the Hub browser first")
         self.driver.switch_to.window(matches[0])
+        # A stopped action-menu check may leave MUI's modal listbox open.
+        # Its background search input remains visible but cannot receive keys.
+        menus = [m for m in self.driver.find_elements(By.CSS_SELECTOR, '[role="listbox"]')
+                 if m.is_displayed()]
+        if menus:
+            if len(menus) != 1:
+                raise ValueError('More than one Hub menu is open. Close them before searching.')
+            from selenium.webdriver.common.keys import Keys
+            from selenium.webdriver.support.ui import WebDriverWait
+            menus[0].send_keys(Keys.ESCAPE)
+            WebDriverWait(self.driver, 10).until(lambda driver: not any(
+                m.is_displayed() for m in driver.find_elements(By.CSS_SELECTOR, '[role="listbox"]')))
+        if all_listing_types:
+            # A sale-only filter silently hides rental references in a mixed
+            # batch. Change only this observed filter, retaining office/agents.
+            from selenium.webdriver.common.keys import Keys
+            groups = self.driver.find_elements(By.CSS_SELECTOR, 'main .MuiFormControl-root')
+            groups = [g for g in groups if any(e.get_attribute('textContent').strip() == 'Listing type'
+                       for e in g.find_elements(By.XPATH, './label'))]
+            if len(groups) != 1:
+                raise ValueError('The listing-type filter could not be identified. Select All listing types in Hub.')
+            selectors = groups[0].find_elements(By.CSS_SELECTOR, '[role="combobox"]')
+            if len(selectors) != 1:
+                raise ValueError('The listing-type filter is ambiguous.')
+            if selectors[0].get_attribute('textContent').strip() != 'All':
+                selectors[0].send_keys(Keys.SPACE)
+                options = [e for e in self.driver.find_elements(By.CSS_SELECTOR, '[role="option"]')
+                           if e.is_displayed() and e.get_attribute('textContent').strip() == 'All']
+                if len(options) != 1:
+                    raise ValueError('All listing types is not available in the filter.')
+                options[0].click()
         # Both strings were observed in Hub: the visible label and input placeholder.
         prompts = {"Search fusion ref, listing ID or address", "Enter fusion ref, listing ID or address"}
         candidates = self.driver.find_elements(By.XPATH, "//input[@placeholder or @aria-label or @id]")
@@ -276,9 +331,12 @@ class ReadOnlyHub:
                    if el.is_displayed() and el.is_enabled() and el.text.strip() == "Get listings"]
         if len(buttons) != 1:
             raise ValueError("The Get listings button could not be identified uniquely; check the page layout")
-        inputs[0].clear()
+        from selenium.webdriver.common.keys import Keys
         # Hub displays the Fusion reference with a hyphen.
-        inputs[0].send_keys("RXCU-" + reference[4:])
+        wanted = 'RXCU-' + reference[4:]
+        inputs[0].send_keys(Keys.CONTROL, 'a', Keys.NULL, wanted, Keys.TAB)
+        if inputs[0].get_property('value') != wanted:
+            raise ValueError('Hub did not retain the requested search reference. No search was submitted.')
         buttons[0].click()
         return {"searched": True, "warning": "Review the results and filters manually; this does not verify a match."}
 
@@ -510,11 +568,11 @@ class ReadOnlyHub:
 
     @staticmethod
     def _is_editor_url(url):
+        from .capture import CaptureSafetyError, parse_editor_url
         try:
-            parsed = urlsplit(url)
-            return (parsed.scheme == "https" and parsed.hostname == "hub.remax.co.za"
-                    and parsed.port in (None, 443) and bool(_EDITOR_PATH.fullmatch(parsed.path)))
-        except ValueError:
+            parse_editor_url(url)
+            return True
+        except CaptureSafetyError:
             return False
 
     def select_editor_tab(self):
@@ -766,6 +824,16 @@ class ReadOnlyHub:
         return PartialHubCapture(self.driver).capture_current_page()
 
     def close(self):
+        if (os.environ.get('QUICK_RELIST_DEVELOPMENT') == '1'
+                and os.environ.get('QUICK_RELIST_EXISTING_PROFILE')
+                and self._profile_path is None and self.driver is not None):
+            # An explicitly attached development browser belongs to the
+            # ongoing test. Disconnect this driver without closing its tabs.
+            self.driver.service.stop()
+            self.driver = self._managed_default_driver = None
+            self.editor_bindings.clear()
+            self._pending_editor = None
+            return
         if self._pending_editor is not None and self.driver is not self._pending_editor.driver:
             self._pending_editor.blocked = True
             raise RuntimeError("The original Hub browser session cannot be confirmed closed. Close every Quick Relist browser manually and restart Quick Relist.")

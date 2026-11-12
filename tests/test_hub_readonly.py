@@ -16,6 +16,8 @@ class Driver:
         return [{"name": "synthetic", "value": "example"}]
     def quit(self):
         self.calls.append("quit")
+    def set_page_load_timeout(self, seconds):
+        self.page_load_timeout = seconds
 
 
 def test_editor_inspection_uses_filtered_partial_collector(monkeypatch):
@@ -60,8 +62,18 @@ def test_multiple_editor_tabs_are_not_guessed():
 
 
 @pytest.mark.parametrize("prompt", ["Search fusion ref, listing ID or address", "Enter fusion ref, listing ID or address"])
-def test_search_only_fills_and_submits_unique_observed_controls(prompt):
+@pytest.mark.parametrize('menu_open', [False, True])
+def test_search_only_fills_and_submits_unique_observed_controls(prompt, menu_open):
     pytest.importorskip("selenium")
+    from selenium.webdriver.common.keys import Keys
+    class Menu:
+        opened = menu_open
+        def is_displayed(self): return self.opened
+        def send_keys(self, key):
+            assert key == Keys.ESCAPE
+            self.opened = False
+        def click(self): raise AssertionError('No menu action may be activated')
+    menu = Menu()
     class Control:
         def __init__(self, text="", placeholder=""):
             self.text, self.placeholder, self.events = text, placeholder, []
@@ -69,7 +81,11 @@ def test_search_only_fills_and_submits_unique_observed_controls(prompt):
         def is_enabled(self): return True
         def get_attribute(self, key): return self.placeholder if key == "placeholder" else None
         def clear(self): self.events.append("clear")
-        def send_keys(self, value): self.events.append(("type", value))
+        def send_keys(self, *values):
+            assert not menu.opened
+            self.events.append(('type', values))
+            self.value=values[-2]
+        def get_property(self, key): return self.value
         def click(self): self.events.append("click")
     class SearchDriver(Driver):
         def __init__(self):
@@ -77,11 +93,15 @@ def test_search_only_fills_and_submits_unique_observed_controls(prompt):
             self.field = Control(placeholder=prompt)
             self.button = Control(text="Get listings")
         def find_elements(self, by, query):
-            return [self.field] if query.startswith("//input") else [self.button]
+            if query == '[role="listbox"]': return [menu] if menu.opened else []
+            if query.startswith("//input"): return [self.field]
+            if query == '//button': return [self.button]
+            raise AssertionError(query)
     driver = SearchDriver()
     result = ReadOnlyHub(driver).search_reference("rxcu12345")
     assert result["searched"] is True
-    assert driver.field.events == ["clear", ("type", "RXCU-12345")]
+    from selenium.webdriver.common.keys import Keys
+    assert driver.field.events == [('type', (Keys.CONTROL, 'a', Keys.NULL, 'RXCU-12345', Keys.TAB))]
     assert driver.button.events == ["click"]
     assert "not verify" in result["warning"]
 
@@ -526,6 +546,8 @@ def test_open_uses_new_private_disposable_profile_and_cleans_it_only_after_quit(
     monkeypatch.setattr(hub_readonly.tempfile, "gettempdir", lambda: str(tmp_path))
     hub = ReadOnlyHub()
     hub.open()
+    assert hub.driver.page_load_timeout == 30
+    assert launched[0].page_load_strategy == 'eager'
     profile = hub._profile_path
     assert profile.is_dir() and profile.parent == tmp_path
     assert "--incognito" not in launched[0].arguments

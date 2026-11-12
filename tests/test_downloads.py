@@ -1,12 +1,13 @@
 """Synthetic local recovery tests: no browser, Hub or real listing data."""
 import json
+import hashlib
 import os
 from pathlib import Path
 
 import pytest
 
 from quick_relist.downloads import (
-    DownloadReviewError, MARKER_NAME, download_lock, finish_download_review, inspect_download,
+    DownloadReviewError, MARKER_NAME, download_lock, finish_download_review, inspect_download, finish_verified_download,
 )
 
 
@@ -23,6 +24,40 @@ def attempt(tmp_path):
 
 def finish(root, review):
     return finish_download_review(root, review["review_token"], browsers_closed=True, files_reviewed=True)
+
+
+def completed_attempt(folder):
+    data = b'synthetic completed archive'
+    path = folder / 'completed.zip'
+    path.write_bytes(data)
+    digest = hashlib.sha256(data).hexdigest()
+    return ({'candidate_path': str(path), 'attribution_verified': True,
+             'download_evidence': {'method': 'browser_frame_guid_and_reference',
+                 'completion_observed': True, 'listing_id': '123', 'archive_sha256': digest,
+                 'archive_size': len(data)}},
+            {'source_bytes_verified': True, 'listing_id': '123', 'pack_archive_sha256': digest})
+
+
+def test_verified_completion_allows_next_download_without_removing_files(attempt):
+    root, folder = attempt
+    downloaded, verified = completed_attempt(folder)
+    finish_verified_download(root, downloaded, verified)
+    assert not (root / MARKER_NAME).exists()
+    assert Path(downloaded['candidate_path']).read_bytes() == b'synthetic completed archive'
+    assert len(list(root.glob('download-verified-*/review.json'))) == 1
+
+
+@pytest.mark.parametrize('change', ['no_event', 'wrong_listing', 'changed_bytes', 'pending_file'])
+def test_unverified_download_cannot_lift_batch_pause(attempt, change):
+    root, folder = attempt
+    downloaded, verified = completed_attempt(folder)
+    if change == 'no_event': downloaded['attribution_verified'] = False
+    if change == 'wrong_listing': verified['listing_id'] = '999'
+    if change == 'changed_bytes': Path(downloaded['candidate_path']).write_bytes(b'changed')
+    if change == 'pending_file': (folder / 'pending.crdownload').write_bytes(b'pending')
+    with pytest.raises(DownloadReviewError):
+        finish_verified_download(root, downloaded, verified)
+    assert (root / MARKER_NAME).exists()
 
 
 def test_review_preserves_empty_attempt_and_does_not_imply_success(attempt):

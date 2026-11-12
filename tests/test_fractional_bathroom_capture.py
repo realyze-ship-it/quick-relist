@@ -72,7 +72,9 @@ def probe():
         pytest.skip('jsdom unavailable; no installation attempted')
 
     def run(raw=RAW, descriptor=BATHROOM, expected=None, **kwargs):
-        html = positioning_html().replace('bedroom', descriptor.key).replace('Bedroom', descriptor.noun)
+        html = (positioning_html().replace('Set bedrooms options', descriptor.opener)
+                .replace('feature-bedroom-input', descriptor.count_id)
+                .replace('Bedrooms', descriptor.noun + 's'))
         html = html.replace('value="2"', 'value="' + escape(raw, quote=True) + '"')
         result = subprocess.run([node, '-e', PROBE], input=json.dumps(dict(
             html=html, raw=raw, url=BASE, descriptor=asdict(descriptor), state=rooms.ROOM_STATE_SCRIPT,

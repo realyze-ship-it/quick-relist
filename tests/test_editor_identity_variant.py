@@ -10,6 +10,7 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
+from quick_relist import room_capture
 
 from quick_relist.hub_readonly import IDENTITY_SCRIPT, ReadOnlyHub
 from editor_identity_fixture import IDENTITY_RUNNER, identity_cases, identity_style_faults, page
@@ -174,7 +175,7 @@ def test_shared_consumers_accept_qualified_pair_only_as_partial_read_only(identi
         assert result["live_ready"] is False and result["matched_source"]["account_verified"] is False
         assert result["matched_source"]["fidelity_verified"] is False
     else:
-        assert len(result["dialogs"]) == 5 and result["pending_dialogs"] == []
+        assert len(result["dialogs"]) == len(room_capture.ROOM_OPTIONS) and result["pending_dialogs"] == []
         assert result["server_writes_verified"] is False
         assert all(dialog["source"]["complete"] is False for dialog in result["dialogs"])
 
