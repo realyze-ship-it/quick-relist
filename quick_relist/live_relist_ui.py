@@ -93,6 +93,27 @@ def same_particulars(expected, actual):
             and rooms(expected) == rooms(actual))
 
 
+def resolve_saved_suburb(expected, actual, read_selected):
+    """Hub reloads a short suburb name. Require its selected full option as proof.
+
+    Keep the capture unchanged. Only the comparison plan is qualified, after
+    observing the saved selection's city/province; matching a prefix is not proof.
+    """
+    wanted = [c for c in expected['controls'] if c['kind'] == 'suburb']
+    found = [c for c in actual['controls'] if c['kind'] == 'suburb']
+    if len(wanted) != 1 or len(found) != 1:
+        return actual, None
+    full, short = wanted[0]['value'], found[0]['value']
+    if ',' not in full or short != full.split(',')[0].strip():
+        return actual, None
+    observed = read_selected(short)
+    if observed != full:
+        raise CopyStopped('The saved suburb city or province differs from the reviewed address.')
+    result = deepcopy(actual)
+    next(c for c in result['controls'] if c['kind'] == 'suburb')['value'] = observed
+    return result, observed
+
+
 def only_description_formatting_changed(expected, actual):
     if any(actual.get(k) != v for k,v in expected.items() if not k.startswith('description_')):
         return False
@@ -636,6 +657,41 @@ class HubRelistUI:
                 return {'caption_saved':True,'position':index}
             runs.perform_once(run_id,f'caption_{index}',caption)
 
+    def selected_suburb_label(self, short):
+        """Read the existing selection via its owned autocomplete; never select."""
+        from selenium.webdriver.common.keys import Keys
+        self.tab('Listing particulars')
+        inputs = [e for e in self.driver.find_elements('css selector', 'main input[role="combobox"]')
+                  if e.is_displayed() and self.driver.execute_script(
+                      'return Array.from(arguments[0].labels||[]).some(e=>e.textContent.replace(/\\s*\\*\\s*$/, "").trim()==="Suburb")', e)]
+        if len(inputs) != 1 or inputs[0].get_property('value') != short or not short:
+            raise CopyStopped('The saved suburb control is missing or changed.')
+        field = inputs[0]
+        self.guard()
+        # Typing the existing name triggers Hub's search while retaining its
+        # selected value. aria-selected identifies that value, not keyboard focus.
+        field.send_keys(Keys.CONTROL, 'a', Keys.NULL, short)
+        try:
+            def selected():
+                self.guard()
+                owner = field.get_attribute('aria-controls')
+                menus = [e for e in self.driver.find_elements('css selector', '[role="listbox"]')
+                         if e.is_displayed() and owner and e.get_attribute('id') == owner]
+                if len(menus) != 1:
+                    return None
+                choices = [e for e in menus[0].find_elements('css selector', '[role="option"]')
+                           if e.is_displayed() and e.get_attribute('aria-selected') == 'true']
+                if len(choices) > 1:
+                    raise CopyStopped('The saved suburb has ambiguous selected options.')
+                return choices[0].get_attribute('textContent').strip() if choices else None
+            observed = self.wait(selected, 'Hub did not identify the saved suburb selection.')
+        finally:
+            self.guard()
+            field.send_keys(Keys.ESCAPE, Keys.TAB)
+        if field.get_property('value') != short:
+            raise CopyStopped('The suburb search did not return to its saved value.')
+        return observed
+
     @diagnosed
     def verify_content(self, target, plan):
         # Open by the new reference through Manage Listings, establishing the
@@ -648,6 +704,7 @@ class HubRelistUI:
         proposed = propose_address_fields(actual)
         original = {v['path']:v['field'] for v in proposed['fields'].values()}
         copied = particulars_plan(actual,{'original':original,'edited':deepcopy(original)})
+        copied, suburb_label = resolve_saved_suburb(plan['particulars'], copied, self.selected_suburb_label)
         if not same_particulars(plan['particulars'],copied):
             raise CopyStopped('Saved particulars or room options differ. The replacement remains unpublished.')
         pages = {p['page_key']:p for p in actual['pages']}
@@ -665,7 +722,8 @@ class HubRelistUI:
             if content_signature({'pages':[pages['deal_particulars']]}) != content_signature({'pages':[plan['deal']]}):
                 raise CopyStopped('Saved commission details differ. The replacement remains unpublished.')
         self.target_for_publication = deepcopy(self.current)
-        return {'particulars':True,'descriptions':True,'photos':len(plan['photos']),'photo_order':True,'captions':True}
+        return {'particulars':True,'descriptions':True,'photos':len(plan['photos']),'photo_order':True,'captions':True,
+                **({'saved_suburb_selection':suburb_label} if suburb_label else {})}
 
     @diagnosed
     def publish(self, target, destination):

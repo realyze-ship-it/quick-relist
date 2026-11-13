@@ -265,7 +265,7 @@ class ParticularsFiller:
                               if e.is_displayed() and suburb_matches(value, e.get_attribute('textContent'))],
                                 'Select the reviewed suburb in Hub; no exact match was available.')
             if len(choices) != 1:
-                raise CopyStopped('The reviewed suburb has multiple matches.')
+                raise CopyStopped('The reviewed suburb has multiple matches. Enter its full suburb, city and province in Verify address.')
             choices[0].click()
             return
         selector = f'#{key}' if kind == 'count' else f'input[name="{key}"]'

@@ -6,6 +6,69 @@ from quick_relist import live_relist_ui as module
 from quick_relist.form_copy import CopyStopped
 
 
+@pytest.mark.parametrize('saved_selection,accepted', [
+    ('Example Park, First City, Province', True),
+    ('Example Park, Other City, Province', False), ('Example Park', False)])
+def test_saved_short_suburb_requires_exact_selected_city(saved_selection, accepted):
+    from copy import deepcopy
+    expected={'controls':[{'key':'suburb','kind':'suburb','value':'Example Park, First City, Province'}]}
+    actual={'controls':[{'key':'suburb','kind':'suburb','value':'Example Park'}]}
+    original=deepcopy(actual)
+    calls=[]
+    def read(short):
+        calls.append(short)
+        return saved_selection
+    if accepted:
+        result, proof=module.resolve_saved_suburb(expected,actual,read)
+        assert result==expected and proof==saved_selection
+    else:
+        with pytest.raises(CopyStopped,match='city or province'):
+            module.resolve_saved_suburb(expected,actual,read)
+    assert calls==['Example Park'] and actual==original
+
+
+@pytest.mark.parametrize('actual_value', ['Different Park','Example Park, Other City, Province',''])
+def test_other_saved_suburbs_cannot_be_rewritten_by_matching_prefix(actual_value):
+    expected={'controls':[{'key':'suburb','kind':'suburb','value':'Example Park, First City, Province'}]}
+    actual={'controls':[{'key':'suburb','kind':'suburb','value':actual_value}]}
+    def prohibited(short):
+        raise AssertionError('Do not resolve an unrelated value')
+    result,proof=module.resolve_saved_suburb(expected,actual,prohibited)
+    assert result is actual and proof is None
+
+
+@pytest.mark.parametrize('selected_count,own_menu',[(1,True),(0,True),(2,True),(1,False)])
+def test_saved_suburb_reads_owned_selected_option_without_selecting(tmp_path,selected_count,own_menu):
+    from selenium.webdriver.common.keys import Keys
+    events=[]
+    field=SimpleNamespace(is_displayed=lambda:True,get_property=lambda name:'Example Park',
+        get_attribute=lambda name:'suburb-options' if name=='aria-controls' else None,
+        send_keys=lambda *keys:events.append(keys))
+    choice=SimpleNamespace(is_displayed=lambda:True,
+        get_attribute=lambda name:{'aria-selected':'true','textContent':'Example Park, First City, Province'}.get(name))
+    # Focus alone is not selection, and an unrelated list cannot supply proof.
+    unselected=SimpleNamespace(is_displayed=lambda:True,
+        get_attribute=lambda name:{'aria-selected':'false','textContent':'Example Park, Other City, Province'}.get(name))
+    menu=SimpleNamespace(is_displayed=lambda:True,
+        get_attribute=lambda name:'suburb-options' if own_menu else 'other-options',
+        find_elements=lambda *args:[choice]*selected_count+[unselected])
+    driver=SimpleNamespace(find_elements=lambda by,selector:[field] if selector.startswith('main input') else [menu],
+        execute_script=lambda *args:True)
+    provider=module.HubRelistUI(SimpleNamespace(driver=driver),tmp_path,clipboard=lambda *args:None)
+    provider.tab=lambda name:events.append(name)
+    provider.guard=lambda:None
+    def wait_once(read,message,**kwargs):
+        result=read()
+        if not result:raise CopyStopped(message)
+        return result
+    provider.wait=wait_once
+    if selected_count==1 and own_menu:
+        assert provider.selected_suburb_label('Example Park')=='Example Park, First City, Province'
+    else:
+        with pytest.raises(CopyStopped):provider.selected_suburb_label('Example Park')
+    assert events==['Listing particulars',(Keys.CONTROL,'a',Keys.NULL,'Example Park'),(Keys.ESCAPE,Keys.TAB)]
+
+
 @pytest.mark.parametrize('button_count,enabled', [(0, True), (2, True), (1, False), (1, True)])
 def test_preparation_requires_one_enabled_save_without_clicking_it(monkeypatch, tmp_path, button_count, enabled):
     events = []
