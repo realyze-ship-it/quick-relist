@@ -852,10 +852,20 @@ class HubRelistUI:
         self.bind(getattr(self,'target_for_publication',target))
         self.tab('Portals')
         deadline=time.monotonic()+120
+        refresh_at=time.monotonic()+10
         while True:
             state = read_portals(self.driver,guard=self.guard,timeout=45)
             if all(state['portals'][d]['state']=='published' for d in destinations) or time.monotonic()>=deadline:
                 break
+            # Hub can leave a completed request displayed as pending until
+            # this page reloads. Refresh only the bound read-only Portals page;
+            # never submit another publication request while waiting.
+            if time.monotonic() >= refresh_at:
+                self.guard()
+                if parse_editor_url(self.driver.current_url)['page_key'] != 'portals':
+                    raise CopyStopped('The portal status page changed while waiting. No request was repeated.')
+                self.driver.refresh()
+                refresh_at=time.monotonic()+10
             time.sleep(2)
         return {'complete':all(state['portals'][d]['state']=='published' for d in destinations),
                 'portals':{d:state['portals'][d] for d in destinations}}

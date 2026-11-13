@@ -14,7 +14,7 @@ A Windows app for collecting Hub listings, reviewing each address, and processin
 
 If Save stops after creating a copy, **Check existing replacement** can verify its RXCU and Hub edit URL against the freshly verified archived row, completed removal record and saved reviewed particulars before accepting that existing empty, unpublished copy. The original failed Save stays in the activity record. This read-only recovery check never creates another listing.
 
-6. A submitted portal request remains pending until Hub returns its publication identifier. **Check publication** reads the existing requests without sending them again.
+6. A submitted portal request remains pending until Hub returns its publication identifier. The bounded wait refreshes the same listing's Portals page to avoid an outdated pending display. **Check publication** reads the existing requests without sending them again.
 
 Keep the app's Chrome window open while processing. Switching to another ordinary browser does not transfer the app's signed-in session. Login and OTP are entered directly in Hub; the app does not request them.
 
@@ -25,6 +25,7 @@ If an original brochure summary exceeds Hub's current 250-character limit, the a
 - Sale and rental use their own prices and status controls. On the operator's requested date rule, new runs set **Date listed** and **On market since** to the South African relist day and **Listing expiry** six calendar months later. Sale **Mandate signed date** follows Date listed and **Mandate expiry** follows Listing expiry. Rental **Occupation date** and rental period stay exactly as collected. If the target month has fewer days, expiry uses its last day.
 - Erf and registered scheme numbers stay exactly as captured, including their original formatting. They are read-only in Verify address; street, unit and door fields remain editable. An older review that changed a registered identifier must be reopened and saved before relisting.
 - The source backup retains every original date. The replacement's date plan is recorded before removal and checked after saving. An interrupted run keeps that recorded plan on resume; a run started by an older build retains its original date contract.
+- Sale commission preserves the exact captured amount as well as agent shares. Hub rounds the displayed percentage, so copying that percentage alone can change the money. The writer enters the amount last and compares the saved commission before uploading photos, then repeats the comparison with the final listing check.
 - The collector includes the observed lifestyle and General Property Features checkboxes, primary and secondary agents, rich description, photo captions, and ten room categories. Every nonzero supported room must have its dialog captured before relisting.
 - The current writer requires empty custom-feature, party, document and note tables. Listings with related records or floorplans stop before the original is removed. Unsupported or missing fields also stop the run.
 - Photos are uploaded individually and compared with the saved originals before sending the next image. This transferred all 13 images in the rental pilot. Only an explicit failed-upload result permits retrying that missing photo, with at most three attempts. Unknown missing uploads, unexpected counts or changed order stop the copy for review.

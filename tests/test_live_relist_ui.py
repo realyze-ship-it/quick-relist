@@ -111,6 +111,40 @@ def test_commission_writer_preserves_amount_when_displayed_percentage_is_rounded
     assert writes == [('total_commission_percentage','1.35'),('total_commission_value','200')]
 
 
+@pytest.mark.parametrize('outcome', ['already_published','published_after_reload','still_pending','wrong_page'])
+def test_publication_refreshes_stale_status_without_sending_another_request(monkeypatch, outcome):
+    clock, reloads, bindings = [0], [], []
+    driver = SimpleNamespace(current_url='https://hub.remax.co.za/app/listings/edit/42/portals')
+    driver.refresh = lambda: reloads.append(clock[0])
+    ui = object.__new__(module.HubRelistUI)
+    ui.driver = driver
+    ui.bind = lambda target: bindings.append(target)
+    ui.tab = lambda name: None
+    ui.guard = lambda: None
+    def read(observed_driver, *, guard, timeout):
+        assert observed_driver is driver
+        guard()
+        if outcome == 'wrong_page' and clock[0] >= 10:
+            driver.current_url = 'https://hub.remax.co.za/app/listings/edit/42/media'
+        published = outcome == 'already_published' or (outcome == 'published_after_reload' and bool(reloads))
+        return {'portals':{'website':{'state':'published' if published else 'pending'}}}
+    monkeypatch.setattr(module, 'read_portals', read)
+    monkeypatch.setattr(module.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(module.time, 'sleep', lambda seconds: clock.__setitem__(0,clock[0]+seconds))
+    target = {'listing_id':'42'}
+    if outcome == 'wrong_page':
+        with pytest.raises(CopyStopped, match='status page changed'):
+            ui.publication(target, ['website'])
+        assert not reloads
+    else:
+        result = ui.publication(target, ['website'])
+        assert result['complete'] == (outcome != 'still_pending')
+        if outcome == 'already_published': assert not reloads
+        elif outcome == 'published_after_reload': assert reloads == [10]
+        else: assert clock[0] == 120 and reloads == list(range(10,120,10))
+    assert bindings == [target]
+
+
 @pytest.mark.parametrize('saved_selection,accepted', [
     ('Example Park, First City, Province', True),
     ('Example Park, Other City, Province', False), ('Example Park', False)])
