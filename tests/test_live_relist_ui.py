@@ -137,7 +137,8 @@ def test_preparation_requires_one_enabled_save_without_clicking_it(monkeypatch, 
 
 
 @pytest.mark.parametrize('conflict', [False, True])
-def test_reload_waits_for_missing_headings_but_never_accepts_a_conflict(monkeypatch, tmp_path, conflict):
+@pytest.mark.parametrize('captions', [False, True])
+def test_reload_waits_for_missing_headings_but_never_accepts_a_conflict(monkeypatch, tmp_path, conflict, captions):
     ready = {'outer_count': 1, 'inner_count': 1, 'outer_matches': True, 'inner_matches': True}
     first = dict(ready, inner_matches=False) if conflict else dict(ready, inner_count=0, inner_matches=False)
     observations = iter([first, ready])
@@ -148,16 +149,19 @@ def test_reload_waits_for_missing_headings_but_never_accepts_a_conflict(monkeypa
     hub = SimpleNamespace(driver=driver, editor_bindings={'RXCU12345': {'handle':'editor','listing_id':'123456'}},
         _read_editor_identity=lambda *args: next(observations), _verified_editor_identity=lambda value: value)
     accepted = []
-    monkeypatch.setattr(module, 'MatchedHubCapture', lambda *args, **kwargs:
-                        SimpleNamespace(capture=lambda: accepted.append(True) or {'stop_reason': None}))
+    def capture_reader(*args, **kwargs):
+        assert kwargs['include_media_captions'] is captions
+        assert kwargs['include_room_options'] and kwargs['include_general_features']
+        return SimpleNamespace(capture=lambda: accepted.append(True) or {'stop_reason': None})
+    monkeypatch.setattr(module, 'MatchedHubCapture', capture_reader)
     monkeypatch.setattr(module.time, 'sleep', lambda value: None)
     provider = module.HubRelistUI(hub, tmp_path, clipboard=lambda *args: None)
     if conflict:
         with pytest.raises(CopyStopped, match='does not match'):
-            provider.captured_editor('RXCU12345')
+            provider.captured_editor('RXCU12345', include_media_captions=captions)
         assert accepted == []
     else:
-        assert provider.captured_editor('RXCU12345') == {'stop_reason': None}
+        assert provider.captured_editor('RXCU12345', include_media_captions=captions) == {'stop_reason': None}
         assert accepted == [True]
 
 

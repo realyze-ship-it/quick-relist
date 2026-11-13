@@ -97,7 +97,8 @@ def test_live_existing_copy_check_requires_each_read_before_accepting(tmp_path, 
     ui = module.HubRelistUI(hub, tmp_path, clipboard=lambda *a: None)
     ui.check_removed_source = removed
     ui._check_source_archive = archived
-    def captured(*args):
+    def captured(*args, **kwargs):
+        assert kwargs == {'include_media_captions':False}
         calls.append('capture')
         ui.current = {'reference':'RXCU2000',**binding}
         return {'pages':[{'page_key':'media','media':['synthetic-photo'] if blocker=='photos' else [],'photo_captions':[]}]}

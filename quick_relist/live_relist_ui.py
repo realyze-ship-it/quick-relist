@@ -233,7 +233,7 @@ class HubRelistUI:
                   'Hub did not finish opening the selected page.')
         self.guard()
 
-    def captured_editor(self, reference):
+    def captured_editor(self, reference, *, include_media_captions=True):
         self.current = None
         binding = self.hub.editor_bindings.get(reference)
         if binding and binding['handle'] in self.driver.window_handles:
@@ -270,10 +270,12 @@ class HubRelistUI:
         self.wait(identity_ready, 'The listing headings did not finish loading. No further action was taken.')
         self.current = {'reference':reference, **binding}
         reader = MatchedHubCapture(self.hub, reference, timeout=30, cancelled=self.cancelled,
-            include_room_options=True, include_general_features=True, include_media_captions=True)
+            include_room_options=True, include_general_features=True, include_media_captions=include_media_captions)
         capture = reader.capture()
         if capture.get('stop_reason'):
-            raise CopyStopped('The saved listing could not be read completely. No further action was taken.')
+            from .matched_capture import matched_capture_failure_note
+            detail = matched_capture_failure_note(capture.get('browser_failure'))
+            raise CopyStopped(('The saved listing could not be read completely. No further action was taken. ' + detail).strip())
         return capture
 
     @diagnosed
@@ -595,7 +597,9 @@ class HubRelistUI:
         self.hub.open_listing_editor(reference, timeout=30)
         if self.hub.editor_bindings[reference]['listing_id'] != listing_id:
             raise CopyStopped('The replacement reference and Hub edit URL do not identify the same listing.')
-        actual = self.captured_editor(reference)
+        # Caption inventory intentionally requires photos for source capture.
+        # This recovery accepts only an empty copy and rejects any media below.
+        actual = self.captured_editor(reference, include_media_captions=False)
         self._verify_particulars(actual, plan)
         pages = {p['page_key']: p for p in actual['pages']}
         media = media_plan(pages['media'])
