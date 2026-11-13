@@ -71,3 +71,10 @@ def test_missing_occupation_date_is_never_invented():
     source['controls']=[c for c in source['controls'] if c['key']!='occupation_date']
     with pytest.raises(CopyStopped,match='incomplete'):
         date_policy(source,date(2099,11,13))
+
+
+def test_blank_rental_occupation_cannot_be_filled_by_the_renewal_rule():
+    source=particulars('rent')
+    next(c for c in source['controls'] if c['key']=='occupation_date')['value']=''
+    with pytest.raises(CopyStopped,match='invalid'):
+        date_policy(source,date(2099,11,13))

@@ -196,6 +196,30 @@ class SegmentedDateRuntimeTests(unittest.TestCase):
         self.assertIn("date_requiredness_unverified", result["limitations"])
         self.assertEqual(self.diagnostics(result), [])
 
+    def test_observed_empty_picker_is_distinct_from_missing_or_partial_parts(self):
+        for false_container in (False, True):
+            result = self.extract(fixture_html(false_container=false_container), setup='''
+              const input=document.querySelector('input[name="mandate_signed_date"]');
+              input.value='';
+              input.parentElement.querySelectorAll('[role="spinbutton"]').forEach((part,index)=>{
+                part.removeAttribute('aria-valuenow'); part.setAttribute('aria-valuetext','Empty');
+                part.textContent=['YYYY','MM','DD'][index];
+              });
+            ''')
+            field=next(f for f in self.dates(result) if f['name']=='mandate_signed_date')
+            self.assertTrue(field['date_picker']['empty_observed'])
+            self.assertEqual(field['value'],'')
+            self.assertTrue(segmented_date_record_valid(field))
+            self.assertEqual(self.diagnostics(result),[])
+            from copy import deepcopy
+            for index in range(3):
+                broken=deepcopy(field)
+                broken['date_picker']['segments'][index]['aria_valuenow']='1'
+                self.assertFalse(segmented_date_record_valid(broken))
+            broken=deepcopy(field)
+            broken['date_picker']['empty_observed']=False
+            self.assertFalse(segmented_date_record_valid(broken))
+
     def test_false_container_variant_matches_explicit_saved_evidence(self):
         result = self.extract(fixture_html(false_container=True))
         dates = self.dates(result)

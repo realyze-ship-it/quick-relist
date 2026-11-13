@@ -71,6 +71,34 @@ def test_missing_mandate_date_is_not_replaced_with_new_form_default():
         particulars_plan(source, review)
 
 
+def test_observed_blank_mandates_are_retained_until_the_explicit_relist_policy_applies():
+    from segmented_date_fixtures import empty_date_record
+    from quick_relist.relist_dates import apply_relist_dates
+    from datetime import date
+    source, review = source_and_review()
+    fields=source['pages'][0]['fields']
+    for index, name in enumerate(('mandate_signed_date','mandate_expiry')):
+        position=next(i for i,f in enumerate(fields) if f.get('name')==name)
+        fields[position]=empty_date_record(index,false_container=True)
+    before=deepcopy(source)
+    plan={'particulars':particulars_plan(source,review)}
+    assert all(c['value']=='' for c in plan['particulars']['controls'] if c['key'].startswith('mandate_') and c['kind']=='date')
+    apply_relist_dates(plan,None,date(2099,11,13))
+    values={c['key']:c['value'] for c in plan['particulars']['controls']}
+    assert values['mandate_signed_date']=='2099-11-13'
+    assert values['mandate_expiry']=='2100-05-13'
+    assert source==before
+
+
+def test_blank_mandate_marker_alone_cannot_hide_contradictory_date_parts():
+    source, review = source_and_review()
+    field=next(f for f in source['pages'][0]['fields'] if f.get('name')=='mandate_signed_date')
+    field['value']=''
+    field['date_picker']['empty_observed']=True
+    with pytest.raises(CopyStopped,match='date differs'):
+        particulars_plan(source,review)
+
+
 def test_unknown_source_control_stops_before_silent_data_loss():
     source, review = source_and_review()
     source['pages'][0]['fields'].append({'name': 'unmapped_new_feature', 'type': 'text', 'value': 'keep me'})

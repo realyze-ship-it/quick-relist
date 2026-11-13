@@ -230,6 +230,9 @@ DATE_CAPTURE_HELPERS = r"""
         diagnoseSegments(name, wrapper, group, segments, containers, buttons, false, falseContainer); continue;
       }
       const container = containers[0];
+      const emptyObserved = segments.every((segment, index) =>
+        attr(segment, 'aria-valuenow') === null && attr(segment, 'aria-valuetext') === 'Empty'
+        && segment.textContent === ['YYYY','MM','DD'][index]);
       const parts = [];
       let valid = true;
       for (let index = 0; index < segments.length; index++) {
@@ -244,8 +247,8 @@ DATE_CAPTURE_HELPERS = r"""
             || attr(segment, 'aria-labelledby') !== null || attr(segment, 'aria-hidden') !== null
             || attr(segment, 'style') !== null || attr(segment, 'aria-readonly') !== 'false'
             || attr(segment, 'aria-disabled') !== 'false' || attr(segment, 'tabindex') !== (index === 0 ? '0' : '-1')
-            || attr(segment, 'aria-valuenow') === null
-            || (index === 0 ? attr(segment, 'aria-valuetext') !== null : attr(segment, 'aria-valuetext') === null)) {
+            || (!emptyObserved && (attr(segment, 'aria-valuenow') === null
+            || (index === 0 ? attr(segment, 'aria-valuetext') !== null : attr(segment, 'aria-valuetext') === null)))) {
           valid = false; break;
         }
         parts.push({dom_order:index, tag:'span', role:'spinbutton', classes:classes(segment),
@@ -262,6 +265,7 @@ DATE_CAPTURE_HELPERS = r"""
         diagnoseSegments(name, wrapper, group, segments, containers, buttons, true, falseContainer); continue;
       }
       const raw = input.value;
+      if (emptyObserved && raw !== '') { reject('segmented_date_raw_observation_omitted'); continue; }
       const record = {dom_order:startOrder + records.length, tag:'input', type:'mui-segmented-date',
         id:input.id, name, label:textOf(label), section:scopeFor(group), value:raw,
         checked:null, disabled:!!input.disabled, read_only:!!input.readOnly, selected_options:null, option_count:null,
@@ -285,6 +289,7 @@ DATE_CAPTURE_HELPERS = r"""
             wrapper_spinbutton_count:3, wrapper_contenteditable_count:3, wrapper_button_count:1, group_section_list_count:1,
             input_parent_is_group:true, group_parent_is_wrapper:true, label_in_wrapper:true,
             sections_in_group:true, calendar_in_group:true, capture_root_contains_wrapper:true}}};
+      if (emptyObserved) record.date_picker.empty_observed = true;
       if (falseContainer) {
         record.date_picker.schema_version = 'mui-segmented-date-dom/v2';
         record.date_picker.shape_variant = 'bound-false-container';
@@ -440,6 +445,9 @@ def segmented_date_record_valid(field: dict) -> bool:
     parts = data.get("segments")
     if not isinstance(parts, list) or len(parts) != 3:
         return False
+    empty = data.get('empty_observed') is True
+    if 'empty_observed' in data and (not empty or field['value'] != ''):
+        return False
     for index, part in enumerate(parts):
         if not isinstance(part, dict):
             return False
@@ -453,8 +461,11 @@ def segmented_date_record_valid(field: dict) -> bool:
                 or any(part.get(k, False) is not None for k in ("aria_labelledby", "aria_hidden", "style"))
                 or any(part.get(k) != "false" for k in ("aria_readonly", "aria_disabled"))
                 or part.get("tabindex") != ("0" if index == 0 else "-1")
-                or not string(part.get("aria_valuenow")) or not string(part.get("text"))
-                or (part.get("aria_valuetext", False) is not None if index == 0 else not string(part.get("aria_valuetext")))
+                or not string(part.get("text"))
+                or (empty and (part.get('aria_valuenow', False) is not None
+                    or part.get('aria_valuetext') != 'Empty' or part.get('text') != ('YYYY','MM','DD')[index]))
+                or (not empty and (not string(part.get("aria_valuenow"))
+                    or (part.get("aria_valuetext", False) is not None if index == 0 else not string(part.get("aria_valuetext")))))
                 or not visible(part) or type(part.get("child_element_count")) is not int or part["child_element_count"] != 0):
             return False
     return True

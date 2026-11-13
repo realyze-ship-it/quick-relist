@@ -85,6 +85,14 @@ def date_record(index=0, raw=None, *, false_container=False):
     return record
 
 
+def empty_date_record(index=0, *, false_container=False):
+    result = date_record(index, raw='', false_container=false_container)
+    result['date_picker']['empty_observed'] = True
+    for part, text in zip(result['date_picker']['segments'], ('YYYY','MM','DD')):
+        part.update(aria_valuenow=None, aria_valuetext='Empty', text=text)
+    return result
+
+
 def capture(fields, *, replacement=False, rich_text=None):
     listing_id, rxcu = ("234567", "RXCU23456") if replacement else ("123456", "RXCU12345")
     page = {"page_key": "details", "page_path": "/app/listings/edit/" + listing_id, "observation_number": 1,

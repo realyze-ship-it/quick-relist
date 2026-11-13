@@ -12,7 +12,7 @@ import time
 
 from .address import propose_address_fields
 from .business_fields import LIFESTYLE_FIELDS, GENERAL_FIELDS
-from .date_capture import DATE_NAMES
+from .date_capture import DATE_NAMES, segmented_date_record_valid
 
 
 class CopyStopped(RuntimeError):
@@ -83,6 +83,11 @@ def particulars_plan(capture, address_revision):
                              'text': _text(options[0]['text'])})
         elif name in DATE_NAMES and kind == 'mui-segmented-date':
             value = _text(field['value'])
+            if (name in ('mandate_signed_date','mandate_expiry') and value == ''
+                    and field.get('date_picker',{}).get('empty_observed') is True
+                    and segmented_date_record_valid(field)):
+                controls.append({'key':name,'kind':'date','value':''})
+                continue  # The explicit relist-date policy supplies these later.
             try:
                 parsed = date.fromisoformat(value)
                 if parsed.isoformat() != value:
@@ -287,7 +292,7 @@ class ParticularsFiller:
                     raise CopyStopped('Hub did not retain the original ' + label.lower() + ' in ' + key.replace('_', ' ') + '.')
             segment.send_keys(Keys.TAB)
             if self.one(selector).get_property('value') != value:
-                raise CopyStopped('Hub did not retain an original date. No date was renewed.')
+                raise CopyStopped('Hub did not retain the planned listing date.')
         else:
             if element.get_property('value') != value:
                 self.enter(element, value)

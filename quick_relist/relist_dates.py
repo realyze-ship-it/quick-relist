@@ -30,7 +30,8 @@ def date_policy(particulars, day):
     if len(original) != len(controls) or not required.issubset(original):
         raise CopyStopped('The source dates are incomplete or ambiguous.')
     try:
-        if any(date.fromisoformat(value).isoformat() != value for value in original.values()):
+        if any(date.fromisoformat(value).isoformat() != value for key,value in original.items()
+               if not (particulars['mode']=='sale' and key in ('mandate_signed_date','mandate_expiry') and value=='')):
             raise ValueError
     except (ValueError, TypeError):
         raise CopyStopped('A source date is invalid.') from None
