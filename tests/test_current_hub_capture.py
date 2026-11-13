@@ -94,6 +94,24 @@ def test_rental_period_with_space_is_not_lost(extract):
     assert observed['fields'][0]['selected_options'] == [{'value':'per month','text':'Per month'}]
 
 
+def test_townhouse_subtype_reaches_the_copy_inventory(extract):
+    html = '''<main><div><div role="combobox" id="mui-component-select-townhouse_descriptive_property_type">New Development</div><input id="townhouse_descriptive_property_type" name="townhouse_descriptive_property_type" aria-hidden="true" value="NewDevelopment"></div></main>'''
+    observed = extract(html, url='https://hub.remax.co.za/app/listings/edit/123456/particulars')
+    field = observed['fields'][0]
+    assert field['selected_options'] == [{'value':'NewDevelopment','text':'New Development'}]
+    mapped = entries(extract_source_fields(capture(page(fields=observed['fields']))))
+    assert mapped['townhouse_descriptive_property_type']['status'] == 'observed'
+
+
+@pytest.mark.parametrize('name,hidden,blocked', [('synthetic_new_type',False,True),
+                                              ('synthetic_new_type',True,False), ('listing',False,False)])
+def test_unknown_visible_business_selector_blocks_instead_of_disappearing(extract,name,hidden,blocked):
+    html = f'<main><div {"hidden" if hidden else ""}><div role="combobox" id="mui-component-select-{name}">Synthetic choice</div><input name="{name}" aria-hidden="true" value="DO_NOT_CAPTURE"></div></main>'
+    observed = extract(html, url='https://hub.remax.co.za/app/listings/edit/123456/particulars')
+    assert ('unsupported_business_selector' in observed['limitations']) is blocked
+    assert all(f.get('value') != 'DO_NOT_CAPTURE' for f in observed['fields'])
+
+
 def test_nameless_bank_mandate_is_bound_to_its_visible_label(extract):
     html = '''<main><div class="MuiFormControl-root"><label>Bank mandate</label><div><div role="combobox">None</div><input class="MuiSelect-nativeInput" aria-hidden="true" value="0"></div></div></main>'''
     observed = extract(html, url='https://hub.remax.co.za/app/listings/edit/123456/particulars')

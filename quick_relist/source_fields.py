@@ -37,6 +37,7 @@ _SELECTS = (
     ("country_id", "Country"), ("land_area_units", "Land area units"),
     ("floor_area_units", "Floor area units"),
     ("apartment_descriptive_property_type", "Apartment descriptive property type"),
+    ("townhouse_descriptive_property_type", "Townhouse descriptive property type"),
     ("deed_office_id", "Deed office"),
     ("rental_price_period", "Rental price period"),
 )

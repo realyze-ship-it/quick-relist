@@ -27,7 +27,7 @@ TEXT_NAMES = frozenset((
     'ensuites', 'rental_price', 'deposit',
 ))
 COMBO_ORDER = ('deed_office_id', 'office_id', 'listing_type_id', 'mandate_type_id',
-               'property_type_id', 'apartment_descriptive_property_type',
+               'property_type_id', 'apartment_descriptive_property_type', 'townhouse_descriptive_property_type',
                'land_area_units', 'floor_area_units', 'country_id', 'rental_price_period', 'bank_mandate')
 CHECKS = frozenset((*LIFESTYLE_FIELDS, *GENERAL_FIELDS, 'poa', 'featured', 'transfer_cost', 'address_hidden'))
 RADIOS = frozenset(('sale_state_id', 'rental_state_id'))
@@ -124,6 +124,10 @@ def particulars_plan(capture, address_revision):
     if listing_types not in (['1'], ['2']):
         raise CopyStopped('The sale or rental listing type is unresolved.')
     mode = 'sale' if listing_types == ['1'] else 'rent'
+    property_types = [c for c in controls if c['key'] == 'property_type_id']
+    if any(c.get('text') == 'Townhouse' for c in property_types) and not any(
+            c['key'] == 'townhouse_descriptive_property_type' for c in controls):
+        raise CopyStopped('Collect this townhouse again to include its descriptive property type. The original will stay active.')
     required = {'property_type_id', 'office_id', 'country_id', 'suburb', 'street_number',
                 'street_name', 'date_listed', 'expiry_date',
                 'selling_price' if mode == 'sale' else 'rental_price'}

@@ -260,7 +260,16 @@ return (() => {
     // this exception to arbitrary hidden fields or credential-like controls.
     const observedSelects = ['country_id','property_type_id','mandate_type_id',
       'office_id','listing_type_id','land_area_units','floor_area_units',
-      'apartment_descriptive_property_type','deed_office_id','rental_price_period'];
+      'apartment_descriptive_property_type','townhouse_descriptive_property_type',
+      'deed_office_id','rental_price_period'];
+    // Unknown visible business selectors must block copying, not silently
+    // disappear because their native inputs are aria-hidden. The agent picker
+    // is an add-control; its saved values are captured from the agents table.
+    for (const combo of root.querySelectorAll('div[role="combobox"][id^="mui-component-select-"]')) {
+      const name = combo.id.slice('mui-component-select-'.length);
+      if (visible(combo) && !sensitiveContext(combo) && name !== 'listing' && !observedSelects.includes(name))
+        limitations.add('unsupported_business_selector');
+    }
     for (const name of observedSelects) {
       const combos = Array.from(root.querySelectorAll('div[role="combobox"]#mui-component-select-' + name))
         .filter(el => visible(el) && !sensitiveContext(el));

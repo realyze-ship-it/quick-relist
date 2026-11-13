@@ -50,6 +50,22 @@ def test_only_reviewed_address_changes_and_original_dates_enter_plan():
     assert source == before
 
 
+def test_old_townhouse_backup_cannot_silently_drop_its_subtype():
+    source, review = source_and_review()
+    fields = source['pages'][0]['fields']
+    kind = next(f for f in fields if f.get('name') == 'property_type_id')
+    kind.update(value='Townhouse', selected_options=[{'value':'3','text':'Townhouse'}])
+    with pytest.raises(CopyStopped, match='Collect this townhouse again'):
+        particulars_plan(source, review)
+    fields.append({'name':'townhouse_descriptive_property_type','type':'custom-combobox',
+                   'value':'New Development','observed_business_selection_code':True,
+                   'selected_options':[{'value':'NewDevelopment','text':'New Development'}]})
+    copied = particulars_plan(source, review)
+    subtype = next(c for c in copied['controls'] if c['key']=='townhouse_descriptive_property_type')
+    assert subtype == {'key':'townhouse_descriptive_property_type','kind':'combo',
+                       'value':'NewDevelopment','text':'New Development'}
+
+
 def test_stale_address_review_is_rejected_before_any_form_input():
     source, review = source_and_review()
     source['pages'][0]['fields'][0]['value'] = 'changed externally'
