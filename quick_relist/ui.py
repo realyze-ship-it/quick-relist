@@ -1105,7 +1105,7 @@ class MainWindow(QMainWindow):
         heading.addStretch()
         heading.addWidget(_label("1. Add references    2. Capture    3. Review", "muted"))
         compose_layout.addLayout(heading)
-        compose_layout.addWidget(_label("Paste RXCU references, one per line or separated by commas. A batch is saved locally when you create it.", "muted", True))
+        compose_layout.addWidget(_label("Paste RXCU references, then start. Chrome opens automatically; finish your login and OTP and the app collects the listings for your address review.", "muted", True))
         input_row = QHBoxLayout()
         self.rxcu_input = QPlainTextEdit()
         self.rxcu_input.setPlaceholderText("RXCU123456\nRXCU123457")
@@ -1115,7 +1115,7 @@ class MainWindow(QMainWindow):
         input_row.addWidget(self.rxcu_input, 1)
         input_actions = QVBoxLayout()
         input_actions.setSpacing(7)
-        self.create_button = _button("Create saved batch", self._create_batch, True)
+        self.create_button = _button("Start batch", self._start_batch, True)
         self.create_button.setMinimumWidth(168)
         self.create_button.setEnabled(False)
         input_actions.addWidget(self.create_button)
@@ -1128,8 +1128,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(compose)
 
         collect_actions = QHBoxLayout()
-        collect_actions.addWidget(_button('Open Hub for sign-in', self._open_readonly_hub))
-        self.collect_batch_button = _button('Collect batch and photos', self._collect_batch, True)
+        self.collect_batch_button = _button('Resume collection', self._collect_batch)
         collect_actions.addWidget(self.collect_batch_button)
         self.relist_batch_button = _button('Relist reviewed batch', self._relist_reviewed_batch, True)
         self.relist_batch_button.setToolTip('Remove and archive each original, then create, check and publish its reviewed replacement.')
@@ -1137,6 +1136,9 @@ class MainWindow(QMainWindow):
         collect_actions.addStretch()
         layout.addLayout(collect_actions)
         self.collection_progress.connect(self.statusBar().showMessage)
+        self.operation_message = _label('Start a batch to open Hub. After sign-in, collection continues automatically.', 'noticeBody', True)
+        self.collection_progress.connect(self.operation_message.setText)
+        layout.addWidget(self.operation_message)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -1436,6 +1438,13 @@ class MainWindow(QMainWindow):
         self.create_button.setEnabled(bool(tokens) and bool(self.engine) and not self._is_busy)
 
     @Slot()
+    def _start_batch(self) -> None:
+        previous = self.batch_id
+        self._create_batch()
+        if self.batch_id != previous:
+            self._collect_batch()
+
+    @Slot()
     def _create_batch(self) -> None:
         if not self.engine or self._is_busy:
             return
@@ -1464,7 +1473,7 @@ class MainWindow(QMainWindow):
         try:
             self.batches = list(self.store.list_batches()) if self.store else []
             if self.batch_id is None and self.batches:
-                self.batch_id = str(self.batches[0]["id"])
+                self.batch_id = str(self.batches[-1]["id"])
             self.jobs = list(self.store.list_jobs(self.batch_id)) if self.store and self.batch_id else []
         except Exception as exc:
             self._show_error("Could not read local workspace", str(exc))
@@ -1478,7 +1487,7 @@ class MainWindow(QMainWindow):
             self.notice_title.setText('Review addresses before relisting')
             self.notice_body.setText('Collect the listings and photos, save each address review, then relist the batch. Each original is removed and archived before its replacement is saved and published.')
         self.stat_values["queued"].setText(str(len(self.jobs)))
-        self.collect_batch_button.setEnabled(bool(self.jobs) and self.hub is not None and self.drafts is not None and self.media_root is not None and not self._is_busy)
+        self.collect_batch_button.setEnabled(any(job.get('state') == 'queued' for job in self.jobs) and self.hub is not None and self.drafts is not None and self.media_root is not None and not self._is_busy)
         collected_views = {job['id']: _collected_job_view(self.drafts, job) for job in self.jobs}
         self.stat_values["reviewed"].setText(str(sum(bool(job.get("approved")) or bool((collected_views[job['id']] or {}).get('reviewed')) for job in self.jobs)))
         run_statuses = {job['id']: _run_status(self.runs, job) for job in self.jobs}
@@ -1857,8 +1866,7 @@ class MainWindow(QMainWindow):
     def _collect_batch(self):
         if self._is_busy or not self.hub or not self.drafts or not self.media_root:
             return
-        if self.hub.driver is None:
-            self._show_error('Sign in first', 'Open Hub for sign-in, finish your login, then choose Collect batch and photos.')
+        if not any(job.get('state') == 'queued' for job in self.jobs):
             return
         # Developer launches can refresh read-only collectors between tests
         # without discarding the operator's manual sign-in. Packaged builds do
@@ -1873,17 +1881,25 @@ class MainWindow(QMainWindow):
         from .capture import CaptureError
         from .original_media import OriginalMediaError
         from .downloads import DownloadReviewError
+        from .hub_login import LoginStopped, wait_for_hub_login
         stop = threading.Event()
         jobs = deepcopy(self.jobs)
         def collect():
+            if stop.is_set():
+                raise LoginStopped('Collection stopped. Your saved batch is ready to resume.')
+            if self.hub.driver is None:
+                self.collection_progress.emit('Opening the RE/MAX Chrome window…')
+                self._safe_readonly_call(self.hub.open, opening=True)
             try:
+                wait_for_hub_login(self.hub.driver, cancelled=stop.is_set,
+                                   progress=self.collection_progress.emit)
                 return collect_batch(self.hub, self.drafts, jobs, self.media_root,
                                      cancelled=stop.is_set, progress=self.collection_progress.emit)
-            except (CollectionStopped, CopyStopped, CaptureError, OriginalMediaError, DownloadReviewError):
+            except (CollectionStopped, CopyStopped, CaptureError, OriginalMediaError, DownloadReviewError, LoginStopped):
                 raise
             except Exception:
                 raise RuntimeError('Collection stopped. Saved information and photos have been kept. Check Hub and the collection tools before continuing; no listing was changed.') from None
-        self._run_operation('Collecting the batch one listing at a time…', collect,
+        self._run_operation('Opening Hub and waiting for your sign-in…', collect,
                             'Collection finished. Select a listing and verify its address.',
                             lambda _: self._verify_captured_address(), cancel=stop.set)
 
@@ -2223,6 +2239,7 @@ class MainWindow(QMainWindow):
         self.stack.setEnabled(False)
         self.progress.show()
         self.statusBar().showMessage(title)
+        self.operation_message.setText(title)
         self._thread = QThread(self)
         self._worker = _Worker(operation)
         self._worker.moveToThread(self._thread)
@@ -2271,9 +2288,11 @@ class MainWindow(QMainWindow):
         self._operation_callback = None
         if self._operation_error:
             self.statusBar().showMessage("Operation stopped. Review the recorded outcome before trying again.")
+            self.operation_message.setText(self._operation_error)
             self._show_error("Operation did not complete", self._operation_error)
         else:
             self.statusBar().showMessage(self._operation_success)
+            self.operation_message.setText(self._operation_success)
             if callback:
                 callback(result)
 
@@ -2297,7 +2316,7 @@ class MainWindow(QMainWindow):
     def _open_readonly_hub(self) -> None:
         if self.hub is None or self._is_busy:
             return
-        self._run_operation("Opening the Hub browser…", lambda: self._safe_readonly_call(self.hub.open, opening=True), "Hub browser opened. Finish signing in, then choose Collect batch and photos.")
+        self._run_operation("Opening the Hub browser…", lambda: self._safe_readonly_call(self.hub.open, opening=True), "Hub browser opened for inspection. For a saved batch, choose Resume collection; it waits for sign-in automatically.")
 
     @Slot()
     def _inspect_readonly_hub(self) -> None:

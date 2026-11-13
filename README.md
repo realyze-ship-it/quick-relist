@@ -6,9 +6,9 @@ A Windows app for collecting Hub listings, reviewing each address, and processin
 
 ## Workflow
 
-1. Enter one or more RXCU references and choose **Create batch**.
-2. Choose **Open Hub for sign-in**, complete the login and OTP in the separate RE/MAX Chrome window, and leave that window open.
-3. Choose **Collect batch and photos**. The app reads the matching listing, descriptions, agents, supported room options, original photos and portal destinations. It processes references sequentially and checks the photo pack against the downloaded originals.
+1. Enter one or more RXCU references and choose **Start batch**. The batch is saved and Chrome opens automatically.
+2. Complete the login and OTP in that RE/MAX Chrome window. The app waits for the signed-in page and listing search to finish loading, then continues automatically. It does not read or enter your credentials.
+3. The app reads each matching listing, descriptions, agents, supported room options, original photos and portal destinations. It processes references sequentially and checks the photo pack against the downloaded originals. **Resume collection** uses an existing browser or opens one if necessary and waits for sign-in in the same way.
 4. Review the prefilled **Verify address** form for each listing, make any corrections and save the review. This saves a local review only.
 5. **Relist reviewed batch** first checks the collected data and shows the reviewed references and addresses for confirmation. For each supported listing, it prepares and checks an unsaved form, rechecks the source, removes the original from its portals, archives sales as **Listing has been cancelled → Mandate expired** and rentals as **Listing has been withdrawn**, saves the replacement, copies and checks its content, then publishes to the original destinations.
 6. A submitted portal request remains pending until Hub returns its publication identifier. **Check publication** reads the existing requests without sending them again.

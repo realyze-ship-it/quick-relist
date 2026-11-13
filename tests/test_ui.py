@@ -168,6 +168,77 @@ def test_repeated_create_after_input_cleared_is_a_noop(window):
     assert len(window.store.list_batches()) == 1
 
 
+@pytest.mark.parametrize('already_open', [False, True])
+def test_start_batch_opens_waits_collects_and_stops_at_address_review(window, application, monkeypatch, tmp_path, already_open):
+    from quick_relist import collection, hub_login
+    calls = []
+    hub = SimpleNamespace(driver=object() if already_open else None)
+    def open_browser():
+        calls.append('open')
+        hub.driver = object()
+    hub.open = open_browser
+    window.hub, window.drafts, window.media_root = hub, SimpleNamespace(list_captures=lambda _: []), tmp_path / 'media'
+    def wait(driver, **kwargs):
+        assert driver is hub.driver
+        calls.append('login_and_otp')
+    def collect(*args, **kwargs):
+        assert calls[-1] == 'login_and_otp'
+        calls.append('collect')
+        return []
+    monkeypatch.setattr(hub_login, 'wait_for_hub_login', wait)
+    monkeypatch.setattr(collection, 'collect_batch', collect)
+    monkeypatch.setattr(window, '_verify_captured_address', lambda: calls.append('address_review'))
+    monkeypatch.setattr(window, '_relist_reviewed_batch', lambda: pytest.fail('Never relist on login completion'))
+    window.rxcu_input.setPlainText('RXCU000123')
+    window.create_button.click()
+    _finish_worker(application, window)
+    assert calls == ([] if already_open else ['open']) + ['login_and_otp', 'collect', 'address_review']
+    assert len(window.store.list_batches()) == 1
+    assert window.jobs[0]['state'] == 'queued' and not window.jobs[0]['approved']
+
+
+@pytest.mark.parametrize('failure', ['cancel', 'timeout'])
+def test_login_pause_never_starts_collection_and_retains_saved_batch(window, application, monkeypatch, tmp_path, failure):
+    import threading
+    from quick_relist import collection, hub_login
+    entered = threading.Event()
+    window.hub = SimpleNamespace(driver=object())
+    window.drafts, window.media_root = SimpleNamespace(list_captures=lambda _: []), tmp_path / 'media'
+    def wait(driver, **kwargs):
+        entered.set()
+        if failure == 'cancel':
+            while not kwargs['cancelled']():
+                time.sleep(.001)
+        raise hub_login.LoginStopped('Synthetic login ' + failure)
+    monkeypatch.setattr(hub_login, 'wait_for_hub_login', wait)
+    monkeypatch.setattr(collection, 'collect_batch', lambda *a, **k: pytest.fail('Login was not completed'))
+    window.rxcu_input.setPlainText('RXCU000123')
+    window.create_button.click()
+    assert entered.wait(2)
+    if failure == 'cancel':
+        window._stop_operation()
+    _finish_worker(application, window)
+    assert window._operation_error == 'Synthetic login ' + failure
+    assert window.jobs[0]['state'] == 'queued'
+    assert len(window.store.list_batches()) == 1
+
+
+def test_invalid_start_does_not_resume_an_earlier_batch(window, monkeypatch):
+    _add_batch(window)
+    monkeypatch.setattr(window, '_collect_batch', lambda: pytest.fail('Invalid new references must not start old work'))
+    window.rxcu_input.setPlainText('invalid')
+    window._start_batch()
+    assert len(window.store.list_batches()) == 1
+
+
+def test_restart_selects_latest_saved_batch(window):
+    _add_batch(window, 'RXCU000123')
+    newest = _add_batch(window, 'RXCU000456')
+    window.batch_id = None
+    window.refresh()
+    assert window.batch_id == newest
+
+
 def test_saved_batches_search_and_open(window, application):
     first = _add_batch(window, "RXCU000001")
     _add_batch(window, "RXCU000002")
