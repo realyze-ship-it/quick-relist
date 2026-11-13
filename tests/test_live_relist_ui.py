@@ -80,6 +80,24 @@ def test_error_diagnostic_excludes_exception_message_and_values(tmp_path):
     assert record['frames'][-1]['function'] == 'prepare'
 
 
+def test_browser_message_stops_once_without_exposing_private_alert_text(tmp_path):
+    from selenium.common.exceptions import UnexpectedAlertPresentException
+    calls = []
+    class Subject:
+        media_root = tmp_path / 'media'
+        @module.diagnosed
+        def create(self):
+            calls.append('save')
+            raise UnexpectedAlertPresentException('SYNTHETIC_PRIVATE_MESSAGE',
+                                                   alert_text='SYNTHETIC_PRIVATE_ALERT')
+    with pytest.raises(CopyStopped, match='Read it in Chrome') as caught:
+        Subject().create()
+    assert calls == ['save']
+    assert 'SYNTHETIC_PRIVATE' not in str(caught.value)
+    records = list((tmp_path / 'diagnostics').glob('error-*.json'))
+    assert len(records) == 1 and 'SYNTHETIC_PRIVATE' not in records[0].read_text()
+
+
 @pytest.mark.parametrize('conflict',[False,True])
 def test_upload_identity_waits_for_absent_headings_but_rejects_conflicts(tmp_path,monkeypatch,conflict):
     ready={'outer_count':1,'inner_count':1,'outer_matches':True,'inner_matches':True}

@@ -19,6 +19,8 @@ Portal requests can remain pending. The app only records a completed relist when
 
 A separate authorized sale pilot completed manually through the current Hub screens, with all 20 original photos and publication to four destinations. That proves the observed sale screens and saved result; it does not qualify the entire automated sale runner.
 
+The next automated mixed run passed sale form preparation and the fresh source check, removed all original sale portals and confirmed cancellation / mandate-expired archiving. Hub then returned a server error on replacement Save. The create action remains uncertain, the original is archived, and the rental has not started. No automatic create retry or publication followed. This run is incomplete and requires outcome reconciliation; it does not qualify automated sale or mixed relisting.
+
 ## Operational observations
 
 Sale and rental have different fields and archive reasons. Rentals omit Deal Particulars. Sales use **Listing has been cancelled → Mandate expired**. The earlier pilots preserved their source dates. The operator subsequently requested a new date rule: Date listed and On market since use the relist day in South Africa, expiry is six calendar months later, and sale mandate dates follow that interval. Rental occupation dates stay unchanged. Original dates remain in the backup, and interrupted runs retain the date contract recorded before removal.
@@ -38,6 +40,7 @@ Windows Chrome requires native HTML clipboard data to retain the source descript
 - Download observation attaches a temporary session to the selected editor when Selenium's cached session belongs to another tab, retains the target/context/frame/loader checks, and restores the original connection on cleanup. A focused suite passed 100 checks, with three platform-specific skips. It covers two sequential tabs, a closed earlier tab, wrong-frame events, failed attachment and failed cleanup. The corrected executable's two offline package checks and the two-editor live collection repeat passed.
 - The main workflow uses **Start batch** to save the references, open Chrome, wait for manual sign-in/OTP and continue collection automatically. **Resume collection** reuses the same path without recreating a batch. Login observation checks the official Hub origin, authenticated page marker and unique loaded search controls, preserves existing editors and never reads credentials. A focused login/UI/collection suite passed 141 checks. On Windows, Start batch opened Chrome; the initial ten-minute wait expired before testing continued, and Resume collection recognized the completed login and collected both listings without another intervention. The default wait now remains active until sign-in or Stop; all 15 login checks pass, including a late login after an hour. The new unbounded default does not change the collection path already exercised live.
 - All committed tests use synthetic data. No real listing captures, photos, credentials, OTPs or browser profiles belong in this repository.
+- Unexpected browser messages now remain visible instead of being dismissed by WebDriver. They stop the operation with guidance to inspect Chrome and verify the existing outcome, without exposing alert text or retrying. The focused browser and live-runner checks passed (56 tests).
 
 ## Limits still enforced
 

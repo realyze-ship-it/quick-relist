@@ -231,6 +231,7 @@ class ReadOnlyHub:
             if not port.isdigit() or not 1024 <= int(port) <= 65535:
                 raise RuntimeError('The recovery browser is no longer available.')
             options = webdriver.ChromeOptions()
+            options.unhandled_prompt_behavior = 'ignore'
             options.debugger_address = '127.0.0.1:' + port
             options.page_load_strategy = 'eager'
             self.driver = webdriver.Chrome(options=options)
@@ -244,6 +245,9 @@ class ReadOnlyHub:
         self._profile_path, self._profile_identity = profile, (info.st_dev, info.st_ino)
         self._browser_closed = False
         options = webdriver.ChromeOptions()
+        # Leave Hub's unexpected messages visible for outcome review. The
+        # WebDriver default dismisses them before reporting the failure.
+        options.unhandled_prompt_behavior = 'ignore'
         options.page_load_strategy = 'eager'
         options.add_argument('--start-maximized')
         options.add_argument("--user-data-dir=" + str(profile))

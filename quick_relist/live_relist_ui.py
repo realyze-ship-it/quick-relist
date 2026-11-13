@@ -44,6 +44,9 @@ def diagnosed(method):
                         stream.write(json.dumps(record).encode('utf-8'))
             except Exception:
                 pass  # A diagnostic failure cannot alter or retry the operation.
+            from selenium.common.exceptions import UnexpectedAlertPresentException
+            if isinstance(exc, UnexpectedAlertPresentException):
+                raise CopyStopped('Hub displayed a browser message. Read it in Chrome, then check the existing listing outcome before continuing. No uncertain action was retried.') from None
             raise
     return call
 

@@ -548,6 +548,7 @@ def test_open_uses_new_private_disposable_profile_and_cleans_it_only_after_quit(
     hub.open()
     assert hub.driver.page_load_timeout == 30
     assert launched[0].page_load_strategy == 'eager'
+    assert launched[0].unhandled_prompt_behavior == 'ignore'
     profile = hub._profile_path
     assert profile.is_dir() and profile.parent == tmp_path
     assert "--incognito" not in launched[0].arguments
