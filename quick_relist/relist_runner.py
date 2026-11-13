@@ -13,6 +13,20 @@ def run_status(run):
                  if e['kind'] == 'status'), {})
 
 
+def display_status(run):
+    """Display a stopped attempt without presenting old receipts as live state."""
+    if not run:
+        return None
+    status = dict(run_status(run))
+    unresolved = [a['action'] for a in run.get('actions', []) if a['state'] in ('started', 'uncertain')]
+    latest_outcome = next((e['kind'] for e in reversed(run.get('events', []))
+                           if e['kind'] in ('status', 'stopped')), None)
+    if unresolved or latest_outcome == 'stopped':
+        status.update(last_verified_state=status.get('state'), state='needs_review',
+                      unresolved_actions=unresolved)
+    return status or {'state': 'needs_review'}
+
+
 def removal_can_be_checked(run):
     actions = (run or {}).get('actions', [])
     states = {a['action']:a['state'] for a in actions}
@@ -62,6 +76,7 @@ class RelistRunner:
         return results
 
     def one(self, job):
+        self.runs.assert_source_available(job['id'], job['rxcu'])
         previous = self.runs.get(job['id'])
         status = run_status(previous)
         if status.get('state') == 'published':
@@ -73,6 +88,7 @@ class RelistRunner:
         if not collected:
             raise CopyStopped('Collect every listing before starting the batch.')
         data = collected['capture']
+        self.runs.assert_source_available(job['id'], data['rxcu'], data['listing_id'])
         reviews = self.drafts.list_addresses(data['source_capture_id'])
         if not reviews:
             raise CopyStopped('Save the address review for every listing before starting the batch.')

@@ -88,6 +88,38 @@ def test_completed_manual_pilot_is_never_recreated(setup):
     assert provider.calls==[]
 
 
+def test_same_original_in_new_batch_stops_before_preparing_any_form(setup):
+    drafts, runs, job = setup
+    with pytest.raises(RuntimeError):
+        module.RelistRunner(drafts, runs, Provider(fail='create')).one(job)
+    provider = Provider()
+    with pytest.raises(RunNeedsReview, match='another saved batch'):
+        module.RelistRunner(drafts, runs, provider).one({**job, 'id': 'new-batch-job'})
+    assert provider.calls == []
+
+
+def test_stopped_display_does_not_claim_original_is_still_archived(setup):
+    drafts, runs, job = setup
+    with pytest.raises(RuntimeError):
+        module.RelistRunner(drafts, runs, Provider(fail='create')).one(job)
+    record = runs.get(job['id'])
+    assert module.run_status(record)['state'] == 'archived'
+    shown = module.display_status(record)
+    assert shown['state'] == 'needs_review'
+    assert shown['last_verified_state'] == 'archived'
+    assert shown['unresolved_actions'] == ['create']
+    assert module.run_status(runs.get(job['id']))['state'] == 'archived'
+
+
+def test_display_recognizes_nonjournal_copy_failure_and_completed_recovery(setup):
+    drafts, runs, job = setup
+    with pytest.raises(RuntimeError):
+        module.RelistRunner(drafts, runs, Provider(fail='copy')).one(job)
+    assert module.display_status(runs.get(job['id']))['state'] == 'needs_review'
+    module.RelistRunner(drafts, runs, Provider()).one(job)
+    assert module.display_status(runs.get(job['id']))['state'] == 'published'
+
+
 def test_confirmed_removal_resumes_without_repeating_the_removal_click(setup):
     drafts,runs,job=setup
     with pytest.raises(RuntimeError):

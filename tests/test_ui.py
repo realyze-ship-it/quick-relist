@@ -125,6 +125,11 @@ def test_empty_workspace_has_no_live_actions(window):
     assert "not available" in window.notice_title.text().lower()
 
 
+def test_uncertain_save_label_does_not_present_old_archive_receipt_as_current_state():
+    status = {'state': 'needs_review', 'last_verified_state': 'archived', 'unresolved_actions': ['create']}
+    assert ui._relist_state_label(status) == 'Stopped · replacement Save needs checking'
+
+
 def test_create_batch_persists_only_local_references(window):
     batch_id = _add_batch(window)
     assert batch_id

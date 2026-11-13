@@ -41,6 +41,46 @@ def test_changed_review_cannot_replace_a_started_run():
                     reference='RXCU1000', listing_id='123456')
 
 
+@pytest.mark.parametrize('reference,listing_id', [('RXCU-1000','987654'), ('RXCU9999','123456')])
+@pytest.mark.parametrize('completed', [False, True])
+def test_new_batch_cannot_bypass_an_existing_source_record(tmp_path, reference, listing_id, completed):
+    path = tmp_path / 'runs.sqlite3'
+    store = RunStore(path)
+    run = start(store)
+    if completed:
+        store.note(run, 'status', {'state': 'published', 'target_reference': 'RXCU2000'})
+    else:
+        def unknown():
+            raise TimeoutError()
+        with pytest.raises(TimeoutError):
+            store.perform_once(run, 'create', unknown)
+    original = store.get('job')
+    store.close()
+    reopened = RunStore(path)
+    with pytest.raises(RunNeedsReview, match='another saved batch'):
+        reopened.start('new-job', source_capture_id='new-capture', address_revision_id='new-review',
+                       reference=reference, listing_id=listing_id)
+    assert reopened.get('new-job') is None
+    assert reopened.get('job') == original
+    # Relisting the new reference later is a different original.
+    reopened.start('replacement-job', source_capture_id='other-capture', address_revision_id='other-review',
+                   reference='RXCU2000', listing_id='654321')
+
+
+def test_two_batches_cannot_claim_the_same_source_concurrently(tmp_path):
+    path = tmp_path / 'runs.sqlite3'
+    stores = [RunStore(path), RunStore(path)]
+    def attempt(index):
+        try:
+            return stores[index].start(str(index), source_capture_id='capture', address_revision_id='review',
+                                       reference='RXCU1000', listing_id='123456')
+        except RunNeedsReview:
+            return None
+    with ThreadPoolExecutor() as pool:
+        results = list(pool.map(attempt, range(2)))
+    assert sum(result is not None for result in results) == 1
+
+
 def test_two_workers_cannot_send_the_same_request(tmp_path):
     path = tmp_path / 'runs.sqlite3'
     first, second = RunStore(path), RunStore(path)

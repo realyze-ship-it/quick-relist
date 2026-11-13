@@ -51,4 +51,6 @@ The writer currently requires empty custom-feature, party, document and note tab
 
 Unknown creation outcomes, unsupported interrupted states and mismatched saved content require investigation. The app does not erase uncertain journal entries or repeat creation to recover. It cannot atomically transact or roll back Hub changes, and a source recheck cannot prevent another user editing the listing afterwards.
 
+A source's run record now blocks reuse from a different saved batch, matching either the normalized RXCU or Hub listing ID. The check runs before form preparation and again inside the journal transaction, including existing journals and concurrent app instances. A stopped run is displayed as needing an outcome check rather than presenting its last archive receipt as the current Hub state. The focused journal, runner and desktop checks passed (154 tests).
+
 Before a broad production release, qualify an automated sale run, a live multi-listing batch, additional partial-upload failures and the excluded related-record paths. Passing synthetic checks does not establish those live outcomes.

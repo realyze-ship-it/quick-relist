@@ -24,6 +24,11 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _source_key(reference):
+    from .core import normalize_rxcu
+    return normalize_rxcu(reference)
+
+
 class RunStore:
     def __init__(self, path):
         if str(path) != ':memory:':
@@ -70,9 +75,23 @@ class RunStore:
                 if previous['binding_json'] != encoded:
                     raise RunNeedsReview('This listing already has a started run. Review that run before changing its source or address.')
                 return previous['id']
+            self._assert_source_available(job_id, reference, listing_id)
             ident = uuid4().hex
             self.conn.execute('INSERT INTO relist_runs VALUES(?,?,?,?)', (ident, job_id, _now(), encoded))
             return ident
+
+    def _assert_source_available(self, job_id, reference, listing_id=None):
+        # A new saved batch must not bypass an earlier source's journal.
+        # Check legacy rows too; their references may contain a hyphen.
+        for row in self.conn.execute('SELECT job_id,binding_json FROM relist_runs WHERE job_id!=?', (job_id,)):
+            binding = json.loads(row['binding_json'])
+            if (_source_key(binding['reference']) == _source_key(reference)
+                    or listing_id is not None and binding['listing_id'] == listing_id):
+                raise RunNeedsReview('This original already has a relist record in another saved batch. Open that batch and check its outcome; a new batch cannot create another replacement.')
+
+    def assert_source_available(self, job_id, reference, listing_id=None):
+        with self._lock:
+            self._assert_source_available(job_id, reference, listing_id)
 
     def get(self, job_id):
         with self._lock:

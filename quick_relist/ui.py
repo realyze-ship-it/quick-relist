@@ -255,21 +255,19 @@ def _collected_job_view(drafts, job):
 
 
 def _run_status(runs, job):
+    from .relist_runner import display_status
     record = runs.get(job['id']) if runs is not None else None
-    if record:
-        for event in reversed(record['events']):
-            if event['kind'] == 'status':
-                return event['data']
-        return {'state':'needs_review'}
-    return None
+    return display_status(record)
 
 
 def _relist_state_label(status):
+    if 'create' in status.get('unresolved_actions', []):
+        return 'Stopped · replacement Save needs checking'
     if status.get('state')=='published':
         return 'Relisted · '+status['target_reference']
     labels={'portals_removed':'Original removed from portals','archived':'Original archived; copy pending',
             'created':'Replacement saved; checking content','verified':'Replacement checked; publishing',
-            'publication_pending':'Waiting for portals','needs_review':'Previous action needs checking'}
+            'publication_pending':'Waiting for portals','needs_review':'Stopped · check saved progress'}
     return labels.get(status.get('state'),'Check saved progress')
 
 
@@ -1675,6 +1673,8 @@ class MainWindow(QMainWindow):
         run_status = _run_status(self.runs, job)
         if run_status:
             self.detail_state.setText(_relist_state_label(run_status))
+            if run_status.get('state') == 'needs_review':
+                self.collection_summary.setText('This run stopped. The activity record shows earlier observations, not the current Hub state. Check the original and any existing replacement before continuing. Starting another batch will not bypass this record.')
             if run_status.get('state')=='publication_pending':
                 self.detail_state.setText('Waiting for portals · ' + run_status['target_reference'])
                 names={'website':'RE/MAX','p24':'Property24','pp':'Private Property','global':'RE/MAX Global',
@@ -1777,6 +1777,7 @@ class MainWindow(QMainWindow):
                 saved=latest_collection(self.drafts,job['id'])
                 if not saved:
                     raise CopyStopped('Collect every listing first.')
+                self.runs.assert_source_available(job['id'], saved['capture']['rxcu'], saved['capture']['listing_id'])
                 reviews=self.drafts.list_addresses(saved['capture']['source_capture_id'])
                 if not reviews:
                     raise CopyStopped('Save every address review first.')
