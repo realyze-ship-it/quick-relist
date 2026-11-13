@@ -50,16 +50,18 @@ def _manage_tab(driver):
 
 
 def wait_for_hub_login(driver, *, cancelled=lambda: False, progress=lambda message: None,
-                       timeout=600, poll_interval=.4):
+                       timeout=None, poll_interval=.4):
     """Continue once login/OTP and Hub's listing controls have finished loading."""
     from selenium.common.exceptions import StaleElementReferenceException, WebDriverException
     from selenium.webdriver.common.by import By
-    if driver is None or not .01 <= poll_interval <= 2 or not .05 <= timeout <= 1800:
+    if driver is None or not .01 <= poll_interval <= 2 or (timeout is not None and not .05 <= timeout <= 1800):
         raise ValueError('Invalid Hub login wait')
     progress('Sign in and enter your OTP in the RE/MAX Chrome window. Collection will continue automatically.')
-    deadline = time.monotonic() + timeout
+    # Manual login is not a failed browser action when the user steps away.
+    # Keep waiting until sign-in or Stop; bounded waits remain available to callers.
+    deadline = time.monotonic() + timeout if timeout is not None else None
     prepared = False
-    while time.monotonic() < deadline:
+    while deadline is None or time.monotonic() < deadline:
         if cancelled():
             raise LoginStopped('Collection stopped while waiting for sign-in. Your saved batch is ready to resume.')
         try:

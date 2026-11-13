@@ -133,6 +133,17 @@ def test_timeout_keeps_browser_and_saved_work(clock):
     assert driver.navigation == [] and not driver.closed
 
 
+def test_default_wait_accepts_late_manual_login_without_an_extra_click(clock):
+    driver = Driver()
+    def late_sign_in():
+        clock.now += 3600
+        driver.tabs['first'] = hub_login.MANAGE_URL
+    clock.steps = [late_sign_in]
+    hub_login.wait_for_hub_login(driver)
+    assert clock.now > 3600 and driver.current_url == hub_login.MANAGE_URL
+    assert driver.navigation == []
+
+
 @pytest.mark.parametrize('url', ['https://example.com/app/listings', 'http://hub.remax.co.za/app/listings',
                                 'https://hub.remax.co.za.evil.test/app/listings',
                                 'https://user@hub.remax.co.za/app/listings',
