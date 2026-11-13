@@ -267,7 +267,14 @@ return (() => {
     // is an add-control; its saved values are captured from the agents table.
     for (const combo of root.querySelectorAll('div[role="combobox"][id^="mui-component-select-"]')) {
       const name = combo.id.slice('mui-component-select-'.length);
-      if (visible(combo) && !sensitiveContext(combo) && name !== 'listing' && !observedSelects.includes(name))
+      // Media's inline writing assistant configures generation, not the saved
+      // description. Never invoke it; preserve the existing rich text instead.
+      const writingHelper = /\/media\/?$/.test(location.pathname)
+        && name === 'ai_marketing_tone_inline'
+        && combo.nextElementSibling?.matches('input#ai_marketing_tone_inline[name="ai_marketing_tone_inline"][aria-hidden="true"]')
+        && combo.parentElement.parentElement?.matches('.MuiFormControl-root')
+        && textOf(combo.parentElement.parentElement.querySelector('label[for="ai_marketing_tone_inline"]')) === 'Tone & Complexity';
+      if (visible(combo) && !sensitiveContext(combo) && name !== 'listing' && !writingHelper && !observedSelects.includes(name))
         limitations.add('unsupported_business_selector');
     }
     for (const name of observedSelects) {

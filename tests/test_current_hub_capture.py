@@ -121,3 +121,15 @@ def test_nameless_bank_mandate_is_bound_to_its_visible_label(extract):
     assert bank['selected_options'] == [{'value':'0','text':'None'}]
     unrelated = extract(html.replace('Bank mandate','Other selector'), url='https://hub.remax.co.za/app/listings/edit/123456/particulars')
     assert unrelated['fields'] == []
+
+
+@pytest.mark.parametrize('route,label,blocked', [('media','Tone & Complexity',False),
+    ('particulars','Tone & Complexity',True), ('media','Unknown business field',True)])
+def test_only_observed_media_writing_helper_is_excluded(extract, route, label, blocked):
+    html = f'<main><div class="MuiFormControl-root"><label for="ai_marketing_tone_inline">{label}</label><div>' \
+        '<div role="combobox" id="mui-component-select-ai_marketing_tone_inline">Standard</div>' \
+        '<input id="ai_marketing_tone_inline" name="ai_marketing_tone_inline" aria-hidden="true" value="standard">' \
+        f'<fieldset aria-hidden="true"><legend>{label}</legend></fieldset></div></div></main>'
+    result = extract(html, url=f'https://hub.remax.co.za/app/listings/edit/123456/{route}')
+    assert ('unsupported_business_selector' in result['limitations']) is blocked
+    assert not result['fields']

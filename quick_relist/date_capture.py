@@ -17,6 +17,7 @@ DATE_LABELS = (
 )
 DATE_SCHEMA = "mui-segmented-date-dom/v1"
 DATE_FALSE_CONTAINER_SCHEMA = "mui-segmented-date-dom/v2"
+DATE_EMPTY_PLACEHOLDER_SCHEMA = "mui-segmented-date-dom/v3"
 DATE_FALSE_CONTAINER_VARIANT = "bound-false-container"
 DATE_TYPE = "mui-segmented-date"
 DATE_DIAGNOSTIC_KIND = "segmented_date_rejection"
@@ -221,18 +222,33 @@ DATE_CAPTURE_HELPERS = r"""
         && containers[0].parentElement === group && attr(containers[0], 'contenteditable') === 'false'
         && editable.includes(containers[0])
         && segments.every(segment => editable.includes(segment) && attr(segment, 'contenteditable') === 'true');
+      // Hub renders an empty, unfocused picker with opacity-zero placeholders.
+      // Only the exact empty tuple is supported: no hidden date value is read.
+      const emptyObserved = segments.length === 3 && segments.every((segment, index) =>
+        attr(segment, 'aria-valuenow') === null && attr(segment, 'aria-valuetext') === 'Empty'
+        && segment.textContent === ['YYYY','MM','DD'][index]);
+      const emptyPlaceholder = falseContainer && emptyObserved
+        && getComputedStyle(containers[0]).opacity === '0';
+      const safeDateVisible = el => {
+        if (safeVisible(el)) return true;
+        if (!emptyPlaceholder || !el || !containers[0].contains(el) || sensitiveContext(el)
+            || !el.getClientRects().length || el.closest('[hidden],[aria-hidden="true"]')) return false;
+        for (let node = el; node && node !== group; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          if (style.display === 'none' || style.visibility !== 'visible'
+              || (node !== containers[0] && Number(style.opacity || 1) === 0)) return false;
+        }
+        return safeVisible(group);
+      };
       if (segments.length !== 3 || containers.length !== 1 || buttons.length !== 1
           || !safeVisible(buttons[0]) || !group.contains(buttons[0])
           || (editable.length !== 3 && !falseContainer)
-          || !safeVisible(containers[0]) || containers[0].tagName !== 'DIV'
+          || !safeDateVisible(containers[0]) || containers[0].tagName !== 'DIV'
           || !hasClasses(containers[0], ['MuiPickersSectionList-root','MuiPickersInputBase-sectionsContainer'])) {
         reject('segmented_date_segments_unresolved');
         diagnoseSegments(name, wrapper, group, segments, containers, buttons, false, falseContainer); continue;
       }
       const container = containers[0];
-      const emptyObserved = segments.every((segment, index) =>
-        attr(segment, 'aria-valuenow') === null && attr(segment, 'aria-valuetext') === 'Empty'
-        && segment.textContent === ['YYYY','MM','DD'][index]);
       const parts = [];
       let valid = true;
       for (let index = 0; index < segments.length; index++) {
@@ -242,7 +258,7 @@ DATE_CAPTURE_HELPERS = r"""
             || section.parentElement !== container || segment.closest('[role="group"]') !== group
             || !hasClasses(section, ['MuiPickersSectionList-section'])
             || !hasClasses(segment, ['MuiPickersSectionList-sectionContent','MuiPickersInputBase-sectionContent'])
-            || !safeVisible(section) || !safeVisible(segment) || segment.children.length
+            || !safeDateVisible(section) || !safeDateVisible(segment) || segment.children.length
             || attr(segment, 'contenteditable') !== 'true' || attr(segment, 'aria-label') !== part
             || attr(segment, 'aria-labelledby') !== null || attr(segment, 'aria-hidden') !== null
             || attr(segment, 'style') !== null || attr(segment, 'aria-readonly') !== 'false'
@@ -258,7 +274,7 @@ DATE_CAPTURE_HELPERS = r"""
           aria_readonly:attr(segment,'aria-readonly'), aria_disabled:attr(segment,'aria-disabled'),
           tabindex:attr(segment,'tabindex'), aria_valuenow:attr(segment,'aria-valuenow'),
           aria_valuetext:attr(segment,'aria-valuetext'), text:segment.textContent,
-          visible:true, sensitive_context:false, child_element_count:segment.children.length});
+          visible:!emptyPlaceholder, sensitive_context:false, child_element_count:segment.children.length});
       }
       if (!valid) {
         reject('segmented_date_segments_unresolved');
@@ -282,7 +298,7 @@ DATE_CAPTURE_HELPERS = r"""
             aria_describedby:attr(group,'aria-describedby'), aria_required:attr(group,'aria-required'),
             visible:true, sensitive_context:false},
           wrapper:{tag:'div', classes:classes(wrapper), visible:true, sensitive_context:false},
-          container:{tag:'div', classes:classes(container), visible:true, sensitive_context:false},
+          container:{tag:'div', classes:classes(container), visible:!emptyPlaceholder, sensitive_context:false},
           segments:parts,
           binding:{document_named_input_count:1, document_input_id_count:1, document_label_id_count:1,
             document_labels_for_input_count:1, wrapper_input_count:1, wrapper_label_count:1, wrapper_group_count:1,
@@ -298,6 +314,11 @@ DATE_CAPTURE_HELPERS = r"""
           wrapper_contenteditable_true_count:3, wrapper_contenteditable_false_count:1,
           wrapper_contenteditable_other_count:0, container_parent_is_group:true,
           contenteditable_nodes_are_container_and_segments:true});
+      }
+      if (emptyPlaceholder) {
+        record.date_picker.schema_version = 'mui-segmented-date-dom/v3';
+        record.date_picker.shape_variant = 'empty-opacity-placeholder';
+        record.date_picker.container.placeholder_opacity = '0';
       }
       if (!exactTree(record)) { reject('segmented_date_raw_observation_omitted'); continue; }
       records.push(record);
@@ -392,7 +413,7 @@ def segmented_date_record_valid(field: dict) -> bool:
     data = field.get("date_picker")
     if (field.get("name") not in DATE_NAMES or field.get("tag") != "input" or field.get("type") != DATE_TYPE
             or not string(field.get("value")) or not identifier(field.get("id"))
-            or not isinstance(data, dict) or data.get("schema_version") not in (DATE_SCHEMA, DATE_FALSE_CONTAINER_SCHEMA)
+            or not isinstance(data, dict) or data.get("schema_version") not in (DATE_SCHEMA, DATE_FALSE_CONTAINER_SCHEMA, DATE_EMPTY_PLACEHOLDER_SCHEMA)
             or data.get("status") != "observed_supported"
             or any(data.get(key) is not False for key in
                    ("semantics_verified", "business_validation_verified", "requiredness_verified"))):
@@ -401,6 +422,14 @@ def segmented_date_record_valid(field: dict) -> bool:
         return False
     native, label, group, wrapper, container, binding = (data[k] for k in
         ("input", "label", "group", "wrapper", "container", "binding"))
+    empty_placeholder = data['schema_version'] == DATE_EMPTY_PLACEHOLDER_SCHEMA
+    if empty_placeholder and (data.get('empty_observed') is not True or field['value'] != ''
+            or container.get('placeholder_opacity') != '0'):
+        return False
+    if not empty_placeholder and 'placeholder_opacity' in container:
+        return False
+    def date_visible(node):
+        return (node.get('visible') is False and node.get('sensitive_context') is False) if empty_placeholder else visible(node)
     if (native.get("tag") != "input" or any(native.get(k) != field[k] for k in ("id", "name", "value"))
             or native.get("type_attribute", False) is not None or native.get("type_property") != "text"
             or native.get("aria_hidden") != "true" or native.get("tabindex") != "-1"
@@ -426,12 +455,14 @@ def segmented_date_record_valid(field: dict) -> bool:
     if (group.get("tag") != "div" or group.get("role") != "group" or not has_classes(group, _GROUP_CLASSES)
             or group.get("aria_labelledby") != label["id"] or group.get("aria_describedby", False) is not None
             or "aria_required" not in group or not optional(group["aria_required"]) or not visible(group)
-            or any(node.get("tag") != "div" or not visible(node) for node in (wrapper, container))
+            or wrapper.get('tag') != 'div' or not visible(wrapper)
+            or container.get('tag') != 'div' or not date_visible(container)
             or not has_classes(wrapper, _WRAPPER_CLASSES) or not has_classes(container, _CONTAINER_CLASSES)):
         return False
-    false_container = data["schema_version"] == DATE_FALSE_CONTAINER_SCHEMA
+    false_container = data["schema_version"] in (DATE_FALSE_CONTAINER_SCHEMA, DATE_EMPTY_PLACEHOLDER_SCHEMA)
     if false_container:
-        if (data.get("shape_variant") != DATE_FALSE_CONTAINER_VARIANT or container.get("contenteditable") != "false"
+        expected_variant = 'empty-opacity-placeholder' if empty_placeholder else DATE_FALSE_CONTAINER_VARIANT
+        if (data.get("shape_variant") != expected_variant or container.get("contenteditable") != "false"
                 or any(type(binding.get(k)) is not int or binding[k] != value for k, value in _FALSE_CONTAINER_COUNTS.items())
                 or any(binding.get(k) is not True for k in _FALSE_CONTAINER_RELATIONS)):
             return False
@@ -466,7 +497,7 @@ def segmented_date_record_valid(field: dict) -> bool:
                     or part.get('aria_valuetext') != 'Empty' or part.get('text') != ('YYYY','MM','DD')[index]))
                 or (not empty and (not string(part.get("aria_valuenow"))
                     or (part.get("aria_valuetext", False) is not None if index == 0 else not string(part.get("aria_valuetext")))))
-                or not visible(part) or type(part.get("child_element_count")) is not int or part["child_element_count"] != 0):
+                or not date_visible(part) or type(part.get("child_element_count")) is not int or part["child_element_count"] != 0):
             return False
     return True
 

@@ -220,6 +220,34 @@ class SegmentedDateRuntimeTests(unittest.TestCase):
             broken['date_picker']['empty_observed']=False
             self.assertFalse(segmented_date_record_valid(broken))
 
+    def test_empty_unfocused_placeholder_is_captured_without_accepting_hidden_values(self):
+        setup = '''
+          const input=document.querySelector('input[name="mandate_signed_date"]');
+          const container=input.parentElement.querySelector('.MuiPickersSectionList-root');
+          input.value=''; container.style.opacity='0';
+          container.querySelectorAll('[role="spinbutton"]').forEach((part,index)=>{
+            part.removeAttribute('aria-valuenow'); part.setAttribute('aria-valuetext','Empty');
+            part.textContent=['YYYY','MM','DD'][index];
+          });
+        '''
+        result = self.extract(fixture_html(false_container=True), setup=setup)
+        field = next(f for f in self.dates(result) if f['name']=='mandate_signed_date')
+        self.assertEqual(field['value'], '')
+        self.assertEqual(field['date_picker']['shape_variant'], 'empty-opacity-placeholder')
+        self.assertFalse(field['date_picker']['container']['visible'])
+        self.assertTrue(segmented_date_record_valid(field))
+        self.assertEqual(self.diagnostics(result), [])
+        from copy import deepcopy
+        for key, value in [('schema_version','mui-segmented-date-dom/v2'), ('empty_observed',False)]:
+            broken=deepcopy(field); broken['date_picker'][key]=value
+            self.assertFalse(segmented_date_record_valid(broken))
+        for extra in ["input.value='2040-01-02';", "container.style.display='none';",
+                      "container.setAttribute('aria-hidden','true');",
+                      "container.querySelector('[role=spinbutton]').textContent='2040';",
+                      "input.parentElement.style.opacity='0';"]:
+            rejected=self.extract(fixture_html(false_container=True), setup=setup+extra)
+            self.assertFalse(any(f['name']=='mandate_signed_date' for f in self.dates(rejected)))
+
     def test_false_container_variant_matches_explicit_saved_evidence(self):
         result = self.extract(fixture_html(false_container=True))
         dates = self.dates(result)
