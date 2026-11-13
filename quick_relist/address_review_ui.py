@@ -2,7 +2,7 @@
 from copy import deepcopy
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
                               QLabel, QLineEdit, QScrollArea, QVBoxLayout, QWidget)
-from .address import propose_address_fields
+from .address import REGISTERED_ADDRESS_KEYS, propose_address_fields
 
 LABELS = {'country': 'Country', 'suburb': 'Suburb', 'street_number': 'Street number',
           'street_name': 'Street name', 'street_type': 'Street type', 'estate_name': 'Estate name',
@@ -20,11 +20,12 @@ class VerifyAddressDialog(QDialog):
         self.proposal = propose_address_fields(capture)
         self.widgets = {}
         self.original = {}
+        self.preserved_paths = set()
         layout = QVBoxLayout(self)
         title = QLabel(f'Verify address · {reference}')
         title.setStyleSheet('font-size:22px;font-weight:600;')
         layout.addWidget(title)
-        message = QLabel('These values came from the original listing. Keep them or make your changes below. Saving this review does not change Hub.')
+        message = QLabel('Review the address below. Erf and registered scheme numbers stay as recorded on the original listing. Saving this review does not change Hub.')
         message.setWordWrap(True)
         layout.addWidget(message)
         if self.proposal['missing'] or self.proposal['ambiguous']:
@@ -45,6 +46,9 @@ class VerifyAddressDialog(QDialog):
             previous = (revision or {}).get('edited', {}).get(path, original)
             if (revision or {}).get('original', {}).get(path, original) != original:
                 previous = original
+            if key in REGISTERED_ADDRESS_KEYS:
+                previous = original
+                self.preserved_paths.add(path)
             if original.get('type') == 'checkbox':
                 widget = QCheckBox()
                 widget.setChecked(previous['checked'])
@@ -54,6 +58,9 @@ class VerifyAddressDialog(QDialog):
                     # Keep the observed country identity. Country changes need
                     # Hub's full country/suburb selection flow, not a typed ID.
                     widget.setReadOnly(True)
+                if key in REGISTERED_ADDRESS_KEYS:
+                    widget.setReadOnly(True)
+                    widget.setToolTip('Kept from the original listing.')
                 if key == 'id_registration_number':
                     widget.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
             widget.setAccessibleName(label)
@@ -71,6 +78,8 @@ class VerifyAddressDialog(QDialog):
     def edited_address(self):
         result = deepcopy(self.original)
         for path, widget in self.widgets.items():
+            if path in self.preserved_paths:
+                continue
             if isinstance(widget, QCheckBox):
                 result[path]['checked'] = widget.isChecked()
             else:

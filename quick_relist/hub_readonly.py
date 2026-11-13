@@ -22,6 +22,10 @@ import zipfile
 MANAGE_URL = "https://hub.remax.co.za/app/listings"
 
 
+class EditorNavigationInProgress(ValueError):
+    """The same listing changed editor sections during an identity read."""
+
+
 
 IDENTITY_SCRIPT = r"""
 const wanted = arguments[0].toUpperCase();
@@ -649,9 +653,13 @@ class ReadOnlyHub:
             if parse_editor_url(url)["listing_id"] != expected_listing_id:
                 raise ValueError("The current editor does not match the intended listing")
             result = self.driver.execute_script(IDENTITY_SCRIPT, reference)
-            if (self.driver.current_window_handle != handle or tuple(sorted(self.driver.window_handles)) != handles
-                    or self.driver.current_url != url):
+            if self.driver.current_window_handle != handle or tuple(sorted(self.driver.window_handles)) != handles:
                 raise ValueError("The editor changed during identity verification")
+            final_url = self.driver.current_url
+            if final_url != url:
+                if parse_editor_url(final_url)['listing_id'] != expected_listing_id:
+                    raise ValueError("The editor changed during identity verification")
+                raise EditorNavigationInProgress('The same listing is changing editor sections.')
         except ValueError:
             raise
         except Exception:

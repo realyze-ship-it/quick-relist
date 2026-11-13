@@ -6,6 +6,9 @@ This mapping never approves an address or enables a listing operation.
 from __future__ import annotations
 from copy import deepcopy
 
+# Registered property identifiers stay exactly as captured during relisting.
+REGISTERED_ADDRESS_KEYS = frozenset(('erf_number', 'ss_number'))
+
 # Semantic key -> exact observed DOM name or id. Suburb and the visibility
 # checkbox are matched by their observed accessible labels instead.
 _ADDRESS_NAMES = {

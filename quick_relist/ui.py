@@ -1211,6 +1211,9 @@ class MainWindow(QMainWindow):
         self.record_recovery_button = _button('Record work completed in Hub', self._record_hub_recovery)
         self.record_recovery_button.hide()
         details.addWidget(self.record_recovery_button)
+        self.check_existing_copy_button = _button('Check existing replacement', self._check_existing_copy)
+        self.check_existing_copy_button.hide()
+        details.addWidget(self.check_existing_copy_button)
         self.collection_summary = _label('Collect this batch to load its details and original photos.', 'muted', True)
         details.addWidget(self.collection_summary)
         self.diagnostics_toggle = QCheckBox('Show collection tools')
@@ -1604,6 +1607,7 @@ class MainWindow(QMainWindow):
         self.verify_captured_address_button.setEnabled(False)
         self.check_publication_button.hide()
         self.record_recovery_button.hide()
+        self.check_existing_copy_button.hide()
         self.collection_summary.setText('Collect this batch to load its details and original photos.')
         if job and self.drafts:
             from .collection import latest_collection
@@ -1685,6 +1689,10 @@ class MainWindow(QMainWindow):
                 self.collection_summary.setText('This run stopped. The activity record shows earlier observations, not the current Hub state. Check the original and any existing replacement before continuing. Starting another batch will not bypass this record.')
                 self.record_recovery_button.setVisible(True)
                 self.record_recovery_button.setEnabled(not self._is_busy)
+                from .creation_recovery import can_check_creation
+                if can_check_creation(self.runs.get(job['id'])):
+                    self.check_existing_copy_button.setVisible(True)
+                    self.check_existing_copy_button.setEnabled(not self._is_busy and self.hub is not None)
             if run_status.get('state') in ('publication_pending','manual_publication_pending'):
                 self.detail_state.setText('Waiting for portals · ' + run_status['target_reference'])
                 names={'website':'RE/MAX','p24':'Property24','pp':'Private Property','global':'RE/MAX Global',
@@ -1778,6 +1786,32 @@ class MainWindow(QMainWindow):
             self._show_error('Check the recovery details', str(exc))
         except Exception as exc:
             self._show_error('Recovery was not recorded', str(exc))
+
+    @Slot()
+    def _check_existing_copy(self):
+        if self._is_busy or not self.selected_job or self.runs is None or self.drafts is None or self.hub is None:
+            return
+        from .creation_recovery import can_check_creation, check_existing_replacement, recovery_dialog
+        from .live_relist_ui import HubRelistUI
+        from .hub_login import wait_for_hub_login
+        job = deepcopy(self.selected_job)
+        run = self.runs.get(job['id'])
+        if not can_check_creation(run):
+            return
+        dialog, values = recovery_dialog(run['binding'], self)
+        dialog.setStyleSheet(STYLE)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        reference, listing_id = values()
+        stop = threading.Event()
+        def check():
+            if self.hub.driver is None:
+                self._safe_readonly_call(self.hub.open, opening=True)
+            wait_for_hub_login(self.hub.driver, cancelled=stop.is_set, progress=self.collection_progress.emit)
+            provider = HubRelistUI(self.hub, self.media_root, clipboard=self._description_clipboard, cancelled=stop.is_set)
+            return check_existing_replacement(self.drafts, self.runs, provider, job, reference, listing_id, cancelled=stop.is_set)
+        self._run_operation('Checking the original and the existing replacement…', check,
+                            'Existing copy verified. Choose Relist reviewed batch to continue that copy.', cancel=stop.set)
 
     @Slot()
     def _check_publication(self):

@@ -11,6 +11,9 @@ A Windows app for collecting Hub listings, reviewing each address, and processin
 3. The app reads each matching listing, descriptions, agents, supported room options, original photos and portal destinations. It processes references sequentially and checks the photo pack against the downloaded originals. **Resume collection** uses an existing browser or opens one if necessary and waits for sign-in in the same way.
 4. Review the prefilled **Verify address** form for each listing, make any corrections and save the review. This saves a local review only.
 5. **Relist reviewed batch** first checks the collected data and shows the reviewed references and addresses for confirmation. For each supported listing, it prepares and checks an unsaved form, rechecks the source, removes the original from its portals, archives sales as **Listing has been cancelled → Mandate expired** and rentals as **Listing has been withdrawn**, saves the replacement, copies and checks its content, then publishes to the original destinations.
+
+If Save stops after creating a copy, **Check existing replacement** can verify its RXCU and Hub edit URL against the archived original and reviewed particulars before accepting that existing empty, unpublished copy. The original failed Save stays in the activity record. This read-only recovery check never creates another listing.
+
 6. A submitted portal request remains pending until Hub returns its publication identifier. **Check publication** reads the existing requests without sending them again.
 
 Keep the app's Chrome window open while processing. Switching to another ordinary browser does not transfer the app's signed-in session. Login and OTP are entered directly in Hub; the app does not request them.
@@ -20,6 +23,7 @@ If an original brochure summary exceeds Hub's current 250-character limit, the a
 ## Current coverage and limits
 
 - Sale and rental use their own prices and status controls. On the operator's requested date rule, new runs set **Date listed** and **On market since** to the South African relist day and **Listing expiry** six calendar months later. Sale **Mandate signed date** follows Date listed and **Mandate expiry** follows Listing expiry. Rental **Occupation date** and rental period stay exactly as collected. If the target month has fewer days, expiry uses its last day.
+- Erf and registered scheme numbers stay exactly as captured, including their original formatting. They are read-only in Verify address; street, unit and door fields remain editable. An older review that changed a registered identifier must be reopened and saved before relisting.
 - The source backup retains every original date. The replacement's date plan is recorded before removal and checked after saving. An interrupted run keeps that recorded plan on resume; a run started by an older build retains its original date contract.
 - The collector includes the observed lifestyle and General Property Features checkboxes, primary and secondary agents, rich description, photo captions, and ten room categories. Every nonzero supported room must have its dialog captured before relisting.
 - The current writer requires empty custom-feature, party, document and note tables. Listings with related records or floorplans stop before the original is removed. Unsupported or missing fields also stop the run.

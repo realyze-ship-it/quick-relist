@@ -172,7 +172,11 @@ class HubRelistUI:
                 def ready():
                     if self.driver.current_window_handle != self.current['handle']:
                         raise CopyStopped('The controlled Hub tab changed during loading.')
-                    observed = self.hub._read_editor_identity(self.current['reference'], self.current['listing_id'])
+                    from .hub_readonly import EditorNavigationInProgress
+                    try:
+                        observed = self.hub._read_editor_identity(self.current['reference'], self.current['listing_id'])
+                    except EditorNavigationInProgress:
+                        return False
                     for prefix in ('outer', 'inner'):
                         count = observed.get(prefix + '_count')
                         if count and (count != 1 or observed.get(prefix + '_matches') is not True):
@@ -249,7 +253,11 @@ class HubRelistUI:
         self.wait(lambda: bool(self.driver.find_elements('css selector','main button[role="tab"]')),
                   'The saved listing did not finish loading.')
         def identity_ready():
-            observed = self.hub._read_editor_identity(reference, binding['listing_id'])
+            from .hub_readonly import EditorNavigationInProgress
+            try:
+                observed = self.hub._read_editor_identity(reference, binding['listing_id'])
+            except EditorNavigationInProgress:
+                return False
             # Tabs can appear before the listing headings after a reload.
             # Wait for absent headings, but never wait away a contradiction.
             for prefix in ('outer', 'inner'):
@@ -345,6 +353,9 @@ class HubRelistUI:
 
     @diagnosed
     def check_unarchived_source(self, plan):
+        return self._check_source_archive(plan, archived=False)
+
+    def _check_source_archive(self, plan, *, archived, restore=True):
         from selenium.webdriver.common.keys import Keys
         self.current = None
         reference, ident = plan['source_reference'], plan['source_listing_id']
@@ -363,19 +374,22 @@ class HubRelistUI:
         menu = self.wait(lambda:next((m for m in self.driver.find_elements('css selector','[role="listbox"]')
                     if m.is_displayed() and m.get_attribute('id') == control.get_attribute('aria-controls')),None), 'The original action menu did not open.')
         kind = '2' if plan['particulars']['mode']=='rent' else '1'
-        expected = f'https://hub.remax.co.za/app/listings/archive/{ident}?unarchive=false&type={kind}'
+        expected = f'https://hub.remax.co.za/app/listings/archive/{ident}?unarchive={str(archived).lower()}&type={kind}'
+        label = 'Unarchive Listing' if archived else 'Archive Listing'
         choices = [a for a in menu.find_elements('tag name','a') if a.is_displayed()
-                   and a.get_attribute('textContent').strip()=='Archive Listing' and a.get_attribute('href')==expected]
-        if len(choices)!=1 or any('unarchive=true' in (a.get_attribute('href') or '') for a in menu.find_elements('tag name','a')):
-            raise CopyStopped('The original is already archived or its archive status is unclear. No archive action was repeated.')
+                   and a.get_attribute('textContent').strip()==label and a.get_attribute('href')==expected]
+        opposite = 'unarchive=' + str(not archived).lower()
+        if len(choices)!=1 or any(opposite in (a.get_attribute('href') or '') for a in menu.find_elements('tag name','a')):
+            raise CopyStopped('The original archive status does not match the expected state. No archive action was repeated.')
         from .hub_readonly import ROW_BINDING_SCRIPT
         if self.driver.execute_script(ROW_BINDING_SCRIPT, rows[0], control, menu, choices[0], reference) is not True:
             raise CopyStopped('The original row changed during the archive check.')
         # MUI makes the background combobox inert while its menu is open.
         # Dismiss from the verified menu link without activating that link.
         choices[0].send_keys(Keys.ESCAPE)
-        self.bind(self.source)
-        return {'archived':False,'reference':reference,'listing_id':ident,
+        if restore:
+            self.bind(self.source)
+        return {'archived':archived,'reference':reference,'listing_id':ident,
                 'reconciled_by':'fresh_manage_listing_archive_action'}
 
     @diagnosed
@@ -567,6 +581,48 @@ class HubRelistUI:
         return target
 
     @diagnosed
+    def check_created_copy(self, collection, plan, reference, listing_id):
+        reference = normalize_rxcu(reference)
+        if reference == plan['source_reference'] or listing_id == plan['source_listing_id']:
+            raise CopyStopped('The existing replacement must be distinct from the original.')
+        # Archived rows may no longer offer Edit Listing. Verify their exact
+        # Unarchive link first, then reopen the previously captured numeric ID.
+        self._check_source_archive(plan, archived=True, restore=False)
+        source_reference, source_id = plan['source_reference'], plan['source_listing_id']
+        binding = self.hub.editor_bindings.get(source_reference)
+        if binding and binding['listing_id'] != source_id:
+            raise CopyStopped('The archived original has a conflicting editor identity.')
+        if not binding or binding['handle'] not in self.driver.window_handles:
+            self.driver.switch_to.new_window('tab')
+            self.driver.get('https://hub.remax.co.za/app/listings/edit/' + source_id)
+            self.hub.editor_bindings[source_reference] = {'listing_id':source_id, 'handle':self.driver.current_window_handle}
+        self.check_removed_source(collection, plan)
+        self.source = deepcopy(self.current)
+        self.current = None
+        self.hub.search_reference(reference, all_listing_types=True)
+        _wait_search(self.hub, reference, self.cancelled)
+        self.hub.open_listing_editor(reference, timeout=30)
+        if self.hub.editor_bindings[reference]['listing_id'] != listing_id:
+            raise CopyStopped('The replacement reference and Hub edit URL do not identify the same listing.')
+        actual = self.captured_editor(reference)
+        self._verify_particulars(actual, plan)
+        pages = {p['page_key']: p for p in actual['pages']}
+        media = media_plan(pages['media'])
+        if (pages['media'].get('media') or pages['media'].get('photo_captions')
+                or any(value.strip() for key, value in media.items() if key != 'description_html')):
+            raise CopyStopped('This copy already has media or descriptions. No existing content was overwritten.')
+        self.tab('Portals')
+        portals = read_portals(self.driver, guard=self.guard)
+        if (portals['published'] or any(p['state'] in ('published', 'pending') for p in portals['portals'].values())
+                or any(portals['portals'][d]['state'] != 'unpublished' for d in plan['destinations'])):
+            raise CopyStopped('The existing copy is published or has a pending portal request.')
+        return {**deepcopy(self.current), 'source_reference': plan['source_reference'],
+                'source_listing_id': plan['source_listing_id'],
+                'reconciled_by': 'fresh_archived_source_and_empty_replacement_read',
+                'source_removed': True, 'source_archived': True, 'particulars_verified': True,
+                'empty_media': True, 'unpublished': True}
+
+    @diagnosed
     def copy_content(self, target, plan, runs, run_id):
         # Keep the original commission facts; rental has no Deal Particulars.
         if plan['deal'] is not None:
@@ -712,6 +768,17 @@ class HubRelistUI:
             raise CopyStopped('The suburb search did not return to its saved value.')
         return observed
 
+    def _verify_particulars(self, actual, plan):
+        proposed = propose_address_fields(actual)
+        original = {v['path']:v['field'] for v in proposed['fields'].values()}
+        copied = particulars_plan(actual,{'original':original,'edited':deepcopy(original)})
+        copied, suburb_label = resolve_saved_suburb(plan['particulars'], copied, self.selected_suburb_label)
+        if not same_particulars(plan['particulars'],copied):
+            raise CopyStopped('Saved particulars or room options differ. The replacement remains unpublished.')
+        pages = {p['page_key']:p for p in actual['pages']}
+        require_empty_related(pages['details'])
+        return suburb_label
+
     @diagnosed
     def verify_content(self, target, plan):
         # Open by the new reference through Manage Listings, establishing the
@@ -721,14 +788,8 @@ class HubRelistUI:
         _wait_search(self.hub,target['reference'],self.cancelled)
         self.hub.open_listing_editor(target['reference'],timeout=30)
         actual = self.captured_editor(target['reference'])
-        proposed = propose_address_fields(actual)
-        original = {v['path']:v['field'] for v in proposed['fields'].values()}
-        copied = particulars_plan(actual,{'original':original,'edited':deepcopy(original)})
-        copied, suburb_label = resolve_saved_suburb(plan['particulars'], copied, self.selected_suburb_label)
-        if not same_particulars(plan['particulars'],copied):
-            raise CopyStopped('Saved particulars or room options differ. The replacement remains unpublished.')
+        suburb_label = self._verify_particulars(actual, plan)
         pages = {p['page_key']:p for p in actual['pages']}
-        require_empty_related(pages['details'])
         if media_plan(pages['media'])!=plan['media']:
             raise CopyStopped('Saved descriptions differ. The replacement remains unpublished.')
         photos = download_originals(pages['media']['media'],target['listing_id'],self.media_root,cancelled=self.cancelled)

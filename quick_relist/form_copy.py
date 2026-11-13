@@ -10,7 +10,7 @@ from datetime import date
 import re
 import time
 
-from .address import propose_address_fields
+from .address import REGISTERED_ADDRESS_KEYS, propose_address_fields
 from .business_fields import LIFESTYLE_FIELDS, GENERAL_FIELDS
 from .date_capture import DATE_NAMES, segmented_date_record_valid
 
@@ -69,6 +69,10 @@ def particulars_plan(capture, address_revision):
     for path, field in address_revision['edited'].items():
         if set(field) != set(original[path]) or any(field[k] != original[path][k] for k in field if k not in ('value', 'checked')):
             raise CopyStopped('Address control metadata changed. Review the address again.')
+    for key in REGISTERED_ADDRESS_KEYS:
+        path = proposal['fields'][key]['path']
+        if address_revision['edited'][path] != original[path]:
+            raise CopyStopped('Erf and registered scheme numbers must match the original. Open Verify address and save the review again before relisting.')
     controls, ignored = [], []
     for index, source in enumerate(details['fields']):
         field = deepcopy(address_revision['edited'].get(f'pages/{page_index}/fields/{index}', source))

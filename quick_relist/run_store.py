@@ -204,6 +204,48 @@ class RunStore:
                               (_now(), encoded, run_id, action))
         return receipt
 
+    def reconcile_created_copy(self, run_id, receipt):
+        """Accept a fully checked existing empty copy without replaying Save."""
+        checks = ('source_removed', 'source_archived', 'particulars_verified', 'empty_media', 'unpublished')
+        if (receipt.get('reconciled_by') != 'fresh_archived_source_and_empty_replacement_read'
+                or any(receipt.get(k) is not True for k in checks)
+                or not isinstance(receipt.get('handle'), str) or not receipt['handle']
+                or not isinstance(receipt.get('listing_id'), str)
+                or not re.fullmatch(r'[0-9]+', receipt['listing_id'])):
+            raise RunNeedsReview('A complete fresh check of the original and existing copy is required.')
+        with self._lock, self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            row = self.conn.execute('SELECT job_id,binding_json FROM relist_runs WHERE id=?', (run_id,)).fetchone()
+            if not row:
+                raise RunNeedsReview('The original run is unavailable.')
+            from .creation_recovery import can_check_creation
+            run = self.get(row['job_id'])
+            binding = run['binding']
+            if (not can_check_creation(run)
+                    or receipt.get('source_reference') != binding['reference']
+                    or receipt.get('source_listing_id') != binding['listing_id']
+                    or _source_key(receipt.get('reference', '')) == _source_key(binding['reference'])
+                    or receipt['listing_id'] == binding['listing_id']):
+                raise RunNeedsReview('The existing-copy check does not match this stopped Save.')
+            for other in self.conn.execute("SELECT run_id,receipt_json FROM relist_actions WHERE action='create' AND state='done' AND run_id!=?", (run_id,)):
+                target = json.loads(other['receipt_json'])
+                if (target.get('listing_id') == receipt['listing_id'] or
+                        target.get('reference') and _source_key(target['reference']) == _source_key(receipt['reference'])):
+                    raise RunNeedsReview('This replacement already belongs to another run.')
+            for event in self.conn.execute("SELECT data_json FROM relist_events WHERE run_id!=? AND kind IN ('manual_recovery','manual_publication_check','status')", (run_id,)):
+                target = json.loads(event['data_json'])
+                if (target.get('target_listing_id') == receipt['listing_id'] or
+                        target.get('target_reference') and _source_key(target['target_reference']) == _source_key(receipt['reference'])):
+                    raise RunNeedsReview('This replacement already belongs to another run.')
+            prior = next(a for a in run['actions'] if a['action'] == 'create')
+            self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
+                              (run_id, _now(), 'creation_reconciled', _json({'prior_action': prior, 'observed': receipt})))
+            self.conn.execute("UPDATE relist_actions SET state='done',finished_at=?,receipt_json=? WHERE run_id=? AND action='create'",
+                              (_now(), _json(receipt), run_id))
+            self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
+                              (run_id, _now(), 'status', _json({'state':'created', 'original_archived':True,
+                               'target_reference':receipt['reference'], 'target_listing_id':receipt['listing_id']})))
+
     def reconcile_archive_not_applied(self, run_id, receipt):
         """Allow archive only after a freshly matched row still offers Archive."""
         if receipt.get('reconciled_by') != 'fresh_manage_listing_archive_action' or receipt.get('archived') is not False:

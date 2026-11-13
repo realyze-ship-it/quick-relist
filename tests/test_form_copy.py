@@ -73,6 +73,31 @@ def test_stale_address_review_is_rejected_before_any_form_input():
         particulars_plan(source, review)
 
 
+@pytest.mark.parametrize('name', ['lightstone_erf_number', 'scheme_number'])
+@pytest.mark.parametrize('changed', ['5X', '', '999'])
+def test_old_registered_number_override_stops_before_form_preparation(name, changed):
+    source, _ = source_and_review()
+    next(f for f in source['pages'][0]['fields'] if f.get('name') == name)['value'] = '58'
+    original = {v['path']: v['field'] for v in propose_address_fields(source)['fields'].values()}
+    review = {'original': deepcopy(original), 'edited': deepcopy(original)}
+    path = next(p for p, f in review['edited'].items() if f.get('name') == name)
+    review['edited'][path]['value'] = changed
+    with pytest.raises(CopyStopped, match='Erf and registered scheme numbers must match'):
+        particulars_plan(source, review)
+
+
+def test_registered_identifier_format_is_preserved_exactly():
+    source, _ = source_and_review()
+    fields = source['pages'][0]['fields']
+    next(f for f in fields if f.get('name') == 'lightstone_erf_number')['value'] = 'RE/58'
+    next(f for f in fields if f.get('name') == 'scheme_number')['value'] = '712/2021'
+    original = {v['path']: v['field'] for v in propose_address_fields(source)['fields'].values()}
+    plan = particulars_plan(source, {'original': deepcopy(original), 'edited': deepcopy(original)})
+    values = {c['key']: c['value'] for c in plan['controls']}
+    assert values['lightstone_erf_number'] == 'RE/58'
+    assert values['scheme_number'] == '712/2021'
+
+
 def test_disagreement_between_date_input_and_display_stops_copy():
     source, review = source_and_review()
     next(f for f in source['pages'][0]['fields'] if f.get('name') == 'mandate_expiry')['value'] = '2098-11-19'
