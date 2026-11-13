@@ -2,7 +2,7 @@
 
 A Windows app for collecting Hub listings, reviewing each address, and processing a batch one listing at a time.
 
-**Pilot status:** the Windows app has processed an authorized rental through collection, reviewed address, portal removal, withdrawal, creation, all 13 original photos, saved-content comparison and confirmed publication to all four original portals. Portal completion is recorded only when Hub returns the destination identifiers. An installed-app sale run also removed and archived its source, created the reviewed replacement with 12 original photos, and passed full saved-content verification after a restart for a commission row-order fix. It submitted each original portal request once; three destinations are confirmed and Private Property is in moderation. This is a recovered sale run, not an uninterrupted mixed-batch qualification. See [live validation](LIVE_TEST_READINESS.md) for the evidence and remaining limits.
+**Pilot status:** the Windows app has processed an authorized rental through collection, reviewed address, portal removal, withdrawal, creation, all 13 original photos, saved-content comparison and confirmed publication to all four original portals. Portal completion is recorded only when Hub returns the destination identifiers. An installed-app sale run also removed and archived its source, created the reviewed replacement with 12 original photos, and passed full saved-content verification after a restart for a commission row-order fix. It submitted each original portal request once; all four destinations, including Private Property after moderation, are confirmed in Hub. This is a recovered sale run, not an uninterrupted mixed-batch qualification. See [live validation](LIVE_TEST_READINESS.md) for the evidence and remaining limits.
 
 ## Workflow
 
@@ -54,6 +54,6 @@ python -m pip install pyinstaller==6.22.3
 .\packaging\build_windows.ps1
 ```
 
-This produces `dist\QuickRelist\QuickRelist.exe`. It is a portable pilot build, not a signed installer. Remaining release work includes final sale portal confirmation, an uninterrupted live multi-listing batch, broader interrupted-operation recovery and support for currently excluded related records/floorplans.
+This produces `dist\QuickRelist\QuickRelist.exe`. It is a portable pilot build, not a signed installer. Remaining release work includes an uninterrupted live multi-listing batch, broader interrupted-operation recovery and support for currently excluded related records/floorplans.
 
 The build isolates DLL discovery from unrelated tools on PATH and includes Selenium's dynamic modules and generated download-protocol version directories. `QuickRelist.exe --check-package <report.json>` checks the actual Chrome exports, download-event imports and protocol-version fallback, an offline Qt window and the included driver manager without opening Hub or saved user data. `--check-browser-tools <report.json>` additionally checks local driver discovery, its version-only process and connection configuration without starting Chrome. These checks do not replace live Hub tests. Startup failures are written privately to `%LOCALAPPDATA%\QuickRelist\diagnostics\startup-error.txt`; read-only Hub errors retain message-free local error locations and a diagnostic reference.
