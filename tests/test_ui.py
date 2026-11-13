@@ -130,6 +130,56 @@ def test_uncertain_save_label_does_not_present_old_archive_receipt_as_current_st
     assert ui._relist_state_label(status) == 'Stopped · replacement Save needs checking'
 
 
+def test_resume_callback_cannot_edit_address_of_started_run(window, monkeypatch):
+    from quick_relist import address_review_ui
+    window.selected_job = {'id': 'started-job'}
+    window.drafts = object()
+    window.runs = SimpleNamespace(get=lambda job_id: {'id': 'existing-run'})
+    monkeypatch.setattr(address_review_ui, 'VerifyAddressDialog', lambda *args: pytest.fail('Started address is locked'))
+    window._verify_captured_address()
+    window.selected_job = None
+    window.drafts = window.runs = None
+
+
+def test_recovery_publication_check_opens_login_and_reads_without_publishing(application, window, monkeypatch):
+    from quick_relist import hub_login, live_relist_ui
+    from quick_relist.manual_recovery import CONFIRMATIONS
+    from quick_relist.run_store import RunStore
+    _add_batch(window, 'RXCU1000')
+    job = window.jobs[0]
+    runs = RunStore(':memory:')
+    run = runs.start(job['id'], source_capture_id='capture', address_revision_id='review',
+                     reference=job['rxcu'], listing_id='123456')
+    def failed_save(): raise TimeoutError()
+    with pytest.raises(TimeoutError): runs.perform_once(run, 'create', failed_save)
+    runs.record_manual_recovery(job['id'], source_capture_id='capture', reference='RXCU2000',
+        editor_url='https://hub.remax.co.za/app/listings/edit/654321/portals', destinations=['website'],
+        portals={'website': {'state': 'pending', 'id': None}}, confirmations=dict.fromkeys(CONFIRMATIONS, True))
+    calls = []
+    hub = SimpleNamespace(driver=None)
+    def open_hub():
+        calls.append('open')
+        hub.driver = object()
+    hub.open = open_hub
+    monkeypatch.setattr(hub_login, 'wait_for_hub_login', lambda *a, **kw: calls.append('wait_for_login'))
+    class ReadOnlyProvider:
+        def __init__(self, *a, **kw): pass
+        def recheck_publication(self, status):
+            calls.append('read_existing_replacement')
+            assert status['target_reference'] == 'RXCU2000'
+            return {'complete': True, 'portals': {'website': {'state': 'published', 'id': '654321'}}}
+    monkeypatch.setattr(live_relist_ui, 'HubRelistUI', ReadOnlyProvider)
+    window.hub, window.runs, window.selected_job = hub, runs, job
+    window._check_publication()
+    _finish_worker(application, window)
+    assert calls == ['open', 'wait_for_login', 'read_existing_replacement']
+    assert ui._run_status(runs, job)['state'] == 'manual_completed'
+    assert runs.get(job['id'])['actions'][0]['state'] == 'uncertain'
+    assert window.test_errors == []
+    window.hub = window.runs = None
+    runs.close()
+
+
 def test_create_batch_persists_only_local_references(window):
     batch_id = _add_batch(window)
     assert batch_id

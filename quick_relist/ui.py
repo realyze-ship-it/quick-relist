@@ -261,6 +261,10 @@ def _run_status(runs, job):
 
 
 def _relist_state_label(status):
+    if status.get('state') == 'manual_completed':
+        return 'Completed in Hub · ' + status['target_reference']
+    if status.get('state') == 'manual_publication_pending':
+        return 'Hub recovery · waiting for portals'
     if 'create' in status.get('unresolved_actions', []):
         return 'Stopped · replacement Save needs checking'
     if status.get('state')=='published':
@@ -1204,6 +1208,9 @@ class MainWindow(QMainWindow):
         self.check_publication_button = _button('Check publication', self._check_publication)
         self.check_publication_button.hide()
         details.addWidget(self.check_publication_button)
+        self.record_recovery_button = _button('Record work completed in Hub', self._record_hub_recovery)
+        self.record_recovery_button.hide()
+        details.addWidget(self.record_recovery_button)
         self.collection_summary = _label('Collect this batch to load its details and original photos.', 'muted', True)
         details.addWidget(self.collection_summary)
         self.diagnostics_toggle = QCheckBox('Show collection tools')
@@ -1490,11 +1497,11 @@ class MainWindow(QMainWindow):
         self.stat_values["reviewed"].setText(str(sum(bool(job.get("approved")) or bool((collected_views[job['id']] or {}).get('reviewed')) for job in self.jobs)))
         run_statuses = {job['id']: _run_status(self.runs, job) for job in self.jobs}
         pending_jobs = [j for j in self.jobs if j.get('state')!='cancelled'
-                        and (run_statuses[j['id']] or {}).get('state')!='published']
+                        and (run_statuses[j['id']] or {}).get('state') not in ('published','manual_completed')]
         self.relist_batch_button.setEnabled(bool(pending_jobs) and self.runs is not None
             and getattr(self.hub,'driver',None) is not None and not self._is_busy
             and all(bool((collected_views[j['id']] or {}).get('reviewed')) for j in pending_jobs))
-        self.stat_values["live"].setText(str(sum(job.get("state") == "live" or (run_statuses[job['id']] or {}).get('state') == 'published' for job in self.jobs)))
+        self.stat_values["live"].setText(str(sum(job.get("state") == "live" or (run_statuses[job['id']] or {}).get('state') in ('published','manual_completed') for job in self.jobs)))
         batch = next((item for item in self.batches if str(item.get("id")) == self.batch_id), None)
         if batch:
             self.queue_subtitle.setText(f"Saved {_timestamp(batch.get('created_at'))} · {len(self.jobs)} listing{'s' if len(self.jobs) != 1 else ''}")
@@ -1596,6 +1603,7 @@ class MainWindow(QMainWindow):
         job = self.selected_job
         self.verify_captured_address_button.setEnabled(False)
         self.check_publication_button.hide()
+        self.record_recovery_button.hide()
         self.collection_summary.setText('Collect this batch to load its details and original photos.')
         if job and self.drafts:
             from .collection import latest_collection
@@ -1675,7 +1683,9 @@ class MainWindow(QMainWindow):
             self.detail_state.setText(_relist_state_label(run_status))
             if run_status.get('state') == 'needs_review':
                 self.collection_summary.setText('This run stopped. The activity record shows earlier observations, not the current Hub state. Check the original and any existing replacement before continuing. Starting another batch will not bypass this record.')
-            if run_status.get('state')=='publication_pending':
+                self.record_recovery_button.setVisible(True)
+                self.record_recovery_button.setEnabled(not self._is_busy)
+            if run_status.get('state') in ('publication_pending','manual_publication_pending'):
                 self.detail_state.setText('Waiting for portals · ' + run_status['target_reference'])
                 names={'website':'RE/MAX','p24':'Property24','pp':'Private Property','global':'RE/MAX Global',
                        'iol':'IOL Property','immoafrica':'ImmoAfrica','flow':'Flow Living'}
@@ -1685,7 +1695,11 @@ class MainWindow(QMainWindow):
                 self.collection_summary.setText('Confirmed: '+(', '.join(confirmed) or 'none yet')+
                     '. Waiting: '+(', '.join(waiting) or 'none')+'. Original archived; replacement checked.')
                 self.check_publication_button.setVisible(True)
-                self.check_publication_button.setEnabled(not self._is_busy and getattr(self.hub,'driver',None) is not None)
+                self.check_publication_button.setEnabled(not self._is_busy and self.hub is not None)
+                if run_status.get('mode') == 'manual_recovery':
+                    self.collection_summary.setText('Recovery recorded from your checks in Hub. Confirmed: '+(', '.join(confirmed) or 'none yet')+'. Waiting: '+(', '.join(waiting) or 'none')+'. Earlier attempts remain in the activity record.')
+            if run_status.get('state') == 'manual_completed':
+                self.collection_summary.setText('Replacement completed directly in Hub and recorded locally. Earlier attempts are retained and will not be repeated.')
         if run_status and run_status.get('state') == 'published':
             self.detail_state.setText('Relisted · ' + run_status['target_reference'])
             self.collection_summary.setText('Replacement published. Original archived. Saved source details and photos are retained locally.')
@@ -1739,21 +1753,55 @@ class MainWindow(QMainWindow):
             raise RuntimeError('The formatted description could not be prepared for Hub.')
 
     @Slot()
+    def _record_hub_recovery(self):
+        if self._is_busy or not self.selected_job or self.runs is None or self.drafts is None:
+            return
+        from .collection import latest_collection
+        from .manual_recovery import recovery_dialog
+        from .portal_ui import active_destinations
+        job = self.selected_job
+        if (_run_status(self.runs, job) or {}).get('state') != 'needs_review':
+            return
+        saved = latest_collection(self.drafts, job['id'])
+        if not saved:
+            return
+        try:
+            destinations = active_destinations(saved['capture']['portal_observation'])
+            dialog, values = recovery_dialog(job['rxcu'], destinations, self)
+            dialog.setStyleSheet(STYLE)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            self.runs.record_manual_recovery(job['id'], source_capture_id=saved['capture']['source_capture_id'], **values())
+            self.refresh()
+            self.statusBar().showMessage('Hub recovery recorded locally. No listing was changed.')
+        except ValueError as exc:
+            self._show_error('Check the recovery details', str(exc))
+        except Exception as exc:
+            self._show_error('Recovery was not recorded', str(exc))
+
+    @Slot()
     def _check_publication(self):
-        if self._is_busy or not self.selected_job or self.runs is None or getattr(self.hub,'driver',None) is None:
+        if self._is_busy or not self.selected_job or self.runs is None or self.hub is None:
             return
         job=deepcopy(self.selected_job)
         status=_run_status(self.runs,job)
-        if not status or status.get('state')!='publication_pending':
+        if not status or status.get('state') not in ('publication_pending','manual_publication_pending'):
             return
         from .live_relist_ui import HubRelistUI
-        provider=HubRelistUI(self.hub,self.media_root,clipboard=self._description_clipboard)
+        from .hub_login import wait_for_hub_login
+        stop = threading.Event()
         def check():
+            if self.hub.driver is None:
+                self._safe_readonly_call(self.hub.open, opening=True)
+            wait_for_hub_login(self.hub.driver, cancelled=stop.is_set, progress=self.collection_progress.emit)
+            provider=HubRelistUI(self.hub,self.media_root,clipboard=self._description_clipboard,cancelled=stop.is_set)
             outcome=provider.recheck_publication(status)
+            if status.get('mode') == 'manual_recovery':
+                return self.runs.check_manual_publication(job['id'], status, outcome)
             status.update(state='published' if outcome['complete'] else 'publication_pending',publication=outcome)
             self.runs.note(self.runs.get(job['id'])['id'],'status',status)
             return status
-        self._run_operation('Checking the existing publication requests…',check,'Publication status refreshed. No new request was sent.')
+        self._run_operation('Checking the existing publication requests…',check,'Publication status refreshed. No new request was sent.',cancel=stop.set)
 
     @Slot()
     def _relist_reviewed_batch(self):
@@ -1769,7 +1817,7 @@ class MainWindow(QMainWindow):
         def preflight():
             prepared=[]
             for job in jobs:
-                if job.get('state')=='cancelled' or (_run_status(self.runs,job) or {}).get('state')=='published':
+                if job.get('state')=='cancelled' or (_run_status(self.runs,job) or {}).get('state') in ('published','manual_completed'):
                     continue
                 previous = self.runs.get(job['id'])
                 if previous and not (removal_can_be_checked(previous) or copy_can_be_checked(previous)):
@@ -1908,6 +1956,8 @@ class MainWindow(QMainWindow):
     def _verify_captured_address(self):
         if self._is_busy or not self.selected_job or not self.drafts:
             return
+        if self.runs is not None and self.runs.get(self.selected_job['id']):
+            return  # Resume collection must respect the same lock as the button.
         from .collection import latest_collection
         from .address_review_ui import VerifyAddressDialog
         collection = latest_collection(self.drafts, self.selected_job['id'])

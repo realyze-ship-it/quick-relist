@@ -109,6 +109,43 @@ class RunStore:
             self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
                               (run_id, _now(), kind, _json(data)))
 
+    def record_manual_recovery(self, job_id, *, source_capture_id, **values):
+        from .manual_recovery import recovery_receipt
+        with self._lock, self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            run = self.get(job_id)
+            if (not run or run['binding']['source_capture_id'] != source_capture_id
+                    or not run['actions'] or any(a['state'] == 'started' for a in run['actions'])
+                    or any(e['kind'] == 'manual_recovery' for e in run['events'])):
+                raise RunNeedsReview('Only a stopped run with no existing recovery record can be recorded here.')
+            latest = next((e for e in reversed(run['events']) if e['kind'] in ('status', 'stopped')), None)
+            if latest and latest['kind'] == 'status' and latest['data'].get('state') == 'published':
+                raise RunNeedsReview('This run already has a completed replacement.')
+            if not any(a['state'] == 'uncertain' for a in run['actions']) and (not latest or latest['kind'] != 'stopped'):
+                raise RunNeedsReview('Wait for the active run to finish before recording recovery.')
+            receipt = recovery_receipt(run['binding'], **values)
+            self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
+                              (run['id'], _now(), 'manual_recovery', _json(receipt)))
+            return receipt
+
+    def check_manual_publication(self, job_id, status, outcome):
+        with self._lock, self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            run = self.get(job_id)
+            current = next((e['data'] for e in reversed((run or {}).get('events', []))
+                            if e['kind'] in ('manual_recovery', 'manual_publication_check')), None)
+            if (not current or any(current.get(k) != status.get(k) for k in ('target_reference','target_listing_id'))
+                    or set(outcome.get('portals', {})) != set(current['publication']['portals'])):
+                raise RunNeedsReview('The publication check does not match the recorded recovery.')
+            complete = all(p.get('state') == 'published' and p.get('id') for p in outcome['portals'].values())
+            if bool(complete) != outcome.get('complete'):
+                raise RunNeedsReview('The portal observation is incomplete.')
+            result = {**current, 'state': 'manual_completed' if complete else 'manual_publication_pending',
+                      'publication': outcome, 'publication_checked_by': 'app_read_only'}
+            self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
+                              (run['id'], _now(), 'manual_publication_check', _json(result)))
+            return result
+
     def reconcile_removal(self, run_id, receipt):
         """Record a fresh read of completed removal; never replay that click."""
         if receipt.get('reconciled_by') != 'fresh_source_and_portal_read' or receipt.get('observed', {}).get('published') is not False:
@@ -127,6 +164,8 @@ class RunStore:
         """Commit intent before a UI action; never repeat an uncertain attempt."""
         with self._lock, self.conn:
             self.conn.execute('BEGIN IMMEDIATE')
+            if self.conn.execute("SELECT 1 FROM relist_events WHERE run_id=? AND kind='manual_recovery'", (run_id,)).fetchone():
+                raise RunNeedsReview('This run was recovered in Hub. No original or replacement action will be repeated.')
             existing = self.conn.execute('SELECT * FROM relist_actions WHERE run_id=? AND action=?', (run_id, action)).fetchone()
             if existing:
                 if existing['state'] == 'done':

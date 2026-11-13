@@ -10,7 +10,7 @@ from .relist_dates import apply_relist_dates, relist_today
 
 def run_status(run):
     return next((e['data'] for e in reversed((run or {}).get('events', []))
-                 if e['kind'] == 'status'), {})
+                 if e['kind'] in ('status', 'manual_recovery', 'manual_publication_check')), {})
 
 
 def display_status(run):
@@ -18,6 +18,8 @@ def display_status(run):
     if not run:
         return None
     status = dict(run_status(run))
+    if status.get('mode') == 'manual_recovery':
+        return status
     unresolved = [a['action'] for a in run.get('actions', []) if a['state'] in ('started', 'uncertain')]
     latest_outcome = next((e['kind'] for e in reversed(run.get('events', []))
                            if e['kind'] in ('status', 'stopped')), None)
@@ -71,7 +73,7 @@ class RelistRunner:
             if job.get('state') == 'cancelled':
                 continue
             results.append(self.one(job))
-            if results[-1]['state'] != 'published':
+            if results[-1]['state'] not in ('published', 'manual_completed'):
                 break  # A pending portal or incomplete copy blocks the next source.
         return results
 
@@ -79,7 +81,7 @@ class RelistRunner:
         self.runs.assert_source_available(job['id'], job['rxcu'])
         previous = self.runs.get(job['id'])
         status = run_status(previous)
-        if status.get('state') == 'published':
+        if status.get('state') in ('published', 'manual_completed'):
             return status  # Includes a completed, explicitly recorded manual pilot.
         resuming_copy = copy_can_be_checked(previous)
         if previous and not (removal_can_be_checked(previous) or resuming_copy):

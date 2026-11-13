@@ -98,6 +98,25 @@ def test_same_original_in_new_batch_stops_before_preparing_any_form(setup):
     assert provider.calls == []
 
 
+@pytest.mark.parametrize('pending', [False, True])
+def test_operator_recovery_never_recreates_the_recorded_copy(setup, pending):
+    drafts, runs, job = setup
+    with pytest.raises(RuntimeError):
+        module.RelistRunner(drafts, runs, Provider(fail='create')).one(job)
+    from quick_relist.manual_recovery import CONFIRMATIONS
+    runs.record_manual_recovery(job['id'], source_capture_id='capture', reference='RXCU2000',
+        editor_url='https://hub.remax.co.za/app/listings/edit/222222/portals', destinations=['website'],
+        portals={'website': {'state': 'pending' if pending else 'published', 'id': None if pending else '222222'}},
+        confirmations=dict.fromkeys(CONFIRMATIONS, True))
+    provider = Provider()
+    runner = module.RelistRunner(drafts, runs, provider)
+    if pending:
+        with pytest.raises(RunNeedsReview): runner.one(job)
+    else:
+        assert runner.one(job)['state'] == 'manual_completed'
+    assert provider.calls == []
+
+
 def test_stopped_display_does_not_claim_original_is_still_archived(setup):
     drafts, runs, job = setup
     with pytest.raises(RuntimeError):
