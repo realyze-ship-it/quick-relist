@@ -276,6 +276,22 @@ def test_readonly_browser_wiring_never_approves_a_snapshot(window, application, 
     assert not window.advance_button.isEnabled()
 
 
+def test_browser_start_failure_is_distinct_and_keeps_private_diagnostic(window, application, tmp_path):
+    window.media_root = tmp_path / 'media'
+    class FailedHub:
+        def open(self):
+            raise OSError(6, 'private browser startup details')
+    window.hub = FailedHub()
+    window._open_readonly_hub()
+    _finish_worker(application, window)
+    message = window._operation_error
+    assert 'Chrome window could not be opened' in message
+    assert 'filters' not in message
+    assert 'private browser startup details' not in message
+    assert 'Private diagnostic:' in message
+    assert len(list((tmp_path / 'diagnostics').glob('error-*.json'))) == 1
+
+
 def test_partial_inspection_is_rendered_as_plain_text(window, monkeypatch):
     captured = []
     synthetic_html = "<b>SYNTHETIC FIELD, NOT RENDERED HTML</b>"

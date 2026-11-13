@@ -257,8 +257,8 @@ class ReadOnlyHub:
             self._managed_default_driver = self.driver
             self.driver.set_page_load_timeout(30)
             self.driver.get(MANAGE_URL)
-        except Exception:
-            raise RuntimeError("The dedicated Hub browser could not be opened. Close any new browser window and restart Quick Relist before trying again. Protected temporary session files may remain.") from None
+        except Exception as exc:
+            raise RuntimeError("The dedicated Hub browser could not be opened. Close any new browser window and restart Quick Relist before trying again. Protected temporary session files may remain.") from exc
 
     def search_reference(self, rxcu, *, all_listing_types=False):
         """Submit a read-only Manage Listings search; do not infer a match.

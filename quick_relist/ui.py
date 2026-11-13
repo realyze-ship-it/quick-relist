@@ -2277,19 +2277,27 @@ class MainWindow(QMainWindow):
             if callback:
                 callback(result)
 
-    @staticmethod
-    def _safe_readonly_call(operation: Callable[[], Any]) -> Any:
+    def _safe_readonly_call(self, operation: Callable[[], Any], *, opening=False) -> Any:
         try:
             return operation()
-        except Exception:
+        except Exception as exc:
+            from .diagnostics import record_error
+            reference = None
+            if self.media_root is not None:
+                reference = record_error(self.media_root.parent / 'diagnostics',
+                                         'open_browser' if opening else 'readonly_hub', exc)
             # Browser exceptions can contain private URLs or page contents.
-            raise RuntimeError("The read-only Hub step could not be verified. Check the browser, filters and selected listing before continuing. No listing was changed.") from None
+            message = ("The dedicated Chrome window could not be opened. Close and reopen Quick Relist before trying Open Hub again. No listing was changed."
+                       if opening else "The read-only Hub step could not be verified. Check the browser, filters and selected listing before continuing. No listing was changed.")
+            if reference:
+                message += " Private diagnostic: " + reference[:8] + "."
+            raise RuntimeError(message) from None
 
     @Slot()
     def _open_readonly_hub(self) -> None:
         if self.hub is None or self._is_busy:
             return
-        self._run_operation("Opening the Hub browser…", lambda: self._safe_readonly_call(self.hub.open), "Hub browser opened. Finish signing in, then choose Collect batch and photos.")
+        self._run_operation("Opening the Hub browser…", lambda: self._safe_readonly_call(self.hub.open, opening=True), "Hub browser opened. Finish signing in, then choose Collect batch and photos.")
 
     @Slot()
     def _inspect_readonly_hub(self) -> None:

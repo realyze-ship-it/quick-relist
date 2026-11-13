@@ -5,6 +5,48 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 
+def check_browser_tools(report: Path) -> int:
+    """Check the frozen helper toolchain without starting Chrome or contacting Hub."""
+    import subprocess
+    import traceback
+    from selenium.webdriver.common.selenium_manager import SeleniumManager
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chromium.remote_connection import ChromiumRemoteConnection
+
+    result = {'passed': False, 'hub_opened': False, 'browser_opened': False}
+    try:
+        result['stage'] = 'locate_browser_driver'
+        paths = SeleniumManager().binary_paths(['--browser', 'chrome', '--offline', '--avoid-stats'])
+        assert Path(paths['browser_path']).is_file()
+        driver = Path(paths['driver_path'])
+        assert driver.is_file()
+        result['stage'] = 'driver_version'
+        flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        completed = subprocess.run([str(driver), '--version'], capture_output=True,
+                                   timeout=15, creationflags=flags, check=True)
+        assert completed.stdout.startswith(b'ChromeDriver ')
+        result['stage'] = 'windowless_driver_process'
+        service = Service(executable_path=str(driver), service_args=['--version'])
+        try:
+            service._start_process(str(driver))
+            assert service.process.wait(timeout=15) == 0
+        finally:
+            service.stop()
+        result['stage'] = 'connection_configuration'
+        connection = ChromiumRemoteConnection(remote_server_addr='http://localhost:1',
+                                               browser_name='chrome', vendor_prefix='goog')
+        connection.close()
+        result['passed'] = True
+    except Exception as exc:
+        result['exception_type'] = type(exc).__name__
+        result['frames'] = [{'file': Path(f.filename).name, 'line': f.lineno, 'function': f.name}
+                            for f in traceback.extract_tb(exc.__traceback__)]
+        if isinstance(exc, subprocess.CalledProcessError):
+            result['returncode'] = exc.returncode
+    report.write_text(json.dumps(result), encoding='utf-8')
+    return 0 if result['passed'] else 1
+
+
 def check_package(report: Path) -> int:
     os.environ['QT_QPA_PLATFORM'] = 'offscreen'
     from PySide6.QtCore import qVersion

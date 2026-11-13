@@ -11,6 +11,9 @@ try:
     if len(sys.argv) == 3 and sys.argv[1] == '--check-package':
         from quick_relist.package_check import check_package
         result = check_package(Path(sys.argv[2]))
+    elif len(sys.argv) == 3 and sys.argv[1] == '--check-browser-tools':
+        from quick_relist.package_check import check_browser_tools
+        result = check_browser_tools(Path(sys.argv[2]))
     else:
         from quick_relist.__main__ import main
         result = main()
