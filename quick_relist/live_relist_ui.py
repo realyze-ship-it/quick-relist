@@ -83,6 +83,21 @@ def normalized_value(control):
     return value
 
 
+def only_media_interface_artwork(media):
+    """The observed Blaze generator icon is page artwork, not listing media."""
+    def decoration(item):
+        if not isinstance(item, dict):
+            return False
+        ref = item.get('source_ref')
+        return (item.get('tag') == 'img' and item.get('kind_hint') == 'img'
+                and all(item.get(key) == '' for key in ('alt', 'title', 'caption'))
+                and all(item.get(key) is None for key in ('observed_asset_id', 'observed_position', 'original_source_ref'))
+                and isinstance(ref, dict) and ref.get('query_omitted') is False and ref.get('fragment_omitted') is False
+                and isinstance(ref.get('url'), str)
+                and re.fullmatch(r'https://hub\.remax\.co\.za/build/assets/blaze-flame-white-[A-Za-z0-9_-]+\.png', ref['url']) is not None)
+    return isinstance(media, list) and all(decoration(item) for item in media)
+
+
 def same_particulars(expected, actual):
     def controls(plan):
         return {(c['key'],c.get('code')):normalized_value(c) for c in plan['controls']}
@@ -603,7 +618,7 @@ class HubRelistUI:
         self._verify_particulars(actual, plan)
         pages = {p['page_key']: p for p in actual['pages']}
         media = media_plan(pages['media'])
-        if (pages['media'].get('media') or pages['media'].get('photo_captions')
+        if (not only_media_interface_artwork(pages['media'].get('media')) or pages['media'].get('photo_captions')
                 or any(value.strip() for key, value in media.items() if key != 'description_html')):
             raise CopyStopped('This copy already has media or descriptions. No existing content was overwritten.')
         self.tab('Portals')

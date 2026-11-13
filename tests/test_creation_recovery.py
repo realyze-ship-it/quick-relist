@@ -28,6 +28,29 @@ def receipt():
             'empty_media': True, 'unpublished': True}
 
 
+def interface_artwork():
+    return {'tag':'img', 'kind_hint':'img', 'alt':'', 'title':'', 'caption':'',
+            'observed_asset_id':None, 'observed_position':None, 'original_source_ref':None,
+            'source_ref':{'url':'https://hub.remax.co.za/build/assets/blaze-flame-white-example.png',
+                          'query_omitted':False,'fragment_omitted':False}}
+
+
+@pytest.mark.parametrize('change', [None,'listing_id','position','original','other_url','query','floorplan','caption'])
+def test_empty_copy_ignores_only_the_observed_interface_icon(change):
+    from quick_relist.live_relist_ui import only_media_interface_artwork
+    icon=interface_artwork()
+    if change=='listing_id': icon['observed_asset_id']='123'
+    if change=='position': icon['observed_position']=0
+    if change=='original': icon['original_source_ref']={'url':'https://cdn.remax.co.za/listings/123/original/image.jpg'}
+    if change=='other_url': icon['source_ref']['url']='https://example.test/photo.png'
+    if change=='query': icon['source_ref']['query_omitted']=True
+    if change=='floorplan': icon['kind_hint']='floorplan'
+    if change=='caption': icon['caption']='Existing photo'
+    assert only_media_interface_artwork([icon]) is (change is None)
+    assert only_media_interface_artwork([])
+    assert not only_media_interface_artwork(None)
+
+
 def test_recovery_keeps_failed_save_and_never_replays_creation():
     store, run = stopped_store()
     before = deepcopy(store.get('job'))
@@ -101,7 +124,7 @@ def test_live_existing_copy_check_requires_each_read_before_accepting(tmp_path, 
         assert kwargs == {'include_media_captions':False}
         calls.append('capture')
         ui.current = {'reference':'RXCU2000',**binding}
-        return {'pages':[{'page_key':'media','media':['synthetic-photo'] if blocker=='photos' else [],'photo_captions':[]}]}
+        return {'pages':[{'page_key':'media','media':[interface_artwork()] + (['synthetic-photo'] if blocker=='photos' else []),'photo_captions':[]}]}
     ui.captured_editor = captured
     def particulars(*args):
         calls.append('particulars')
