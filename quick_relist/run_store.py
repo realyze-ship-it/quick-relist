@@ -206,8 +206,8 @@ class RunStore:
 
     def reconcile_created_copy(self, run_id, receipt):
         """Accept a fully checked existing empty copy without replaying Save."""
-        checks = ('source_removed', 'source_archived', 'particulars_verified', 'empty_media', 'unpublished')
-        if (receipt.get('reconciled_by') != 'fresh_archived_source_and_empty_replacement_read'
+        checks = ('source_archived', 'particulars_verified', 'empty_media', 'unpublished')
+        if (receipt.get('reconciled_by') != 'fresh_archived_row_and_empty_replacement_read'
                 or any(receipt.get(k) is not True for k in checks)
                 or not isinstance(receipt.get('handle'), str) or not receipt['handle']
                 or not isinstance(receipt.get('listing_id'), str)
@@ -239,7 +239,8 @@ class RunStore:
                     raise RunNeedsReview('This replacement already belongs to another run.')
             prior = next(a for a in run['actions'] if a['action'] == 'create')
             self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
-                              (run_id, _now(), 'creation_reconciled', _json({'prior_action': prior, 'observed': receipt})))
+                              (run_id, _now(), 'creation_reconciled', _json({'prior_action': prior, 'observed': receipt,
+                               'source_removal_basis':'previous_completed_remove_portals_action'})))
             self.conn.execute("UPDATE relist_actions SET state='done',finished_at=?,receipt_json=? WHERE run_id=? AND action='create'",
                               (_now(), _json(receipt), run_id))
             self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',

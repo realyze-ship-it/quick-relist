@@ -23,8 +23,8 @@ def stopped_store():
 def receipt():
     return {'reference': 'RXCU2000', 'listing_id': '654321', 'handle': 'synthetic-copy',
             'source_reference': 'RXCU1000', 'source_listing_id': '123456',
-            'reconciled_by': 'fresh_archived_source_and_empty_replacement_read',
-            'source_removed': True, 'source_archived': True, 'particulars_verified': True,
+            'reconciled_by': 'fresh_archived_row_and_empty_replacement_read',
+            'source_archived': True, 'particulars_verified': True,
             'empty_media': True, 'unpublished': True}
 
 
@@ -45,7 +45,7 @@ def test_recovery_keeps_failed_save_and_never_replays_creation():
 
 
 @pytest.mark.parametrize('key,value', [
-    ('source_removed', False), ('source_archived', False), ('particulars_verified', False),
+    ('source_archived', False), ('particulars_verified', False),
     ('empty_media', False), ('unpublished', False), ('source_reference', 'RXCU9999'),
     ('source_listing_id', '999999'), ('reference', 'RXCU1000'), ('listing_id', '123456'),
     ('listing_id', 'not-an-id'), ('handle', ''), ('reconciled_by', 'operator_guess')])
@@ -78,15 +78,13 @@ def test_manually_recovered_copy_cannot_be_claimed_by_a_second_run():
         store.reconcile_created_copy(run, receipt())
 
 
-@pytest.mark.parametrize('blocker', [None, 'source', 'archive', 'identity', 'particulars', 'photos', 'description', 'published', 'pending_other_portal'])
+@pytest.mark.parametrize('blocker', [None, 'archive', 'identity', 'particulars', 'photos', 'description', 'published', 'pending_other_portal'])
 def test_live_existing_copy_check_requires_each_read_before_accepting(tmp_path, monkeypatch, blocker):
     from quick_relist import live_relist_ui as module
     from quick_relist.form_copy import CopyStopped
     calls = []
     def removed(*args):
-        calls.append('source')
-        if blocker == 'source': raise CopyStopped('Source is not removed')
-        ui.current = {'reference':'RXCU1000','listing_id':'123456','handle':'source'}
+        pytest.fail('Archived source content is not available through the normal editor')
     def archived(*args, **kwargs):
         calls.append('archive')
         assert kwargs == {'archived':True, 'restore':False}
@@ -120,14 +118,15 @@ def test_live_existing_copy_check_requires_each_read_before_accepting(tmp_path, 
     else:
         proof = ui.check_created_copy({},plan,'RXCU2000','654321')
         assert proof == receipt() | {'handle':'copy'}
-        assert calls == ['archive','source','search','open','capture','particulars','tab_Portals']
+        assert calls == ['archive','search','open','capture','particulars','tab_Portals']
 
 
-@pytest.mark.parametrize('change', ['missing_archive', 'active_save', 'later_action', 'manual_recovery'])
+@pytest.mark.parametrize('change', ['missing_archive', 'uncertain_removal', 'active_save', 'later_action', 'manual_recovery'])
 def test_only_the_narrow_stopped_creation_state_is_eligible(change):
     store, _ = stopped_store()
     run = store.get('job')
     if change == 'missing_archive': run['actions'].pop(1)
+    elif change == 'uncertain_removal': run['actions'][0]['state'] = 'uncertain'
     elif change == 'active_save': run['actions'][-1]['state'] = 'started'
     elif change == 'later_action': run['actions'].append({'action': 'publish_website', 'state': 'done'})
     else: run['events'].append({'kind': 'manual_recovery'})

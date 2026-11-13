@@ -5,6 +5,7 @@ OTP inputs, cookies and tokens are never read or supplied by this module.
 """
 from urllib.parse import urlsplit
 import time
+from .hub_readonly import is_manage_url
 
 
 MANAGE_URL = 'https://hub.remax.co.za/app/listings'
@@ -28,10 +29,7 @@ def _manage_tab(driver):
     matches = []
     for handle in driver.window_handles:
         driver.switch_to.window(handle)
-        parsed = urlsplit(driver.current_url)
-        if (parsed.scheme == 'https' and parsed.hostname == 'hub.remax.co.za'
-                and parsed.port in (None, 443) and not parsed.username and not parsed.password
-                and parsed.path.rstrip('/') == '/app/listings' and not parsed.query and not parsed.fragment):
+        if is_manage_url(driver.current_url):
             matches.append(handle)
     if len(matches) > 1:
         driver.switch_to.window(original)
@@ -78,7 +76,7 @@ def wait_for_hub_login(driver, *, cancelled=lambda: False, progress=lambda messa
                     prepared = True
                     progress('Signed in. Waiting for Hub’s listing search…')
                     continue
-                if parsed.path.rstrip('/') == '/app/listings' and not parsed.query and not parsed.fragment:
+                if is_manage_url(url):
                     prompts = {'Search fusion ref, listing ID or address', 'Enter fusion ref, listing ID or address'}
                     inputs = [el for el in driver.find_elements(By.XPATH, '//input[@placeholder or @aria-label or @id]')
                               if el.is_displayed() and el.is_enabled() and any(

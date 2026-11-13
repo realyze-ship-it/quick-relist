@@ -359,10 +359,10 @@ class HubRelistUI:
         from selenium.webdriver.common.keys import Keys
         self.current = None
         reference, ident = plan['source_reference'], plan['source_listing_id']
-        self.hub.search_reference(reference, all_listing_types=True)
+        self.hub.search_reference(reference, all_listing_types=True, archived=archived)
         self.driver.refresh()
         self.wait(lambda:bool(self.driver.find_elements('css selector','input[placeholder="Enter fusion ref, listing ID or address"]')), 'The fresh listing search did not load.')
-        self.hub.search_reference(reference, all_listing_types=True)
+        self.hub.search_reference(reference, all_listing_types=True, archived=archived)
         _wait_search(self.hub, reference, self.cancelled)
         rows = [r for r in self.driver.find_elements('css selector','[role="row"]')
                 if [normalize_rxcu(m[1]) for p in r.find_elements('tag name','p')
@@ -585,19 +585,10 @@ class HubRelistUI:
         reference = normalize_rxcu(reference)
         if reference == plan['source_reference'] or listing_id == plan['source_listing_id']:
             raise CopyStopped('The existing replacement must be distinct from the original.')
-        # Archived rows may no longer offer Edit Listing. Verify their exact
-        # Unarchive link first, then reopen the previously captured numeric ID.
+        # Hub no longer exposes archived content in the normal editor. The
+        # original backup and completed removal action remain the source of
+        # content/removal evidence; freshly verify the exact archived row/link.
         self._check_source_archive(plan, archived=True, restore=False)
-        source_reference, source_id = plan['source_reference'], plan['source_listing_id']
-        binding = self.hub.editor_bindings.get(source_reference)
-        if binding and binding['listing_id'] != source_id:
-            raise CopyStopped('The archived original has a conflicting editor identity.')
-        if not binding or binding['handle'] not in self.driver.window_handles:
-            self.driver.switch_to.new_window('tab')
-            self.driver.get('https://hub.remax.co.za/app/listings/edit/' + source_id)
-            self.hub.editor_bindings[source_reference] = {'listing_id':source_id, 'handle':self.driver.current_window_handle}
-        self.check_removed_source(collection, plan)
-        self.source = deepcopy(self.current)
         self.current = None
         self.hub.search_reference(reference, all_listing_types=True)
         _wait_search(self.hub, reference, self.cancelled)
@@ -618,8 +609,8 @@ class HubRelistUI:
             raise CopyStopped('The existing copy is published or has a pending portal request.')
         return {**deepcopy(self.current), 'source_reference': plan['source_reference'],
                 'source_listing_id': plan['source_listing_id'],
-                'reconciled_by': 'fresh_archived_source_and_empty_replacement_read',
-                'source_removed': True, 'source_archived': True, 'particulars_verified': True,
+                'reconciled_by': 'fresh_archived_row_and_empty_replacement_read',
+                'source_archived': True, 'particulars_verified': True,
                 'empty_media': True, 'unpublished': True}
 
     @diagnosed

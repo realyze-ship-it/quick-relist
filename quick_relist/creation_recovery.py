@@ -58,7 +58,7 @@ def recovery_dialog(binding, parent=None):
     dialog.setWindowTitle('Check existing replacement')
     dialog.resize(600, 260)
     layout = QVBoxLayout(dialog)
-    message = QLabel('Enter the saved replacement found in Hub. The app will check that the original is archived and removed, and that this unpublished copy matches the reviewed details. This check does not save or publish a listing.')
+    message = QLabel('Enter the saved replacement found in Hub. The app will verify the archived original and compare this unpublished copy with your saved backup and address review. The completed portal removal stays in the activity record. This check does not save or publish a listing.')
     message.setWordWrap(True)
     layout.addWidget(message)
     form = QFormLayout()

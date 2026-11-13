@@ -12,7 +12,7 @@ A Windows app for collecting Hub listings, reviewing each address, and processin
 4. Review the prefilled **Verify address** form for each listing, make any corrections and save the review. This saves a local review only.
 5. **Relist reviewed batch** first checks the collected data and shows the reviewed references and addresses for confirmation. For each supported listing, it prepares and checks an unsaved form, rechecks the source, removes the original from its portals, archives sales as **Listing has been cancelled → Mandate expired** and rentals as **Listing has been withdrawn**, saves the replacement, copies and checks its content, then publishes to the original destinations.
 
-If Save stops after creating a copy, **Check existing replacement** can verify its RXCU and Hub edit URL against the archived original and reviewed particulars before accepting that existing empty, unpublished copy. The original failed Save stays in the activity record. This read-only recovery check never creates another listing.
+If Save stops after creating a copy, **Check existing replacement** can verify its RXCU and Hub edit URL against the freshly verified archived row, completed removal record and saved reviewed particulars before accepting that existing empty, unpublished copy. The original failed Save stays in the activity record. This read-only recovery check never creates another listing.
 
 6. A submitted portal request remains pending until Hub returns its publication identifier. **Check publication** reads the existing requests without sending them again.
 

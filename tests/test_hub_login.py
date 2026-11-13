@@ -94,10 +94,11 @@ def test_login_otp_then_dashboard_continues_without_touching_credentials(clock):
     assert 'automatically' in progress[-1]
 
 
-def test_existing_login_reuses_results_tab_and_preserves_editor(clock):
+@pytest.mark.parametrize('path', ['/app/listings', '/app/listings/manage/active', '/app/listings/manage/archived', '/app/listings/manage/all'])
+def test_existing_login_reuses_results_tab_and_preserves_editor(clock, path):
     editor = 'https://hub.remax.co.za/app/listings/edit/123/media'
     driver = Driver(editor)
-    driver.tabs['results'] = hub_login.MANAGE_URL
+    driver.tabs['results'] = 'https://hub.remax.co.za' + path
     hub_login.wait_for_hub_login(driver, timeout=5)
     assert driver.navigation == []
     assert driver.tabs['first'] == editor

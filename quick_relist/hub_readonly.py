@@ -20,6 +20,14 @@ import time
 import zipfile
 
 MANAGE_URL = "https://hub.remax.co.za/app/listings"
+MANAGE_PATHS = frozenset(('/app/listings', '/app/listings/manage/active', '/app/listings/manage/all', '/app/listings/manage/archived'))
+
+
+def is_manage_url(url):
+    parsed = urlsplit(url)
+    return (parsed.scheme == 'https' and parsed.hostname == 'hub.remax.co.za'
+            and parsed.port in (None, 443) and parsed.username is None and parsed.password is None
+            and parsed.path.rstrip('/') in MANAGE_PATHS and not parsed.query and not parsed.fragment)
 
 
 class EditorNavigationInProgress(ValueError):
@@ -268,7 +276,7 @@ class ReadOnlyHub:
         except Exception as exc:
             raise RuntimeError("The dedicated Hub browser could not be opened. Close any new browser window and restart Quick Relist before trying again. Protected temporary session files may remain.") from exc
 
-    def search_reference(self, rxcu, *, all_listing_types=False):
+    def search_reference(self, rxcu, *, all_listing_types=False, archived=False):
         """Submit a read-only Manage Listings search; do not infer a match.
 
         Hub filters may hide listings, so an empty result never proves absence.
@@ -285,8 +293,7 @@ class ReadOnlyHub:
         matches = []
         for handle in self.driver.window_handles:
             self.driver.switch_to.window(handle)
-            parsed = urlsplit(self.driver.current_url)
-            if parsed.scheme == "https" and parsed.hostname == "hub.remax.co.za" and parsed.port in (None, 443) and parsed.path.rstrip("/") == "/app/listings":
+            if is_manage_url(self.driver.current_url):
                 matches.append(handle)
         if len(matches) != 1:
             self.driver.switch_to.window(original)
@@ -304,6 +311,7 @@ class ReadOnlyHub:
             menus[0].send_keys(Keys.ESCAPE)
             WebDriverWait(self.driver, 10).until(lambda driver: not any(
                 m.is_displayed() for m in driver.find_elements(By.CSS_SELECTOR, '[role="listbox"]')))
+        self._select_listing_view(archived=archived)
         if all_listing_types:
             self._select_all_listing_types()
         # Both strings were observed in Hub: the visible label and input placeholder.
@@ -330,6 +338,35 @@ class ReadOnlyHub:
             raise ValueError('Hub did not retain the requested search reference. No search was submitted.')
         buttons[0].click()
         return {"searched": True, "warning": "Review the results and filters manually; this does not verify a match."}
+
+    def _select_listing_view(self, *, archived=False, timeout=15, poll_interval=.1):
+        """Archived sources are absent from Active, even with All listing types."""
+        from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+        from selenium.webdriver.support.ui import WebDriverWait
+        paths = {'/app/listings/manage/archived'} if archived else {'/app/listings', '/app/listings/manage/active'}
+        label = 'Archived' if archived else 'Active'
+        handle, handles = self.driver.current_window_handle, tuple(sorted(self.driver.window_handles))
+        def route():
+            if (self.driver.current_window_handle != handle or tuple(sorted(self.driver.window_handles)) != handles
+                    or not is_manage_url(self.driver.current_url)):
+                raise ValueError('The listing search context changed. No search was submitted.')
+            return urlsplit(self.driver.current_url).path.rstrip('/')
+        if route() in paths:
+            return
+        def tab():
+            route()
+            tabs = [e for e in self.driver.find_elements('css selector', 'main [role="tablist"] [role="tab"]')
+                    if e.is_displayed() and e.is_enabled() and e.get_attribute('textContent').strip() == label]
+            if len(tabs) != 1:
+                raise ValueError('The requested listing view is missing or ambiguous. No search was submitted.')
+            return tabs[0]
+        tab().click()
+        try:
+            WebDriverWait(self.driver, timeout, poll_frequency=poll_interval,
+                          ignored_exceptions=(StaleElementReferenceException,)).until(
+                lambda _: route() in paths and tab().get_attribute('aria-selected') == 'true')
+        except TimeoutException:
+            raise ValueError('Hub did not finish changing the listing view. No search was submitted.') from None
 
     def _select_all_listing_types(self, *, timeout=10, poll_interval=.1):
         """Wait for Hub's asynchronous menu and confirmed filter change."""
@@ -400,7 +437,8 @@ class ReadOnlyHub:
         reference = normalize_rxcu(rxcu)
         parsed = urlsplit(self.driver.current_url)
         if (parsed.scheme != "https" or parsed.hostname != "hub.remax.co.za" or parsed.port not in (None, 443)
-                or parsed.username is not None or parsed.password is not None or parsed.path.rstrip("/") != "/app/listings"
+                or parsed.username is not None or parsed.password is not None
+                or parsed.path.rstrip("/") not in ('/app/listings', '/app/listings/manage/active')
                 or parsed.query or parsed.fragment):
             raise ValueError("Open the Hub Manage Listings results tab first")
         def matching_rows():
