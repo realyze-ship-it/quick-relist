@@ -9,6 +9,28 @@ def start(store):
                        reference='RXCU1000', listing_id='123456')
 
 
+@pytest.mark.parametrize('blocker',[None,'missing_media','published'])
+def test_only_content_read_can_retry_after_completed_unpublished_copy(blocker):
+    store=RunStore(':memory:'); run=start(store)
+    for action in ('remove_portals','archive','create','copy_media_text'):
+        if action=='copy_media_text' and blocker=='missing_media':continue
+        store.perform_once(run,action,lambda:{'confirmed':True})
+    if blocker=='published':store.perform_once(run,'publish_website',lambda:{'confirmed':True})
+    def fail():raise RuntimeError('synthetic comparison mismatch')
+    with pytest.raises(RuntimeError):store.perform_once(run,'verify_content',fail)
+    calls=[]
+    if blocker:
+        with pytest.raises(RunNeedsReview):store.perform_once(run,'verify_content',lambda:calls.append('read') or {'checked':True})
+        assert calls==[]
+    else:
+        assert store.perform_once(run,'verify_content',lambda:calls.append('read') or {'checked':True})=={'checked':True}
+        assert calls==['read']
+        retry=next(e for e in store.get('job')['events'] if e['kind']=='checked_verify_content_retry')
+        assert retry['data']['state']=='uncertain'
+        assert retry['data']['action']=='verify_content'
+        assert store.perform_once(run,'create',lambda:pytest.fail('Never recreate'))=={'confirmed':True}
+
+
 def test_receipt_survives_restart_and_action_is_not_repeated(tmp_path):
     path = tmp_path / 'runs.sqlite3'
     store = RunStore(path)

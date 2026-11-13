@@ -170,7 +170,14 @@ class RunStore:
             if existing:
                 if existing['state'] == 'done':
                     return json.loads(existing['receipt_json'])
-                if existing['state'] != 'retry_ready' or action not in ('archive','copy_media_text'):
+                read_retry = action == 'verify_content' and existing['state'] in ('started','uncertain')
+                if read_retry:
+                    states = {r['action']:r['state'] for r in self.conn.execute(
+                        'SELECT action,state FROM relist_actions WHERE run_id=?', (run_id,))}
+                    if (any(states.get(n) != 'done' for n in ('remove_portals','archive','create','copy_media_text'))
+                            or any(n.startswith('publish') for n in states)):
+                        raise RunNeedsReview('Only an unpublished completed copy can repeat its read-only content check.')
+                if not read_retry and (existing['state'] != 'retry_ready' or action not in ('archive','copy_media_text')):
                     raise RunNeedsReview('A previous Hub action has an uncertain result. Check the existing listing before continuing; it was not retried.')
             unresolved = self.conn.execute("SELECT 1 FROM relist_actions WHERE run_id=? AND state!='done' AND action!=?", (run_id,action)).fetchone()
             if unresolved:

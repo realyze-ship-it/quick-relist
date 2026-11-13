@@ -6,6 +6,42 @@ from quick_relist import live_relist_ui as module
 from quick_relist.form_copy import CopyStopped
 
 
+def commission_page():
+    return {'page_key':'deal_particulars', 'fields':[{'name':'total_commission_percentage','value':'3.0'}],
+        'rich_text':[], 'dialogs':[], 'media':[], 'tables':[{'rows':[
+            ['Agent','Brand','Agent Type','Deal Commission Split %','Commission Sub Total','Office Service Fee',
+             'RE/MAX SA Service Fee','Commission Total Minus Fees','Action'],
+            ['Example A','RE/MAX','Listing Agent','50','100','0','2','98',''],
+            ['Example B','RE/MAX','Listing Agent','50','100','0','2','98',''],
+            ['Totals:','100%','200','0','4','196','']]}]}
+
+
+def test_commission_row_order_does_not_change_agent_values_or_source():
+    from copy import deepcopy
+    source=commission_page(); original=deepcopy(source); copy=deepcopy(source)
+    copy['tables'][0]['rows'][1:3]=reversed(copy['tables'][0]['rows'][1:3])
+    assert module.same_commission(source,copy)
+    assert source==original
+
+
+@pytest.mark.parametrize('column',range(8))
+def test_commission_comparison_rejects_changed_agent_money_or_identity(column):
+    source=commission_page(); copy=commission_page()
+    copy['tables'][0]['rows'][1][column]='changed'
+    assert not module.same_commission(source,copy)
+
+
+@pytest.mark.parametrize('change',['duplicate','missing','totals','percentage','header'])
+def test_commission_comparison_rejects_incomplete_or_changed_totals(change):
+    source=commission_page(); copy=commission_page(); rows=copy['tables'][0]['rows']
+    if change=='duplicate':rows[2]=rows[1][:]
+    elif change=='missing':rows.pop(1)
+    elif change=='totals':rows[-1][1]='99%'
+    elif change=='percentage':copy['fields'][0]['value']='4.0'
+    else:rows[0][3]='Other share'
+    assert not module.same_commission(source,copy)
+
+
 @pytest.mark.parametrize('saved_selection,accepted', [
     ('Example Park, First City, Province', True),
     ('Example Park, Other City, Province', False), ('Example Park', False)])

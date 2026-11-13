@@ -180,6 +180,21 @@ def test_checked_copy_resume_never_repeats_original_or_creation_steps(setup):
     assert provider.calls == ['recover_copy','copy','verify','publish_website','publish_p24','publication']
 
 
+def test_failed_content_read_resumes_same_copy_and_retains_failure(setup):
+    drafts,runs,job=setup
+    class SavedContentProvider(Provider):
+        def copy_content(self,target,plan,store,run_id):
+            self.calls.append('copy')
+            return store.perform_once(run_id,'copy_media_text',lambda:{'saved':True})
+    with pytest.raises(RuntimeError):
+        module.RelistRunner(drafts,runs,SavedContentProvider(fail='verify')).one(job)
+    provider=SavedContentProvider()
+    assert module.RelistRunner(drafts,runs,provider).one(job)['state']=='published'
+    assert provider.calls==['recover_copy','copy','verify','publish_website','publish_p24','publication']
+    assert any(e['kind']=='checked_verify_content_retry' and e['data']['state']=='uncertain'
+               for e in runs.get(job['id'])['events'])
+
+
 def test_dates_are_saved_before_removal_and_survive_a_later_day_recovery(setup):
     drafts,runs,job=setup
     first=Provider(fail='remove')

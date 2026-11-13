@@ -53,6 +53,9 @@ def copy_can_be_checked(run):
         elif name == 'copy_commission' or re.fullmatch(r'caption_[0-9]+', name):
             if action['state'] != 'done':
                 return False
+        elif name == 'verify_content':
+            if action['state'] not in ('started','uncertain'):
+                return False
         else:
             return False
     return True

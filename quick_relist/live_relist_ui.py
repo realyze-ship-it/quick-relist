@@ -114,6 +114,26 @@ def resolve_saved_suburb(expected, actual, read_selected):
     return result, observed
 
 
+def same_commission(expected, actual):
+    """Compare each agent's complete commission row, independent of row order."""
+    def signature(page):
+        page = deepcopy(page)
+        tables = [t for t in page['tables'] if t['rows'] and t['rows'][0][0] == 'Agent']
+        if len(tables) != 1:
+            return None
+        rows = tables[0]['rows']
+        if len(rows) < 3 or len(rows[0]) != 9 or rows[-1][0] != 'Totals:':
+            return None
+        agents = rows[1:-1]
+        if (any(len(row) != 9 or not row[0] or row[0] == 'Totals:' for row in agents)
+                or len({row[0] for row in agents}) != len(agents)):
+            return None
+        tables[0]['rows'] = [rows[0], *sorted(agents, key=lambda row: row[0]), rows[-1]]
+        return content_signature({'pages':[page]})
+    left, right = signature(expected), signature(actual)
+    return left is not None and right is not None and left == right
+
+
 def only_description_formatting_changed(expected, actual):
     if any(actual.get(k) != v for k,v in expected.items() if not k.startswith('description_')):
         return False
@@ -719,7 +739,7 @@ class HubRelistUI:
         if [c['caption'] for c in captions] != [p['caption'] for p in plan['photos']]:
             raise CopyStopped('Saved photo captions do not match the original.')
         if plan['deal'] is not None:
-            if content_signature({'pages':[pages['deal_particulars']]}) != content_signature({'pages':[plan['deal']]}):
+            if not same_commission(plan['deal'], pages['deal_particulars']):
                 raise CopyStopped('Saved commission details differ. The replacement remains unpublished.')
         self.target_for_publication = deepcopy(self.current)
         return {'particulars':True,'descriptions':True,'photos':len(plan['photos']),'photo_order':True,'captions':True,
