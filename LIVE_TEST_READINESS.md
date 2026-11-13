@@ -33,6 +33,8 @@ The current pilot saved media while the replacement remained unpublished. The ap
 
 Windows Chrome requires native HTML clipboard data to retain the source description. The app supplies UTF-8 CF_HTML byte offsets and handles a literal leading markdown heading without converting it to bold. Saved-page comparison, not successful paste alone, establishes fidelity.
 
+The resumed rental run removed and archived its source, created one replacement and transferred all 16 photos. It stopped before saving media because Hub removed attribute-free `span` wrappers on paste. Read-only inspection showed identical wording, paragraph breaks and bold tags; only those inert wrappers differed. Media planning now removes exactly these wrapper tags from the comparison and clipboard representation while retaining the original capture. Tests reject changed wording, lost bold, lost line breaks, changed paragraph structure and changed summaries. The focused live-UI/runner suite passed 41 tests. Live recovery of this copy is still in progress.
+
 ## Local validation
 
 - Broad suite: 2,050 checks passed; 83 optional browser checks skipped.

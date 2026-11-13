@@ -131,6 +131,31 @@ def test_literal_heading_paste_preserves_closing_marks_and_all_line_breaks():
     assert module.description_clipboard_html('<p><strong>Heading</strong><br>Body</p>') == ('<p><strong>Heading</strong><br>Body</p>','')
 
 
+@pytest.mark.parametrize('html,text,matching', [
+    ('<p><strong>Heading</strong></p><p>Original<br>body.</p>', 'Heading Original body.', True),
+    ('<p>Heading</p><p>Original<br>body.</p>', 'Heading Original body.', False),
+    ('<p><strong>Heading</strong></p><p>Original body.</p>', 'Heading Original body.', False),
+    ('<p><strong>Heading</strong><br>Original<br>body.</p>', 'Heading Original body.', False),
+    ('<p><strong>Heading</strong></p><p>Changed<br>body.</p>', 'Heading Changed body.', False),
+])
+def test_media_comparison_accepts_only_inert_span_removal(html, text, matching):
+    from copy import deepcopy
+    from quick_relist.relist_plan import media_plan
+    fields = [{'name': key, 'value': ''} for key in ('virtualtour_url','videotour_url',
+        'p24_youtube_video_id','matterport_video_id','eyespy360_url','marketing_header')]
+    fields.append({'label':'Brochure Description','value':'Original summary'})
+    source = {'fields':fields, 'rich_text':[{'observed_description_label':True,
+        'sanitized_html':'<p><span><strong>Heading</strong></span></p><p><span>Original<br>body.</span></p>',
+        'text':'Heading Original body.'}]}
+    before = deepcopy(source)
+    actual = deepcopy(source)
+    actual['rich_text'][0].update(sanitized_html=html, text=text)
+    assert (media_plan(source) == media_plan(actual)) is matching
+    assert source == before  # Original captured markup stays immutable.
+    actual['fields'][-1]['value'] = 'Different summary'
+    assert media_plan(source) != media_plan(actual)
+
+
 @pytest.mark.parametrize('mode,reason', [('rent','Listing has been withdrawn'),('sale','Listing has been cancelled')])
 def test_archive_uses_type_specific_reason_and_accepts_success_redirect(tmp_path, mode, reason):
     events=[]

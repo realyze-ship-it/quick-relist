@@ -61,7 +61,10 @@ def media_plan(page):
     rich = [r for r in page['rich_text'] if r.get('observed_description_label') is True]
     if len(rich) != 1:
         raise CopyStopped('The formatted description could not be matched.')
-    result['description_html'] = _text(rich[0]['sanitized_html'])
+    # Hub removes attribute-free inline wrappers on paste. They carry no
+    # formatting in the captured HTML subset. Preserve every text character,
+    # paragraph and formatting tag while comparing the same representation.
+    result['description_html'] = _text(rich[0]['sanitized_html']).replace('<span>', '').replace('</span>', '')
     result['description_text'] = _text(rich[0]['text'])
     return result
 
