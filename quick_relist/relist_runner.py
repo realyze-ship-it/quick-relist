@@ -5,6 +5,7 @@ from .form_copy import CopyStopped
 from .relist_plan import build_relist_plan
 from .run_store import RunNeedsReview
 from .brochure_review import apply_review
+from .relist_dates import apply_relist_dates, relist_today
 
 
 def run_status(run):
@@ -42,9 +43,11 @@ def copy_can_be_checked(run):
 
 
 class RelistRunner:
-    def __init__(self, drafts, runs, provider, *, cancelled=lambda: False, progress=lambda text: None):
+    def __init__(self, drafts, runs, provider, *, cancelled=lambda: False, progress=lambda text: None,
+                 today=relist_today):
         self.drafts, self.runs, self.provider = drafts, runs, provider
         self.cancelled, self.progress = cancelled, progress
+        self.today = today
 
     def batch(self, jobs):
         results = []
@@ -80,6 +83,7 @@ class RelistRunner:
                    'reference':data['rxcu'], 'listing_id':data['listing_id']}
         if previous and previous['binding'] != binding:
             raise RunNeedsReview('The source or reviewed address changed after the stopped run. Review it before continuing.')
+        policy = apply_relist_dates(plan, previous, self.today())
         if self.cancelled():
             raise CopyStopped('Relisting stopped before the original was changed.')
         # Preparing an unsaved form cannot remove the source. Recheck the
@@ -106,10 +110,14 @@ class RelistRunner:
             self.provider.check_source(data, plan)
         run_id = self.runs.start(job['id'], source_capture_id=data['source_capture_id'],
             address_revision_id=review['id'], reference=data['rxcu'], listing_id=data['listing_id'])
+        if policy and not previous:
+            self.runs.note(run_id, 'date_policy', policy)
         if plan.get('brochure_review_id'):
             self.runs.note(run_id, 'brochure_review', {'review_id':plan['brochure_review_id']})
         def record(state, **extra):
             status.update(state=state, **extra)
+            if policy:
+                status['dates'] = policy['replacement_dates']
             self.runs.note(run_id, 'status', status)
         def step(action, operation, message):
             if self.cancelled():

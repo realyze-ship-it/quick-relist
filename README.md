@@ -19,7 +19,8 @@ If an original brochure summary exceeds Hub's current 250-character limit, the a
 
 ## Current coverage and limits
 
-- Sale and rental use their own prices, dates and status controls. Rentals omit Deal Particulars and preserve the observed occupation date and rental period. The app does not invent or renew mandate dates.
+- Sale and rental use their own prices and status controls. On the operator's requested date rule, new runs set **Date listed** and **On market since** to the South African relist day and **Listing expiry** six calendar months later. Sale **Mandate signed date** follows Date listed and **Mandate expiry** follows Listing expiry. Rental **Occupation date** and rental period stay exactly as collected. If the target month has fewer days, expiry uses its last day.
+- The source backup retains every original date. The replacement's date plan is recorded before removal and checked after saving. An interrupted run keeps that recorded plan on resume; a run started by an older build retains its original date contract.
 - The collector includes the observed lifestyle and General Property Features checkboxes, primary and secondary agents, rich description, photo captions, and ten room categories. Every nonzero supported room must have its dialog captured before relisting.
 - The current writer requires empty custom-feature, party, document and note tables. Listings with related records or floorplans stop before the original is removed. Unsupported or missing fields also stop the run.
 - Photos are uploaded individually and compared with the saved originals before sending the next image. This transferred all 13 images in the rental pilot. Only an explicit failed-upload result permits retrying that missing photo, with at most three attempts. Unknown missing uploads, unexpected counts or changed order stop the copy for review.

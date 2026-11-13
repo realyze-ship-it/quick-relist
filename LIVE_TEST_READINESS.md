@@ -21,7 +21,7 @@ A separate authorized sale pilot completed manually through the current Hub scre
 
 ## Operational observations
 
-Sale and rental have different fields and archive reasons. Rentals omit Deal Particulars. Sales use **Listing has been cancelled → Mandate expired**. Source dates are preserved, never renewed or invented.
+Sale and rental have different fields and archive reasons. Rentals omit Deal Particulars. Sales use **Listing has been cancelled → Mandate expired**. The earlier pilots preserved their source dates. The operator subsequently requested a new date rule: Date listed and On market since use the relist day in South Africa, expiry is six calendar months later, and sale mandate dates follow that interval. Rental occupation dates stay unchanged. Original dates remain in the backup, and interrupted runs retain the date contract recorded before removal.
 
 Hub can accept only part of a photo upload. The app sends one image at a time and verifies the received prefix before continuing. Explicit failure permits up to three attempts for that missing image. An uncertain missing image stops the run; absence alone does not authorize another upload.
 

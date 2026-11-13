@@ -1813,7 +1813,13 @@ class MainWindow(QMainWindow):
             box.setWindowTitle('Relist the reviewed batch')
             box.setTextFormat(Qt.TextFormat.PlainText)
             box.setText('\n'.join(j['rxcu']+' · '+_address_summary(_collected_job_view(self.drafts,j)['address']) for j in prepared))
-            box.setInformativeText('For each listing: remove the original from its portals, archive sales as cancelled / mandate expired and rentals as withdrawn, create the replacement at the reviewed address, check its details and photos, then publish it to the same portals. A previously completed step is checked and skipped.')
+            from .relist_dates import relist_today, six_months_after
+            day = relist_today()
+            box.setInformativeText('For each listing: remove the original from its portals, archive sales as cancelled / mandate expired and rentals as withdrawn, create the replacement at the reviewed address, check its details and photos, then publish it to the same portals.\n\n'
+                'New runs use the relist day for Date listed and On market since, with expiry six calendar months later. '
+                'Today: '+day.strftime('%d %b %Y')+' → '+six_months_after(day).strftime('%d %b %Y')+'. '
+                'Sale mandate dates follow those dates. Rental occupation dates stay unchanged. '
+                'An interrupted run keeps its recorded dates and completed steps are checked and skipped.')
             box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
             box.button(QMessageBox.StandardButton.Yes).setText('Relist this batch')
             box.setDefaultButton(QMessageBox.StandardButton.Cancel)

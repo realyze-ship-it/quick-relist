@@ -2,7 +2,7 @@
 
 This module never saves, archives or publishes. It fills only an already-open
 new-listing form and reads each value back. Navigation, approval and durable
-mutation receipts belong to the workflow that calls it. No dates are renewed.
+mutation receipts and explicit date changes belong to the calling workflow.
 """
 from collections import Counter
 from copy import deepcopy

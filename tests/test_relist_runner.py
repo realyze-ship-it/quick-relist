@@ -1,5 +1,6 @@
 from copy import deepcopy
 from types import SimpleNamespace
+from datetime import date
 import pytest
 from quick_relist import relist_runner as module
 from quick_relist.run_store import RunStore, RunNeedsReview
@@ -18,7 +19,9 @@ class Provider:
         if self.fail == 'remove':
             raise RunNeedsReview('Removal is not confirmed')
         return {'reconciled_by':'fresh_source_and_portal_read', 'observed':{'published':False}}
-    def prepare(self,*args):return self.operation('prepare')
+    def prepare(self,plan):
+        self.prepared_plan=deepcopy(plan)
+        return self.operation('prepare')
     def check_unarchived_source(self,*args):
         self.calls.append('check_unarchived')
         if self.fail=='archive':raise RunNeedsReview('Archive outcome is unknown')
@@ -42,7 +45,9 @@ class Provider:
 def setup(monkeypatch):
     data={'source_capture_id':'capture','rxcu':'RXCU1000','listing_id':'111111'}
     monkeypatch.setattr(module,'latest_collection',lambda *args:{'capture':deepcopy(data)})
-    monkeypatch.setattr(module,'build_relist_plan',lambda *args:{'destinations':['website','p24']})
+    monkeypatch.setattr(module,'build_relist_plan',lambda *args:{'destinations':['website','p24'],
+        'particulars':{'mode':'sale','controls':[{'key':key,'kind':'date','value':'2090-01-01'}
+            for key in ('date_listed','on_market_since','expiry_date','mandate_signed_date','mandate_expiry')]}})
     drafts=SimpleNamespace(list_addresses=lambda *args:[{'id':'review'}])
     runs=RunStore(':memory:')
     return drafts,runs,{'id':'job','rxcu':'RXCU1000','state':'queued'}
@@ -122,6 +127,26 @@ def test_checked_copy_resume_never_repeats_original_or_creation_steps(setup):
     provider=Provider()
     assert module.RelistRunner(drafts,runs,provider).one(job)['state']=='published'
     assert provider.calls == ['recover_copy','copy','verify','publish_website','publish_p24','publication']
+
+
+def test_dates_are_saved_before_removal_and_survive_a_later_day_recovery(setup):
+    drafts,runs,job=setup
+    first=Provider(fail='remove')
+    def inspect_removal():
+        events=runs.get(job['id'])['events']
+        policy=next(e['data'] for e in events if e['kind']=='date_policy')
+        assert policy['replacement_dates']['date_listed']=='2099-08-31'
+        return first.operation('remove')
+    first.unpublish=lambda plan:inspect_removal()
+    with pytest.raises(RuntimeError):
+        module.RelistRunner(drafts,runs,first,today=lambda:date(2099,8,31)).one(job)
+    resumed=Provider()
+    result=module.RelistRunner(drafts,runs,resumed,today=lambda:date(2099,9,3)).one(job)
+    dates={c['key']:c['value'] for c in resumed.prepared_plan['particulars']['controls']}
+    assert dates['date_listed']=='2099-08-31'
+    assert dates['expiry_date']=='2100-02-28'
+    assert result['dates']==dates
+    assert 'remove' not in resumed.calls
 
 
 @pytest.mark.parametrize('extra', ['publish_website','create_other'])
