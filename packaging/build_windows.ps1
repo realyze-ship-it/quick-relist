@@ -11,9 +11,12 @@ try {
     # Unrelated tools on PATH can supply incompatible DLLs with the same name
     # (for example Poppler's ICU instead of Windows ICU required by Qt).
     $env:PATH = (Split-Path $pythonPath), (Join-Path $env:SystemRoot 'System32'), $env:SystemRoot -join ';'
+    # Selenium lazy-loads ChromeOptions and Chrome, so static analysis alone
+    # does not include these modules. Both are required by Open Hub.
     & $pythonPath -m PyInstaller --clean --noconfirm --windowed --onedir --noupx `
         --name QuickRelist --distpath $Destination --workpath build\windows `
         --specpath build --paths $repoPath --collect-submodules quick_relist `
+        --hidden-import selenium.webdriver.chrome.options --hidden-import selenium.webdriver.chrome.webdriver `
         --collect-data selenium --collect-binaries selenium packaging\windows_launcher.pyw
     if ($LASTEXITCODE -ne 0) { throw 'The Windows package did not build.' }
 } finally {

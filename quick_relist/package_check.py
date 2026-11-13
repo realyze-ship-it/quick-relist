@@ -5,6 +5,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 
+def check_chrome_imports():
+    # Selenium resolves these exports with importlib at first use. Merely
+    # importing webdriver or checking its manager binary misses absent frozen
+    # modules. Exercise the same lazy exports as ReadOnlyHub.open, without
+    # constructing a driver or starting a browser.
+    from selenium import webdriver
+    options = webdriver.ChromeOptions()
+    assert options.to_capabilities()['browserName'] == 'chrome'
+    assert callable(webdriver.Chrome)
+    return True
+
+
 def check_browser_tools(report: Path) -> int:
     """Check the frozen helper toolchain without starting Chrome or contacting Hub."""
     import subprocess
@@ -15,6 +27,8 @@ def check_browser_tools(report: Path) -> int:
 
     result = {'passed': False, 'hub_opened': False, 'browser_opened': False}
     try:
+        result['stage'] = 'chrome_imports'
+        result['chrome_imports'] = check_chrome_imports()
         result['stage'] = 'locate_browser_driver'
         paths = SeleniumManager().binary_paths(['--browser', 'chrome', '--offline', '--avoid-stats'])
         assert Path(paths['browser_path']).is_file()
@@ -73,9 +87,10 @@ def check_package(report: Path) -> int:
             assert window.windowTitle() == 'Quick Relist'
             assert hub.driver is None
             assert SeleniumManager()._get_binary().is_file()
+            assert check_chrome_imports()
             assert HubRelistUI is not None
             report.write_text(json.dumps({'passed': True, 'qt': qVersion(),
-                'window_created': True, 'driver_manager_bundled': True,
+                'window_created': True, 'driver_manager_bundled': True, 'chrome_imports': True,
                 'hub_opened': False, 'user_data_opened': False}), encoding='utf-8')
         finally:
             if window is not None:
