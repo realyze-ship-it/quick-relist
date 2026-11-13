@@ -57,6 +57,37 @@ class PhotoDownloadEvents:
         self._connection = None
         self._context = None
         self._behavior_set = False
+        self._observer_session = None
+        self._previous_session = None
+
+    def _select_current_target(self):
+        """Attach a temporary session when Selenium caches an earlier tab.
+
+        The selected WebDriver target remains authoritative. Never switch the
+        browser to match a stale event session, or relax the frame checks.
+        """
+        current = self.driver.execute_cdp_cmd("Target.getTargetInfo", {})["targetInfo"]
+        handle = self.driver.current_window_handle
+        if current.get("type") != "page" or current.get("targetId") != handle:
+            raise ValueError("The selected download target cannot be identified")
+        try:
+            cached = self._connection.execute(self._devtools.target.get_target_info())
+            if str(cached.target_id) == handle:
+                return
+        except Exception:
+            pass  # The cached page may have closed; verify a fresh session below.
+        self._previous_session = self._connection.session_id
+        self._connection.session_id = None
+        try:
+            session = self._connection.execute(self._devtools.target.attach_to_target(
+                self._devtools.target.TargetID(handle), flatten=True))
+            if not session:
+                raise ValueError("The selected download target could not be attached")
+            self._observer_session = session
+            self._connection.session_id = session
+        except Exception:
+            self._connection.session_id = self._previous_session
+            raise
 
     def _binding(self):
         # Both transports must refer to the selected page, not start_devtools'
@@ -86,6 +117,7 @@ class PhotoDownloadEvents:
             self._devtools, self._connection = self.driver.start_devtools()
             if not callable(getattr(self._connection, "remove_callback", None)):
                 raise ValueError("Callback cleanup unavailable")
+            self._select_current_target()
             browser = self._devtools.browser
             self._binding_value, self._context = self._binding()
             self._behavior_context = None if self._use_default_context else self._context
@@ -184,6 +216,16 @@ class PhotoDownloadEvents:
             except Exception:
                 self.failed = True
         self._callbacks.clear()
+        if self._observer_session is not None:
+            try:
+                self._connection.session_id = None
+                self._connection.execute(self._devtools.target.detach_from_target(
+                    session_id=self._observer_session))
+            except Exception:
+                self.failed = True
+            finally:
+                self._connection.session_id = self._previous_session
+                self._observer_session = None
 
     def __exit__(self, exc_type, exc, traceback):
         with self._lock:

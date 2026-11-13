@@ -33,7 +33,9 @@ Windows Chrome requires native HTML clipboard data to retain the source descript
 
 - Broad suite: 2,050 checks passed; 83 optional browser checks skipped.
 - A later focused suite passed 159 checks covering portal moderation, Windows clipboard, brochure review, interrupted copy recovery, runner journal and Qt worker lifetime changes.
-- The Windows portable package is built with PyInstaller. Its offline self-check passed inside the actual executable: Qt window construction and bundled driver-manager availability, with no Hub or user-data access. Development attachment/reload is disabled in the packaged launcher. Native interaction with the new executable was unavailable to the automation tool; this check is not a full packaged live Hub run.
+- The Windows portable package is built with PyInstaller. Its offline self-check passes inside the actual executable: Qt window construction, bundled driver-manager availability, dynamic Chrome imports and download-protocol version fallback, with no Hub or user-data access. Development attachment/reload is disabled in the packaged launcher.
+- The packaged app has opened Chrome and collected a further sale with 20 original photos and a rental with 16. Both archives matched the original image bytes. The first download completed automatically; the second paused because Selenium retained the first editor's event session after switching tabs. The files were preserved and reviewed locally. This is not yet an uninterrupted mixed-batch qualification.
+- Download observation now attaches a temporary session to the selected editor when the cached session belongs to another tab, retains the target/context/frame/loader checks, and restores the original connection on cleanup. A focused suite passed 100 checks, with three platform-specific skips. It covers two sequential tabs, a closed earlier tab, wrong-frame events, failed attachment and failed cleanup. The corrected executable's two offline package checks passed; a live repeat remains required.
 - All committed tests use synthetic data. No real listing captures, photos, credentials, OTPs or browser profiles belong in this repository.
 
 ## Limits still enforced

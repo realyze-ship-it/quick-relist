@@ -240,3 +240,100 @@ def test_explicit_managed_default_context_omits_unregistered_context_selector(tm
         assert driver.connection.behaviors[0]['browser_context_id'] is None
     assert driver.connection.behaviors[-1]['browser_context_id'] is None
     assert not events.failed
+
+
+class MultiTabConnection(Connection):
+    """Model Selenium returning the same socket/session after a tab switch."""
+
+    def __init__(self):
+        super().__init__()
+        self.session_id = "first-session"
+        self.attached = []
+        self.detached = []
+        self.closed_first = False
+        self.fail_attach = False
+        self.fail_detach = False
+
+    def execute(self, command):
+        name, params = command
+        if name == "attach":
+            assert self.session_id is None and params['flatten'] is True
+            if self.fail_attach:
+                raise RuntimeError("attach failed")
+            self.attached.append(params['target_id'])
+            return "second-session"
+        if name == "detach":
+            assert self.session_id is None
+            if self.fail_detach:
+                raise RuntimeError("detach failed")
+            self.detached.append(params['session_id'])
+            return
+        if name in ("target", "frame"):
+            if self.session_id == "first-session":
+                if self.closed_first:
+                    raise RuntimeError("cached tab closed")
+                return super().execute(command)
+            assert self.session_id == "second-session"
+            if name == "target":
+                return NS(target_id="second-tab", type_="page", browser_context_id="incognito")
+            return NS(frame=NS(id_="second-frame", loader_id="second-loader", parent_id=None))
+        return super().execute(command)
+
+
+def multi_tab_driver():
+    driver = Driver()
+    driver.connection = MultiTabConnection()
+    driver.devtools.target.TargetID = str
+    driver.devtools.target.attach_to_target = lambda target_id, **kw: ("attach", dict(target_id=target_id, **kw))
+    driver.devtools.target.detach_from_target = lambda **kw: ("detach", kw)
+    return driver
+
+
+@pytest.mark.parametrize("close_first", [False, True])
+def test_batch_switch_binds_selected_tab_and_restores_cached_session(tmp_path, close_first):
+    driver = multi_tab_driver()
+    first, second = tmp_path / 'first', tmp_path / 'second'
+    first.mkdir()
+    second.mkdir()
+    with PhotoDownloadEvents(driver, first, "RXCU12345") as events:
+        assert events.supported and events.arm()
+        driver.connection.begin()
+        driver.connection.progress()
+        assert events.poll() == DownloadCompletion(GUID, 20)
+    driver.current_window_handle = "second-tab"
+    driver.info['targetId'] = "second-tab"
+    driver.connection.closed_first = close_first
+    with PhotoDownloadEvents(driver, second, "RXCU67890") as events:
+        assert events.supported and events.arm()
+        driver.connection.begin(frame_id="second-frame", suggested_filename="RXCU67890.zip")
+        driver.connection.progress()
+        assert events.poll() == DownloadCompletion(GUID, 20)
+    assert not events.failed
+    assert driver.connection.session_id == "first-session"
+    assert driver.connection.attached == ["second-tab"]
+    assert driver.connection.detached == ["second-session"]
+    assert not driver.connection.callbacks
+
+
+@pytest.mark.parametrize("failure", ["attach", "detach", "wrong_frame", "switched_back"])
+def test_batch_session_failures_never_attribute(tmp_path, failure):
+    driver = multi_tab_driver()
+    driver.current_window_handle = "second-tab"
+    driver.info['targetId'] = "second-tab"
+    driver.connection.fail_attach = failure == "attach"
+    driver.connection.fail_detach = failure == "detach"
+    with PhotoDownloadEvents(driver, tmp_path, "RXCU67890") as events:
+        if failure == "attach":
+            assert not events.supported
+        else:
+            assert events.arm()
+            driver.connection.begin(frame_id="frame" if failure == "wrong_frame" else "second-frame",
+                                    suggested_filename="RXCU67890.zip")
+            driver.connection.progress()
+            if failure == "switched_back":
+                driver.current_window_handle = "tab"
+            if failure != "detach":
+                assert events.poll() is None and events.failed
+    assert not events.supported or events.failed
+    assert driver.connection.session_id == "first-session"
+    assert not driver.connection.callbacks

@@ -1359,11 +1359,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(connection)
 
         checklist, checklist_layout = _card()
-        checklist_layout.addWidget(_label("Before live relisting can be enabled", "sectionTitle"))
+        checklist_layout.addWidget(_label("How live relisting is checked", "sectionTitle"))
         for number, title, description in (
-            ("01", "A verified Hub integration", "The adapter must identify the correct account and listing, read complete original records, and verify each mutation. This build does not include a working live adapter."),
+            ("01", "The correct Hub listing", "Quick Relist checks the listing reference and saved details before making changes. Keep the dedicated Hub browser open while the app is working."),
             ("02", "Complete source capture", "The original address, listing fields, media, and supporting information must be recorded before changes. Missing source data blocks the workflow."),
-            ("03", "Your address and archive review", "Correct the captured address and confirm both Listing has been cancelled and Mandate expired. Saving a review alone makes no Hub changes."),
+            ("03", "Your address review", "Review each prefilled address before starting the batch. Sales use Listing has been cancelled and Mandate expired; rentals use Listing has been withdrawn. Saving an address review alone makes no Hub changes."),
             ("04", "One verified operation at a time", "Removal, archiving, copying, and publication are separate recorded steps. An uncertain result must be checked before a retry to avoid duplicate listings."),
         ):
             row = QHBoxLayout()
