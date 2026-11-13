@@ -148,6 +148,7 @@ def collect_batch(hub, drafts, jobs, media_root, *, cancelled=lambda: False, pro
                 if name == 'hub_readonly' and getattr(hub, '_pending_editor', None) is None:
                     from types import MethodType
                     hub.search_reference = MethodType(module.ReadOnlyHub.search_reference, hub)
+                    hub._select_all_listing_types = MethodType(module.ReadOnlyHub._select_all_listing_types, hub)
                     hub.close = MethodType(module.ReadOnlyHub.close, hub)
     collected = []
     for job in jobs:
@@ -158,7 +159,20 @@ def collect_batch(hub, drafts, jobs, media_root, *, cancelled=lambda: False, pro
         saved = latest_collection(drafts, job['id'])
         if saved:
             if saved['capture'].get('download_needs_review'):
-                raise CollectionStopped('Review the previous photo download before continuing this batch.')
+                from .downloads import reviewed_archive_receipt
+                media = saved['capture'].get('media', {})
+                receipt = (reviewed_archive_receipt(Path(media_root).parent / 'downloads',
+                           media.get('pack_archive_sha256')) if media_root is not None
+                           and media.get('source_bytes_verified') is True
+                           and media.get('listing_id') == saved['capture'].get('listing_id') else None)
+                if receipt is None:
+                    raise CollectionStopped('Review the previous photo download before continuing this batch.')
+                reviewed = deepcopy(saved['capture'])
+                reviewed['download_needs_review'] = False
+                reviewed['download_review_receipt'] = receipt
+                reviewed['download_review_method'] = 'operator_review_and_original_byte_match'
+                # Preserve the original observation and all source/address IDs.
+                saved = drafts.get_capture(drafts.save_capture(job['id'], reviewed))
             collected.append(saved)
             continue
         result = collect_listing(hub, drafts, job, media_root, cancelled=cancelled, progress=progress)

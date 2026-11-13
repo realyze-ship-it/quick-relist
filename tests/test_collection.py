@@ -58,3 +58,46 @@ def test_resuming_does_not_skip_an_unresolved_download(monkeypatch):
 def test_required_pages_follow_observed_listing_type(code, expected):
     assert collection.required_pages({'pages':[{'page_key':'details','fields':[
         {'name':'listing_type_id','selected_options':[{'value':code,'text':'Synthetic'}]}]}]}) == expected
+
+
+@pytest.mark.parametrize('change', ['none', 'different_archive', 'unverified_bytes', 'wrong_listing', 'pending_download'])
+def test_operator_review_resumes_only_exact_saved_original_bytes(tmp_path, monkeypatch, change):
+    import hashlib, json
+    from quick_relist.downloads import MARKER_NAME, inspect_download, finish_download_review
+    root = tmp_path / 'downloads'
+    root.mkdir()
+    directory = root / ('download-' + '1' * 32)
+    directory.mkdir()
+    archive = b'synthetic original archive'
+    (directory / 'photos.zip').write_bytes(archive)
+    marker = {'version': 1, 'state': 'attempted', 'directory': directory.name}
+    (root / MARKER_NAME).write_text(json.dumps(marker))
+    drafts = DraftStore(':memory:')
+    capture = {'schema_version': 'hub-collected-listing/v1', 'complete': False,
+               'listing_id': '123', 'source_capture_id': 'preserved-source',
+               'download_needs_review': True, 'media': {'source_bytes_verified': True,
+               'listing_id': '123', 'pack_archive_sha256': hashlib.sha256(archive).hexdigest()}}
+    if change == 'different_archive': capture['media']['pack_archive_sha256'] = '0' * 64
+    if change == 'unverified_bytes': capture['media']['source_bytes_verified'] = False
+    if change == 'wrong_listing': capture['media']['listing_id'] = '456'
+    original_id = drafts.save_capture('0', capture)
+    review = inspect_download(root)
+    finish_download_review(root, review['review_token'], browsers_closed=True, files_reviewed=True)
+    if change == 'pending_download':
+        (root / MARKER_NAME).write_text(json.dumps(marker))
+    calls = []
+    def collect(hub, store, job, media_root, **kwargs):
+        calls.append(job['id'])
+        return {'capture': {}}
+    monkeypatch.setattr(collection, 'collect_listing', collect)
+    if change != 'none':
+        with pytest.raises(collection.CollectionStopped, match='previous photo download'):
+            collection.collect_batch(SimpleNamespace(), drafts, jobs(), tmp_path / 'media')
+        assert calls == []
+    else:
+        result = collection.collect_batch(SimpleNamespace(), drafts, jobs(), tmp_path / 'media')
+        assert calls == ['1', '2']
+        assert result[0]['capture']['download_needs_review'] is False
+        assert result[0]['capture']['source_capture_id'] == 'preserved-source'
+        assert 'download_review_receipt' in result[0]['capture']
+    assert drafts.get_capture(original_id)['capture'] == capture

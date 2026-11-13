@@ -147,6 +147,25 @@ def finish_download_review(download_root, review_token, *, browsers_closed=False
             current = _read_review(root)
             if current["review_token"] != review_token:
                 raise DownloadReviewError("The download files or record changed after review. Review them again; the pause was kept.")
+            archive_hashes = []
+            # A sole, closed, reviewed ZIP can later match an already saved
+            # collection by its full byte digest. This does not assert browser
+            # event attribution and never licenses another download click.
+            if len(current['files']) == 1 and current['files'][0]['kind'] == 'zip_candidate':
+                entry = current['files'][0]
+                if 0 < entry['size'] <= 256 * 1024 * 1024:
+                    path = Path(current['directory']) / entry['name']
+                    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0))
+                    with os.fdopen(fd, 'rb') as stream:
+                        before = os.fstat(stream.fileno())
+                        if _stamp(before)[:4] != entry['stamp'][:4]:
+                            raise DownloadReviewError('The reviewed archive changed; the pause was kept.')
+                        digest = hashlib.sha256()
+                        while chunk := stream.read(64 * 1024):
+                            digest.update(chunk)
+                        if _stamp(os.fstat(stream.fileno())) != _stamp(before):
+                            raise DownloadReviewError('The reviewed archive changed; the pause was kept.')
+                    archive_hashes.append(digest.hexdigest())
             # A fresh protected directory supplies an owner-only Windows DACL
             # even when the existing downloads root has inherited permissions.
             receipt_directory = root / ("download-reviewed-" + uuid4().hex)
@@ -154,6 +173,7 @@ def finish_download_review(download_root, review_token, *, browsers_closed=False
             receipt = receipt_directory / "review.json"
             with _private_file(receipt) as stream:
                 stream.write(json.dumps({**current, "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                                         "reviewed_archive_hashes": archive_hashes,
                                          "operator_confirmed_browsers_closed": True,
                                          "operator_confirmed_files_reviewed": True,
                                          "state": "reviewed_files_preserved"}, indent=2, ensure_ascii=True).encode())
@@ -172,6 +192,35 @@ def finish_download_review(download_root, review_token, *, browsers_closed=False
         raise
     except (OSError, ValueError):
         raise DownloadReviewError("The review could not finish. Refresh to check the pause status; files were not removed. Do not automatically retry a download.") from None
+
+
+def reviewed_archive_receipt(download_root, archive_sha256):
+    """Find durable operator review of these exact bytes after the pause ended."""
+    if not isinstance(archive_sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', archive_sha256):
+        return None
+    root = Path(download_root)
+    marker = root / MARKER_NAME
+    if marker.exists() or marker.is_symlink() or root.is_symlink():
+        return None
+    for directory in root.glob('download-reviewed-*'):
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        path = directory / 'review.json'
+        try:
+            if not 0 < _regular(path).st_size <= 1024 * 1024:
+                continue
+            record = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(record, dict):
+                continue
+            hashes = record.get('reviewed_archive_hashes')
+            if (record.get('state') == 'reviewed_files_preserved'
+                    and record.get('operator_confirmed_browsers_closed') is True
+                    and record.get('operator_confirmed_files_reviewed') is True
+                    and isinstance(hashes, list) and hashes == [archive_sha256]):
+                return str(path)
+        except (OSError, ValueError, DownloadReviewError):
+            continue
+    return None
 
 
 def _sync_directory(root):

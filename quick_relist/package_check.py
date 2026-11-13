@@ -14,6 +14,15 @@ def check_chrome_imports():
     options = webdriver.ChromeOptions()
     assert options.to_capabilities()['browserName'] == 'chrome'
     assert callable(webdriver.Chrome)
+    # Chrome can be newer than Selenium's generated protocol files. Exercise
+    # the filesystem-based version fallback as well as its dynamic import.
+    from selenium.webdriver.remote import webdriver as remote_webdriver
+    remote_webdriver.import_cdp()
+    protocol = remote_webdriver.cdp.import_devtools('999')
+    assert callable(protocol.browser.DownloadWillBegin)
+    assert callable(protocol.browser.DownloadProgress)
+    assert callable(protocol.target.get_target_info)
+    assert callable(protocol.page.get_frame_tree)
     return True
 
 

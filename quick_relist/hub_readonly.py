@@ -297,24 +297,7 @@ class ReadOnlyHub:
             WebDriverWait(self.driver, 10).until(lambda driver: not any(
                 m.is_displayed() for m in driver.find_elements(By.CSS_SELECTOR, '[role="listbox"]')))
         if all_listing_types:
-            # A sale-only filter silently hides rental references in a mixed
-            # batch. Change only this observed filter, retaining office/agents.
-            from selenium.webdriver.common.keys import Keys
-            groups = self.driver.find_elements(By.CSS_SELECTOR, 'main .MuiFormControl-root')
-            groups = [g for g in groups if any(e.get_attribute('textContent').strip() == 'Listing type'
-                       for e in g.find_elements(By.XPATH, './label'))]
-            if len(groups) != 1:
-                raise ValueError('The listing-type filter could not be identified. Select All listing types in Hub.')
-            selectors = groups[0].find_elements(By.CSS_SELECTOR, '[role="combobox"]')
-            if len(selectors) != 1:
-                raise ValueError('The listing-type filter is ambiguous.')
-            if selectors[0].get_attribute('textContent').strip() != 'All':
-                selectors[0].send_keys(Keys.SPACE)
-                options = [e for e in self.driver.find_elements(By.CSS_SELECTOR, '[role="option"]')
-                           if e.is_displayed() and e.get_attribute('textContent').strip() == 'All']
-                if len(options) != 1:
-                    raise ValueError('All listing types is not available in the filter.')
-                options[0].click()
+            self._select_all_listing_types()
         # Both strings were observed in Hub: the visible label and input placeholder.
         prompts = {"Search fusion ref, listing ID or address", "Enter fusion ref, listing ID or address"}
         candidates = self.driver.find_elements(By.XPATH, "//input[@placeholder or @aria-label or @id]")
@@ -339,6 +322,56 @@ class ReadOnlyHub:
             raise ValueError('Hub did not retain the requested search reference. No search was submitted.')
         buttons[0].click()
         return {"searched": True, "warning": "Review the results and filters manually; this does not verify a match."}
+
+    def _select_all_listing_types(self, *, timeout=10, poll_interval=.1):
+        """Wait for Hub's asynchronous menu and confirmed filter change."""
+        from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        def selector():
+            groups = [g for g in self.driver.find_elements(By.CSS_SELECTOR, 'main .MuiFormControl-root')
+                      if g.is_displayed() and any(e.get_attribute('textContent').strip() == 'Listing type'
+                          for e in g.find_elements(By.XPATH, './label'))]
+            if len(groups) != 1:
+                raise ValueError('The listing-type filter could not be identified. Select All listing types in Hub.')
+            controls = [e for e in groups[0].find_elements(By.CSS_SELECTOR, '[role="combobox"]')
+                        if e.is_displayed() and e.is_enabled()]
+            if len(controls) != 1:
+                raise ValueError('The listing-type filter is ambiguous.')
+            return controls[0]
+
+        def menus():
+            found = [e for e in self.driver.find_elements(By.CSS_SELECTOR, '[role="listbox"]')
+                     if e.is_displayed()]
+            if len(found) > 1:
+                raise ValueError('More than one Hub menu is open. Close them before searching.')
+            return found
+
+        control = selector()
+        if control.get_attribute('textContent').strip() == 'All':
+            return
+        control.send_keys(Keys.SPACE)
+        wait = WebDriverWait(self.driver, timeout, poll_frequency=poll_interval,
+                             ignored_exceptions=(StaleElementReferenceException,))
+
+        def all_option(_):
+            opened = menus()
+            if not opened:
+                return False
+            options = [e for e in opened[0].find_elements(By.CSS_SELECTOR, '[role="option"]')
+                       if e.is_displayed() and e.is_enabled()
+                       and e.get_attribute('textContent').strip() == 'All']
+            if len(options) > 1:
+                raise ValueError('All listing types is ambiguous in the filter.')
+            return options[0] if options else False
+
+        try:
+            wait.until(all_option).click()
+            wait.until(lambda _: not menus() and selector().get_attribute('textContent').strip() == 'All')
+        except TimeoutException:
+            raise ValueError('Hub did not finish selecting All listing types. Check the filter before continuing.') from None
 
     def open_listing_editor(self, rxcu, *, timeout=15.0, poll_interval=0.1):
         """Open the exact matching result's Edit Listing link, never Archive.

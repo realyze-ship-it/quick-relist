@@ -88,6 +88,31 @@ def test_zip_partial_and_other_files_are_preserved_byte_for_byte(attempt):
     assert {path.name: path.read_bytes() for path in folder.iterdir()} == entries
 
 
+def test_completed_review_receipt_records_exact_archive_digest(attempt):
+    from quick_relist.downloads import reviewed_archive_receipt
+    root, folder = attempt
+    raw = b'synthetic archive bytes'
+    digest = hashlib.sha256(raw).hexdigest()
+    (folder / 'one.zip').write_bytes(raw)
+    result = finish(root, inspect_download(root))
+    receipt = json.loads(Path(result['receipt_path']).read_text())
+    assert receipt['reviewed_archive_hashes'] == [digest]
+    assert receipt['attribution_verified'] is False
+    assert reviewed_archive_receipt(root, digest) == result['receipt_path']
+    assert reviewed_archive_receipt(root, '0' * 64) is None
+
+
+def test_review_with_partial_files_cannot_release_saved_collection(attempt):
+    from quick_relist.downloads import reviewed_archive_receipt
+    root, folder = attempt
+    raw = b'synthetic archive bytes'
+    (folder / 'one.zip').write_bytes(raw)
+    (folder / 'pending.crdownload').write_bytes(b'partial')
+    result = finish(root, inspect_download(root))
+    assert json.loads(Path(result['receipt_path']).read_text())['reviewed_archive_hashes'] == []
+    assert reviewed_archive_receipt(root, hashlib.sha256(raw).hexdigest()) is None
+
+
 @pytest.mark.parametrize("closed,reviewed", [(False, True), (True, False), (False, False), (1, True)])
 def test_both_explicit_attestations_required(attempt, closed, reviewed):
     root, _ = attempt
