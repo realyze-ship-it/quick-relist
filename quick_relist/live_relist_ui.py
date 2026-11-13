@@ -650,6 +650,11 @@ class HubRelistUI:
         self.wait(lambda:self.driver.find_elements('css selector','input[name="total_commission_percentage"]'), 'Commission fields did not load.')
         field = self.one('input[name="total_commission_percentage"]')
         field.send_keys(Keys.CONTROL,'a',Keys.NULL,fields['total_commission_percentage'],Keys.TAB)
+        # Hub rounds the displayed percentage. Re-entering that rounded value
+        # alone can change the actual amount and every agent's fees. Set the
+        # captured amount last and let Hub derive its percentage from it.
+        amount = self.one('input[name="total_commission_value"]')
+        amount.send_keys(Keys.CONTROL,'a',Keys.NULL,fields['total_commission_value'],Keys.TAB)
         tables = [t for t in source['tables'] if t['rows'] and t['rows'][0][0]=='Agent']
         if len(tables)!=1:
             raise CopyStopped('The commission agent table is missing or ambiguous.')
@@ -671,6 +676,16 @@ class HubRelistUI:
                 self.button('Save',dialog)
         self.button('Next')
         self.wait(lambda:parse_editor_url(self.driver.current_url)['page_key']=='media','Commission save did not finish.')
+        # Verify the saved money before transferring photos, as well as in
+        # the final full listing comparison. Never accept a recalculated total.
+        self.tab('Deal Particulars')
+        self.wait(lambda:self.driver.find_elements('css selector','input[name="total_commission_value"]'),
+                  'The saved commission fields did not load.')
+        self.guard()
+        saved = PartialHubCapture(self.driver).capture_current_page(target['listing_id'])['pages'][-1]
+        if not same_commission(source, saved):
+            raise CopyStopped('Saved commission details differ. No photos were uploaded and the replacement remains unpublished.')
+        self.tab('Media')
         return {'commission_copied':True}
 
     def copy_photos(self, target, plan, runs, run_id):

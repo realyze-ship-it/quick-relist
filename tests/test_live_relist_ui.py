@@ -42,6 +42,75 @@ def test_commission_comparison_rejects_incomplete_or_changed_totals(change):
     assert not module.same_commission(source,copy)
 
 
+@pytest.mark.parametrize('changed_saved_amount', [False, True])
+def test_commission_writer_preserves_amount_when_displayed_percentage_is_rounded(monkeypatch, changed_saved_amount):
+    from copy import deepcopy
+    from decimal import Decimal
+    source = commission_page()
+    source['fields'] = [
+        {'name':'total_commission_value','value':'200'},
+        {'name':'total_commission_percentage','value':'1.35'}]
+    values = {'total_commission_value':'0','total_commission_percentage':'0'}
+    writes, tabs, saved_pages = [], [], []
+    class Input:
+        def __init__(self, name): self.name = name
+        def send_keys(self, *keys):
+            value = keys[3]
+            writes.append((self.name, value))
+            values[self.name] = value
+            if self.name == 'total_commission_percentage':
+                values['total_commission_value'] = str(Decimal(value) * Decimal('14800') / 100)
+            else:
+                values['total_commission_percentage'] = str(Decimal(value) * 100 / Decimal('14800'))
+    class Cell:
+        def __init__(self, value): self.value = value
+        def get_attribute(self, name): return self.value
+    class Row:
+        def __init__(self, row): self.cells = [Cell(value) for value in row]
+        def find_elements(self, by, selector):
+            assert selector == 'td'
+            return self.cells
+    def find(by, selector):
+        if selector == 'main tbody tr':
+            return [Row(row) for row in source['tables'][0]['rows'][1:-1]]
+        for name in values:
+            if selector == f'input[name="{name}"]': return [Input(name)]
+        raise AssertionError(selector)
+    driver = SimpleNamespace(current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars',find_elements=find)
+    ui = object.__new__(module.HubRelistUI)
+    ui.driver = driver
+    ui.bind = lambda target: None
+    ui.guard = lambda: None
+    ui.wait = lambda read, message: read() or pytest.fail(message)
+    def tab(name):
+        tabs.append(name)
+        driver.current_url = 'https://hub.remax.co.za/app/listings/edit/42/' + ('media' if name == 'Media' else 'deal_particulars')
+    ui.tab = tab
+    def save(name):
+        assert name == 'Next'
+        page = deepcopy(source)
+        page['fields'][0]['value'] = '201' if changed_saved_amount else values['total_commission_value']
+        page['fields'][1]['value'] = str(Decimal(values['total_commission_percentage']).quantize(Decimal('.01')))
+        saved_pages.append(page)
+        driver.current_url = 'https://hub.remax.co.za/app/listings/edit/42/media'
+    ui.button = save
+    class Reader:
+        def __init__(self, observed_driver): assert observed_driver is driver
+        def capture_current_page(self, listing_id):
+            assert listing_id == '42' and driver.current_url.endswith('/deal_particulars')
+            return {'pages':saved_pages}
+    monkeypatch.setattr(module, 'PartialHubCapture', Reader)
+    if changed_saved_amount:
+        with pytest.raises(CopyStopped, match='No photos were uploaded'):
+            ui.copy_commission({'listing_id':'42'}, source)
+        assert tabs[-1] == 'Deal Particulars'
+    else:
+        assert ui.copy_commission({'listing_id':'42'}, source) == {'commission_copied':True}
+        assert module.same_commission(source, saved_pages[0])
+        assert tabs[-1] == 'Media'
+    assert writes == [('total_commission_percentage','1.35'),('total_commission_value','200')]
+
+
 @pytest.mark.parametrize('saved_selection,accepted', [
     ('Example Park, First City, Province', True),
     ('Example Park, Other City, Province', False), ('Example Park', False)])
