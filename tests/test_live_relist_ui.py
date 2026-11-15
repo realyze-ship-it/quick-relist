@@ -208,6 +208,28 @@ def test_agent_editor_saves_only_the_verified_split_on_the_bound_copy(change):
         save.send_keys.assert_not_called()
 
 
+def test_commission_save_waits_through_progress_dialog_without_confirming_it():
+    from unittest.mock import Mock
+    driver = Mock(current_window_handle='sale', current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars')
+    ui = module.HubRelistUI(SimpleNamespace(driver=driver), '.', clipboard=None)
+    ui.confirm_commission_warning = Mock()
+    target = {'listing_id':'42', 'handle':'sale'}
+    dialog = Mock()
+    driver.find_elements.return_value = [dialog]
+    for text in ('', 'Saving', 'Review something else'):
+        dialog.text = text
+        assert not ui.commission_saved_to_media(target, '5.0')
+    ui.confirm_commission_warning.assert_not_called()
+    dialog.text = 'Confirm commission rate\nYou have entered a rate'
+    assert not ui.commission_saved_to_media(target, '5.0')
+    ui.confirm_commission_warning.assert_called_once_with(target, '5.0')
+    driver.current_url = driver.current_url.replace('deal_particulars', 'media')
+    assert ui.commission_saved_to_media(target, '5.0')
+    driver.current_url = driver.current_url.replace('/42/', '/43/')
+    with pytest.raises(CopyStopped):
+        ui.commission_saved_to_media(target, '5.0')
+
+
 @pytest.mark.parametrize('column',range(8))
 def test_commission_comparison_rejects_changed_agent_money_or_identity(column):
     source=commission_page(); copy=commission_page()
@@ -262,7 +284,7 @@ def test_commission_writer_preserves_amount_when_displayed_percentage_is_rounded
         for name in values:
             if selector == f'input[name="{name}"]': return [Input(name)]
         raise AssertionError(selector)
-    driver = SimpleNamespace(current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars',find_elements=find)
+    driver = SimpleNamespace(current_window_handle='sale', current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars',find_elements=find)
     ui = object.__new__(module.HubRelistUI)
     ui.driver = driver
     ui.bind = lambda target: None
@@ -288,10 +310,10 @@ def test_commission_writer_preserves_amount_when_displayed_percentage_is_rounded
     monkeypatch.setattr(module, 'PartialHubCapture', Reader)
     if changed_saved_amount:
         with pytest.raises(CopyStopped, match='No photos were uploaded'):
-            ui.copy_commission({'listing_id':'42'}, source)
+            ui.copy_commission({'listing_id':'42','handle':'sale'}, source)
         assert tabs[-1] == 'Deal Particulars'
     else:
-        assert ui.copy_commission({'listing_id':'42'}, source) == {'commission_copied':True}
+        assert ui.copy_commission({'listing_id':'42','handle':'sale'}, source) == {'commission_copied':True}
         assert module.same_commission(source, saved_pages[0])
         assert tabs[-1] == 'Media'
     assert writes == [('total_commission_percentage','1.35'),('total_commission_value','200')]

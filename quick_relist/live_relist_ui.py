@@ -791,6 +791,26 @@ class HubRelistUI:
         from selenium.webdriver.support.expected_conditions import invisibility_of_element
         self.wait(lambda:invisibility_of_element(dialog)(self.driver), 'Hub did not close its commission confirmation.')
 
+    def commission_saved_to_media(self, target, rate):
+        from selenium.common.exceptions import StaleElementReferenceException
+        route = parse_editor_url(self.driver.current_url)
+        if self.driver.current_window_handle != target['handle'] or route['listing_id'] != target['listing_id']:
+            raise CopyStopped('Hub changed listings while saving the commission.')
+        if route['page_key'] == 'media':
+            return True
+        if route['page_key'] != 'deal_particulars':
+            raise CopyStopped('Hub opened an unexpected page while saving the commission.')
+        # Next can show a temporary dialog while the save navigates to Media.
+        # Only enter the warning handler for a recognizable rate confirmation.
+        try:
+            dialogs = [d for d in self.driver.find_elements('css selector', '[role="dialog"]') if d.is_displayed()]
+            warning = len(dialogs) == 1 and ' '.join(dialogs[0].text.split()).casefold().startswith('confirm commission rate ')
+        except StaleElementReferenceException:
+            return False
+        if warning:
+            self.confirm_commission_warning(target, rate)
+        return False
+
     def edit_commission_split(self, target, row, saved):
         from selenium.webdriver.common.keys import Keys
         from selenium.webdriver.support.expected_conditions import invisibility_of_element
@@ -851,12 +871,8 @@ class HubRelistUI:
                 self.edit_commission_split(target, rows[0], saved)
         self.confirm_commission_warning(target, fields['total_commission_percentage'])
         self.button('Next')
-        def saved_to_media():
-            if parse_editor_url(self.driver.current_url)['page_key'] == 'media':
-                return True
-            self.confirm_commission_warning(target, fields['total_commission_percentage'])
-            return False
-        self.wait(saved_to_media, 'Commission save did not finish.')
+        self.wait(lambda:self.commission_saved_to_media(target, fields['total_commission_percentage']),
+                  'Hub did not finish saving the commission. Check the open page or dialog before continuing.')
         # Verify the saved money before transferring photos, as well as in
         # the final full listing comparison. Never accept a recalculated total.
         self.tab('Deal Particulars')
