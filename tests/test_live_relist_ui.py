@@ -6,6 +6,41 @@ from quick_relist import live_relist_ui as module
 from quick_relist.form_copy import CopyStopped
 
 
+@pytest.mark.parametrize('scenario', ['rerender', 'page_change', 'ambiguous', 'uncertain_keypress'])
+def test_button_rereads_only_before_dispatch(tmp_path, monkeypatch, scenario):
+    from selenium.common.exceptions import StaleElementReferenceException
+    from selenium.webdriver.common.keys import Keys
+    from unittest.mock import Mock
+
+    driver = Mock(current_window_handle='editor', current_url='https://example.test/media')
+    ui = module.HubRelistUI(SimpleNamespace(driver=driver), tmp_path, clipboard=None)
+    monkeypatch.setattr(module.time, 'sleep', lambda seconds: None)
+    stale = Mock()
+    def rerender(_):
+        if scenario == 'page_change':
+            driver.current_url = 'https://example.test/portals'
+        raise StaleElementReferenceException()
+    stale.get_attribute.side_effect = rerender
+    button = Mock()
+    button.get_attribute.return_value = 'Next'
+    if scenario == 'uncertain_keypress':
+        button.send_keys.side_effect = StaleElementReferenceException()
+    driver.find_elements.side_effect = [[stale], [button, button] if scenario == 'ambiguous' else [button]]
+
+    if scenario in ('page_change', 'ambiguous'):
+        with pytest.raises(CopyStopped):
+            ui.button('Next')
+        button.send_keys.assert_not_called()
+    else:
+        if scenario == 'uncertain_keypress':
+            with pytest.raises(StaleElementReferenceException):
+                ui.button('Next')
+        else:
+            ui.button('Next')
+        button.send_keys.assert_called_once_with(Keys.ENTER)
+    stale.send_keys.assert_not_called()
+
+
 def commission_page():
     return {'page_key':'deal_particulars', 'fields':[{'name':'total_commission_percentage','value':'3.0'}],
         'rich_text':[], 'dialogs':[], 'media':[], 'tables':[{'rows':[

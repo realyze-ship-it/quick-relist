@@ -219,13 +219,37 @@ class HubRelistUI:
         return found[0]
 
     def button(self, text, root=None):
+        from selenium.common.exceptions import StaleElementReferenceException
         from selenium.webdriver.common.keys import Keys
         self.guard()
-        buttons = [e for e in (root or self.driver).find_elements('css selector','button')
-                   if e.is_displayed() and ' '.join(e.get_attribute('textContent').split()).casefold() == text.casefold()]
-        if len(buttons) != 1 or not buttons[0].is_enabled():
-            raise CopyStopped('The ' + text + ' control is unavailable or ambiguous.')
-        buttons[0].send_keys(Keys.ENTER)
+        handle, url = self.driver.current_window_handle, self.driver.current_url
+        unavailable = 'The ' + text + ' control is unavailable or ambiguous.'
+
+        def check_page():
+            self.guard()
+            if self.driver.current_window_handle != handle or self.driver.current_url != url:
+                raise CopyStopped('Hub changed pages while locating the ' + text + ' control.')
+
+        def find_button():
+            check_page()
+            try:
+                buttons = [e for e in (root or self.driver).find_elements('css selector', 'button')
+                           if ' '.join(e.get_attribute('textContent').split()).casefold() == text.casefold()
+                           and e.is_displayed()]
+                if len(buttons) > 1:
+                    raise CopyStopped(unavailable)
+                return buttons[0] if buttons and buttons[0].is_enabled() else None
+            except StaleElementReferenceException:
+                if root is not None:
+                    # A replaced dialog cannot safely be rediscovered outside its scope.
+                    raise CopyStopped(unavailable) from None
+                return None
+
+        button = self.wait(find_button, unavailable)
+        check_page()
+        # A keypress can reach Hub even if the browser loses its response.
+        # Only the lookup above may repeat.
+        button.send_keys(Keys.ENTER)
 
     def bind(self, target):
         self.current = deepcopy(target)
