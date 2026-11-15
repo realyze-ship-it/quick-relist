@@ -61,7 +61,8 @@ class UI:
                      "advance_button", "reconcile_button", "cancel_job_button", "audit_button", "detail_error",
                      "review_download_button", "review_download_session_button", "detail_title", "detail_state",
                      "detail_address", "status_bar", "verify_captured_address_button",
-                     "check_publication_button", "collection_summary"):
+                     "check_publication_button", "collection_summary", "record_recovery_button",
+                     "check_existing_copy_button"):
             setattr(self, name, Widget())
         self._select_job()
 
@@ -73,7 +74,7 @@ class UI:
 
 
 for name, method in production_methods().items():
-    setattr(UI, name, staticmethod(method) if name == "_safe_readonly_call" else method)
+    setattr(UI, name, method)
 
 
 class EditorRecheckUITests(unittest.TestCase):

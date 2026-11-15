@@ -41,6 +41,34 @@ def test_button_rereads_only_before_dispatch(tmp_path, monkeypatch, scenario):
     stale.send_keys.assert_not_called()
 
 
+def test_saved_description_allows_only_observed_punctuation_substitutions():
+    source = {'description_html':'<p><strong>Owner’s</strong> flat – sunny — quiet.</p>',
+              'description_text':'Owner’s flat – sunny — quiet.', 'marketing_header':'Flat – sunny'}
+    plain = {**source, 'description_html':"<p><strong>Owner's</strong> flat - sunny - quiet.</p>",
+             'description_text':"Owner's flat - sunny - quiet."}
+    assert module.same_saved_media(source, plain)
+    for key, change in [('description_html', plain['description_html'].replace('strong','em')),
+                        ('description_text', plain['description_text'].replace('sunny','small')),
+                        ('marketing_header','Flat - sunny')]:
+        assert not module.same_saved_media(source, {**plain, key:change})
+    assert not module.same_saved_media(plain, source)
+
+
+def test_recovered_photo_count_is_scoped_to_one_copy():
+    from unittest.mock import Mock
+    ui = object.__new__(module.HubRelistUI)
+    ui.driver = Mock()
+    ui.bind, ui.tab, ui.guard = Mock(), Mock(), Mock()
+    ui.wait = lambda read, message: read() or pytest.fail(message)
+    def check(target, count):
+        ui.driver.find_elements.side_effect = lambda by, css: [object()] if 'file' in css else [object()] * count
+        ui.copy_photos(target, {'photos':[]}, None, None)
+    check({'reference':'A', 'verified_photo_prefix_count':3}, 3)
+    check({'reference':'B'}, 0)
+    with pytest.raises(CopyStopped, match='already contains images'):
+        check({'reference':'B'}, 3)
+
+
 def commission_page():
     return {'page_key':'deal_particulars', 'fields':[{'name':'total_commission_percentage','value':'3.0'}],
         'rich_text':[], 'dialogs':[], 'media':[], 'tables':[{'rows':[

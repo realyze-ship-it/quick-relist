@@ -154,6 +154,21 @@ def same_commission(expected, actual, review=None):
     return left is not None and right is not None and left == right
 
 
+def same_saved_media(expected, actual):
+    # Hub's save converts typographic punctuation in the long description to
+    # plain characters. Keep the source HTML for writing and compare both the
+    # formatted markup and the plain wording after this one-way substitution.
+    if expected.keys() != actual.keys():
+        return False
+    punctuation = str.maketrans({'–':'-', '—':'-', '’':"'"})
+    for key, value in expected.items():
+        if actual[key] == value:
+            continue
+        if key not in ('description_html', 'description_text') or actual[key] != value.translate(punctuation):
+            return False
+    return True
+
+
 def only_description_formatting_changed(expected, actual):
     if any(actual.get(k) != v for k,v in expected.items() if not k.startswith('description_')):
         return False
@@ -559,7 +574,7 @@ class HubRelistUI:
         self.driver.refresh()
         self.wait(lambda:self.driver.find_elements('css selector','textarea[name="marketing_header"]'), 'The saved media page did not load.')
         actual = media_plan(PartialHubCapture(self.driver).capture_current_page()['pages'][-1])
-        if actual != plan['media']:
+        if not same_saved_media(plan['media'], actual):
             raise CopyStopped('The saved descriptions differ from the source. The replacement was not sent to portals.')
         return {'descriptions_saved_and_reloaded':True}
 
@@ -641,13 +656,13 @@ class HubRelistUI:
             saved_media = media_plan(page)
             empty = not saved_media['description_text'].strip() and all(
                 not value.strip() for key,value in saved_media.items() if key not in ('description_html','description_text'))
-            outcome = ('matching' if saved_media == plan['media'] else 'empty' if empty else
+            outcome = ('matching' if same_saved_media(plan['media'], saved_media) else 'empty' if empty else
                        'formatting_changed' if only_description_formatting_changed(plan['media'], saved_media) else None)
             if not outcome:
                 raise CopyStopped('The saved descriptions contain other text. Review them before overwriting.')
             runs.reconcile_media_text(previous['id'], {'reference':reference,'listing_id':ident,
                 'reconciled_by':'fresh_unpublished_media_read','outcome':outcome})
-        self.verified_photo_prefix_count = count
+        target['verified_photo_prefix_count'] = count
         return target
 
     @diagnosed
@@ -772,7 +787,7 @@ class HubRelistUI:
         self.tab('Media')
         self.wait(lambda:self.driver.find_elements('css selector','main input[type="file"]'), 'The image chooser did not load.')
         received_count = len(self.driver.find_elements('css selector','main img[id^="image-"]'))
-        prefix = getattr(self, 'verified_photo_prefix_count', 0)
+        prefix = target.get('verified_photo_prefix_count', 0)
         if received_count != prefix:
             raise CopyStopped('The new copy already contains images. Check them before sending more files.')
         # One photo at a time avoids Hub silently dropping a large batch. Each
@@ -864,7 +879,7 @@ class HubRelistUI:
         actual = self.captured_editor(target['reference'])
         suburb_label = self._verify_particulars(actual, plan)
         pages = {p['page_key']:p for p in actual['pages']}
-        if media_plan(pages['media'])!=plan['media']:
+        if not same_saved_media(plan['media'], media_plan(pages['media'])):
             raise CopyStopped('Saved descriptions differ. The replacement remains unpublished.')
         photos = download_originals(pages['media']['media'],target['listing_id'],self.media_root,cancelled=self.cancelled)
         check = compare_uploaded_images(plan['photos'],photos['media_manifest'])
