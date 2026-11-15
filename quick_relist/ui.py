@@ -1497,7 +1497,7 @@ class MainWindow(QMainWindow):
         self.stat_values["queued"].setText(str(len(self.jobs)))
         collected_views = {job['id']: _collected_job_view(self.drafts, job) for job in self.jobs}
         self.stat_values["reviewed"].setText(str(sum(bool(job.get("approved")) or bool((collected_views[job['id']] or {}).get('reviewed')) for job in self.jobs)))
-        from .relist_runner import display_status, copy_can_be_checked, removal_can_be_checked
+        from .relist_runner import display_status, copy_can_be_checked, removal_can_be_checked, batch_can_advance
         runs = {j['id']: self.runs.get(j['id']) if self.runs is not None else None for j in self.jobs}
         run_statuses = {key: display_status(run) for key, run in runs.items()}
         self._collection_rows = []
@@ -1533,9 +1533,9 @@ class MainWindow(QMainWindow):
         elif self.jobs:
             self.operation_message.setText('Collection is complete. See the listing queue for the next step.')
         pending_jobs = [j for j in self.jobs if j.get('state')!='cancelled'
-                        and (run_statuses[j['id']] or {}).get('state') not in ('published','manual_completed')]
+                        and not batch_can_advance(run_statuses[j['id']])]
         self.relist_batch_button.setEnabled(bool(pending_jobs) and self.runs is not None
-            and self.hub is not None and not self._publication_rows and not self._collection_rows
+            and self.hub is not None and not self._collection_rows
             and all(not runs[j['id']] or copy_can_be_checked(runs[j['id']])
                     or removal_can_be_checked(runs[j['id']]) for j in pending_jobs)
             and all(bool((collected_views[j['id']] or {}).get('reviewed')) for j in pending_jobs))
@@ -1734,7 +1734,8 @@ class MainWindow(QMainWindow):
                        'iol':'IOL Property','immoafrica':'ImmoAfrica','flow':'Flow Living'}
                 portals=run_status.get('publication',{}).get('portals',{})
                 confirmed=[names.get(k,k) for k,v in portals.items() if v.get('state')=='published']
-                waiting=[names.get(k,k) for k,v in portals.items() if v.get('state')!='published']
+                waiting=[names.get(k,k) + (' (in moderation)' if v.get('pending_reason') == 'moderation' else '')
+                         for k,v in portals.items() if v.get('state')!='published']
                 self.collection_summary.setText('Confirmed: '+(', '.join(confirmed) or 'none yet')+
                     '. Waiting: '+(', '.join(waiting) or 'none')+'. Original archived; replacement checked.')
                 self.check_publication_button.setVisible(True)
@@ -1874,7 +1875,7 @@ class MainWindow(QMainWindow):
         jobs = deepcopy(self.jobs)
         from .collection import latest_collection
         from .relist_plan import build_relist_plan
-        from .relist_runner import RelistRunner, removal_can_be_checked, copy_can_be_checked
+        from .relist_runner import RelistRunner, removal_can_be_checked, copy_can_be_checked, batch_can_advance
         from .live_relist_ui import HubRelistUI
         from .form_copy import CopyStopped
         from .run_store import RunNeedsReview
@@ -1885,7 +1886,7 @@ class MainWindow(QMainWindow):
             for job in jobs:
                 if preflight_stop.is_set():
                     raise CopyStopped('The batch check was stopped. Your reviews are saved.')
-                if job.get('state')=='cancelled' or (_run_status(self.runs,job) or {}).get('state') in ('published','manual_completed'):
+                if job.get('state')=='cancelled' or batch_can_advance(_run_status(self.runs,job)):
                     continue
                 previous = self.runs.get(job['id'])
                 if previous and not (removal_can_be_checked(previous) or copy_can_be_checked(previous)):
@@ -1959,7 +1960,8 @@ class MainWindow(QMainWindow):
                 'New runs use the relist day for Date listed and On market since, with expiry six calendar months later. '
                 'Today: '+day.strftime('%d %b %Y')+' → '+six_months_after(day).strftime('%d %b %Y')+'. '
                 'Sale mandate dates follow those dates. Rental occupation dates stay unchanged. '
-                'An interrupted run keeps its recorded dates and completed steps are checked and skipped.')
+                'An interrupted run keeps its recorded dates and completed steps are checked and skipped. '
+                'When only portal moderation remains, the next reviewed listing continues. Use Check publication to follow pending portals.')
             box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
             box.button(QMessageBox.StandardButton.Yes).setText('Relist this batch')
             box.setDefaultButton(QMessageBox.StandardButton.Cancel)

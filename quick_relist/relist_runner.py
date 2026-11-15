@@ -6,11 +6,19 @@ from .relist_plan import build_relist_plan
 from .run_store import RunNeedsReview
 from .brochure_review import apply_review
 from .relist_dates import apply_relist_dates, relist_today
+from .portal_ui import only_moderation_pending
 
 
 def run_status(run):
     return next((e['data'] for e in reversed((run or {}).get('events', []))
                  if e['kind'] in ('status', 'manual_recovery', 'manual_publication_check')), {})
+
+
+def batch_can_advance(status):
+    status = status or {}
+    return (status.get('state') in ('published', 'manual_completed')
+            or status.get('state') == 'publication_pending'
+            and only_moderation_pending(status.get('publication', {}).get('portals', {})))
 
 
 def display_status(run):
@@ -82,16 +90,16 @@ class RelistRunner:
             if job.get('state') == 'cancelled':
                 continue
             results.append(self.one(job))
-            if results[-1]['state'] not in ('published', 'manual_completed'):
-                break  # A pending portal or incomplete copy blocks the next source.
+            if not batch_can_advance(results[-1]):
+                break
         return results
 
     def one(self, job):
         self.runs.assert_source_available(job['id'], job['rxcu'])
         previous = self.runs.get(job['id'])
         status = run_status(previous)
-        if status.get('state') in ('published', 'manual_completed'):
-            return status  # Includes a completed, explicitly recorded manual pilot.
+        if batch_can_advance(display_status(previous)):
+            return status
         resuming_copy = copy_can_be_checked(previous)
         if previous and not (removal_can_be_checked(previous) or resuming_copy):
             raise RunNeedsReview('This listing has a previous run. Check its existing outcome before continuing; no new copy was created.')

@@ -62,7 +62,16 @@ def normalize_portals(raw):
             'state': 'pending' if pending else 'published' if active else 'unpublished' if ident == '' else 'unknown',
             'can_publish': publish.casefold() in labels and not pending,
             'can_republish': republish.casefold() in labels and not pending}
+        if ((ident or '').strip().casefold() == 'in moderation'
+                or re.match(r'^in moderation\b', column['text'].strip(), re.I)):
+            result['portals'][key]['pending_reason'] = 'moderation'
     return result
+
+
+def only_moderation_pending(portals):
+    waiting = [p for p in portals.values() if p.get('state') != 'published']
+    return bool(waiting) and all(p.get('state') == 'pending' and p.get('pending_reason') == 'moderation'
+                                 for p in waiting)
 
 
 def read_portals(driver, *, guard=lambda: None, timeout=30):

@@ -17,7 +17,7 @@ from .core import normalize_rxcu
 from .form_copy import CopyStopped, ParticularsFiller, particulars_plan
 from .matched_capture import MatchedHubCapture
 from .original_media import download_originals
-from .portal_ui import PORTALS, read_portals, active_destinations
+from .portal_ui import PORTALS, read_portals, active_destinations, only_moderation_pending
 from .relist_plan import media_plan, require_empty_related
 from .upload_review import compare_uploaded_images
 
@@ -977,7 +977,9 @@ class HubRelistUI:
         refresh_at=time.monotonic()+10
         while True:
             state = read_portals(self.driver,guard=self.guard,timeout=45)
-            if all(state['portals'][d]['state']=='published' for d in destinations) or time.monotonic()>=deadline:
+            selected = {d:state['portals'][d] for d in destinations}
+            complete = all(p['state']=='published' for p in selected.values())
+            if complete or only_moderation_pending(selected) or time.monotonic()>=deadline:
                 break
             # Hub can leave a completed request displayed as pending until
             # this page reloads. Refresh only the bound read-only Portals page;
@@ -989,8 +991,7 @@ class HubRelistUI:
                 self.driver.refresh()
                 refresh_at=time.monotonic()+10
             time.sleep(2)
-        return {'complete':all(state['portals'][d]['state']=='published' for d in destinations),
-                'portals':{d:state['portals'][d] for d in destinations}}
+        return {'complete':complete, 'portals':selected}
 
     def recheck_publication(self,status):
         self.hub.search_reference(status['target_reference'],all_listing_types=True)

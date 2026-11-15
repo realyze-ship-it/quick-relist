@@ -31,6 +31,7 @@ def test_moderation_with_a_publish_button_cannot_trigger_a_second_publish():
     data['columns'][3]={'text':'In moderation Publish to PP','buttons':[{'text':'Publish to PP','enabled':True}]}
     state=normalize_portals(data)
     assert state['portals']['pp']['state']=='pending'
+    assert state['portals']['pp']['pending_reason']=='moderation'
     assert not state['portals']['pp']['can_publish']
     with pytest.raises(CopyStopped,match='pending'):
         active_destinations(state)
@@ -47,6 +48,7 @@ def test_moderation_in_id_row_after_reload_does_not_allow_republication():
     data['columns'][3]={'text':'Publish to PP','buttons':[{'text':'Publish to PP','enabled':True}]}
     portal=normalize_portals(data)['portals']['pp']
     assert portal['state']=='pending'
+    assert portal['pending_reason']=='moderation'
     assert portal['id'] is None
     assert not portal['can_publish']
     assert not portal['can_republish']

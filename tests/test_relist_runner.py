@@ -88,6 +88,20 @@ def test_completed_manual_pilot_is_never_recreated(setup):
     assert provider.calls==[]
 
 
+def test_moderation_is_tracked_while_next_reviewed_listing_runs(setup):
+    drafts,runs,job=setup
+    runner=module.RelistRunner(drafts,runs,Provider())
+    run=runs.start('prior',source_capture_id='c',address_revision_id='r',reference='RXCU3000',listing_id='333333')
+    outcome={'website':{'state':'published','id':'444444'}, 'pp':{'state':'pending','pending_reason':'moderation'}}
+    pending={'state':'publication_pending','publication':{'complete':False,'portals':outcome}}
+    runs.note(run,'status',pending)
+    results=runner.batch([{'id':'prior','rxcu':'RXCU3000'},job])
+    assert results[0]==pending and results[1]['state']=='published'
+    assert runs.get('prior')['actions']==[]
+    for blocked in ({'state':'pending'}, {'state':'unknown'}, {'state':'unpublished'}):
+        assert not module.batch_can_advance({**pending,'publication':{'portals':{**outcome,'other':blocked}}})
+
+
 def test_same_original_in_new_batch_stops_before_preparing_any_form(setup):
     drafts, runs, job = setup
     with pytest.raises(RuntimeError):
