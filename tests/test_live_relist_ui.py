@@ -59,6 +59,54 @@ def test_commission_row_order_does_not_change_agent_values_or_source():
     assert source==original
 
 
+def test_corrected_rate_preserves_agent_splits_and_fee_rates():
+    from copy import deepcopy
+    source = commission_page()
+    source['fields'].append({'name':'total_commission_value', 'value':'200'})
+    actual = deepcopy(source)
+    actual['fields'][0]['value'] = '6.00'
+    actual['fields'][1]['value'] = '400'
+    rows = actual['tables'][0]['rows']
+    for row in rows[1:-1]:
+        row[4:8] = ['200', '0', '4', '196']
+    rows[-1][2:6] = ['400', '0', '8', '392']
+    review = {'rate':'6', 'amount':'400'}
+    assert not module.same_commission(source, actual)
+    assert module.same_commission(source, actual, review)
+    assert not module.same_commission(source, actual, {'rate':'5', 'amount':'400'})
+    for i in range(8):
+        edited = deepcopy(actual)
+        edited['tables'][0]['rows'][1][i] = '1'
+        assert not module.same_commission(source, edited, review)
+    rows[-1][5] = '391.99'
+    assert not module.same_commission(source, actual, review)
+
+
+@pytest.mark.parametrize('rate, heading, target_id, confirms', [
+    ('17.50', 'Confirm commission rate', '42', True),
+    ('7.50', 'Confirm commission rate', '42', False),
+    ('17.5', 'Confirm publication', '42', False),
+    ('17.5', 'Confirm commission rate', '41', False)])
+def test_warning_confirms_only_original_rate_and_target(rate, heading, target_id, confirms):
+    from unittest.mock import Mock
+    from selenium.webdriver.remote.webelement import WebElement
+    dialog = Mock(spec=WebElement)
+    dialog.text = heading + "\nYou've entered a total commission rate of 17.5%, which is unusually high. Please confirm this is correct before continuing.\nLET ME FIX IT\nYES, THIS IS CORRECT"
+    dialog.is_displayed.side_effect = [True, False]
+    ui = object.__new__(module.HubRelistUI)
+    ui.driver = Mock(current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars')
+    ui.driver.find_elements.return_value = [dialog]
+    ui.guard, ui.button = Mock(), Mock()
+    ui.wait = lambda read, message: read() or pytest.fail(message)
+    if confirms:
+        ui.confirm_commission_warning({'listing_id':target_id}, rate)
+        ui.button.assert_called_once_with('Yes, this is correct', dialog)
+    else:
+        with pytest.raises(CopyStopped):
+            ui.confirm_commission_warning({'listing_id':target_id}, rate)
+        ui.button.assert_not_called()
+
+
 @pytest.mark.parametrize('column',range(8))
 def test_commission_comparison_rejects_changed_agent_money_or_identity(column):
     source=commission_page(); copy=commission_page()
@@ -106,6 +154,8 @@ def test_commission_writer_preserves_amount_when_displayed_percentage_is_rounded
             assert selector == 'td'
             return self.cells
     def find(by, selector):
+        if selector == '[role="dialog"]':
+            return []
         if selector == 'main tbody tr':
             return [Row(row) for row in source['tables'][0]['rows'][1:-1]]
         for name in values:

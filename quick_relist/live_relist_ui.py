@@ -129,8 +129,13 @@ def resolve_saved_suburb(expected, actual, read_selected):
     return result, observed
 
 
-def same_commission(expected, actual):
+def same_commission(expected, actual, review=None):
     """Compare each agent's complete commission row, independent of row order."""
+    if review:
+        from .commission_review import reviewed_deal
+        expected = reviewed_deal(expected, actual, review)
+        if expected is None:
+            return False
     def signature(page):
         page = deepcopy(page)
         tables = [t for t in page['tables'] if t['rows'] and t['rows'][0][0] == 'Agent']
@@ -581,6 +586,21 @@ class HubRelistUI:
         state = read_portals(self.driver, guard=self.guard)
         if state['published'] or any(state['portals'][d]['state'] != 'unpublished' for d in plan['destinations']):
             raise CopyStopped('The unfinished replacement is already published or pending. Review it before copying.')
+        commission = actions.get('copy_commission', {})
+        if commission.get('state') in ('started', 'uncertain'):
+            self.tab('Deal Particulars')
+            self.driver.refresh()
+            self.wait(lambda:self.driver.find_elements('css selector', 'input[name="total_commission_value"]'),
+                      'The existing sale commission did not load.')
+            self.guard()
+            saved = PartialHubCapture(self.driver).capture_current_page(ident)['pages'][-1]
+            review = plan.get('commission_review')
+            if review and (review['reference'] != reference or review['listing_id'] != ident):
+                raise CopyStopped('The commission correction belongs to a different sale.')
+            if not plan['deal'] or not same_commission(plan['deal'], saved, review):
+                raise CopyStopped('The saved commission on the existing copy differs from the expected amount, rate or agent breakdown. Check Deal Particulars.')
+            runs.reconcile_commission(previous['id'], {'reference':reference, 'listing_id':ident,
+                'commission_copied':True, 'reconciled_by':'fresh_unpublished_commission_read'})
         self.tab('Media')
         self.driver.refresh()
         self.wait(lambda:self.driver.find_elements('css selector','textarea[name="marketing_header"]'),
@@ -673,6 +693,23 @@ class HubRelistUI:
         self.copy_photos(target,plan,runs,run_id)
         runs.perform_once(run_id,'copy_media_text',lambda:self.fill_media_text(target,plan))
 
+    def confirm_commission_warning(self, target, rate):
+        dialogs = [d for d in self.driver.find_elements('css selector', '[role="dialog"]') if d.is_displayed()]
+        if not dialogs:
+            return
+        self.guard()
+        route = parse_editor_url(self.driver.current_url)
+        if len(dialogs) != 1 or route['listing_id'] != target['listing_id'] or route['page_key'] != 'deal_particulars':
+            raise CopyStopped('Review the unexpected Hub dialog before continuing.')
+        dialog = dialogs[0]
+        message = ' '.join(dialog.text.split()).replace('’', "'")
+        match = re.fullmatch(r"Confirm commission rate You've entered a total commission rate of ([0-9]+(?:\.[0-9]+)?)\s*%, which is unusually (?:high|low)\. Please confirm this is correct before continuing\. Let me fix it Yes, this is correct", message, re.I)
+        if not match or Decimal(match[1]) != Decimal(rate):
+            raise CopyStopped('The commission warning differs from the original rate or wording. Check the rate in Hub.')
+        self.button('Yes, this is correct', dialog)
+        from selenium.webdriver.support.expected_conditions import invisibility_of_element
+        self.wait(lambda:invisibility_of_element(dialog)(self.driver), 'Hub did not close its commission confirmation.')
+
     def copy_commission(self, target, source):
         from selenium.webdriver.common.keys import Keys
         self.bind(target)
@@ -683,11 +720,13 @@ class HubRelistUI:
         self.wait(lambda:self.driver.find_elements('css selector','input[name="total_commission_percentage"]'), 'Commission fields did not load.')
         field = self.one('input[name="total_commission_percentage"]')
         field.send_keys(Keys.CONTROL,'a',Keys.NULL,fields['total_commission_percentage'],Keys.TAB)
+        self.confirm_commission_warning(target, fields['total_commission_percentage'])
         # Hub rounds the displayed percentage. Re-entering that rounded value
         # alone can change the actual amount and every agent's fees. Set the
         # captured amount last and let Hub derive its percentage from it.
         amount = self.one('input[name="total_commission_value"]')
         amount.send_keys(Keys.CONTROL,'a',Keys.NULL,fields['total_commission_value'],Keys.TAB)
+        self.confirm_commission_warning(target, fields['total_commission_percentage'])
         tables = [t for t in source['tables'] if t['rows'] and t['rows'][0][0]=='Agent']
         if len(tables)!=1:
             raise CopyStopped('The commission agent table is missing or ambiguous.')
@@ -707,8 +746,14 @@ class HubRelistUI:
                 value = self.one('input[name="commission_sales_percentage"]',dialog)
                 value.send_keys(Keys.CONTROL,'a',Keys.NULL,saved[3],Keys.TAB)
                 self.button('Save',dialog)
+        self.confirm_commission_warning(target, fields['total_commission_percentage'])
         self.button('Next')
-        self.wait(lambda:parse_editor_url(self.driver.current_url)['page_key']=='media','Commission save did not finish.')
+        def saved_to_media():
+            if parse_editor_url(self.driver.current_url)['page_key'] == 'media':
+                return True
+            self.confirm_commission_warning(target, fields['total_commission_percentage'])
+            return False
+        self.wait(saved_to_media, 'Commission save did not finish.')
         # Verify the saved money before transferring photos, as well as in
         # the final full listing comparison. Never accept a recalculated total.
         self.tab('Deal Particulars')
@@ -829,7 +874,7 @@ class HubRelistUI:
         if [c['caption'] for c in captions] != [p['caption'] for p in plan['photos']]:
             raise CopyStopped('Saved photo captions do not match the original.')
         if plan['deal'] is not None:
-            if not same_commission(plan['deal'], pages['deal_particulars']):
+            if not same_commission(plan['deal'], pages['deal_particulars'], plan.get('commission_review')):
                 raise CopyStopped('Saved commission details differ. The replacement remains unpublished.')
         self.target_for_publication = deepcopy(self.current)
         return {'particulars':True,'descriptions':True,'photos':len(plan['photos']),'photo_order':True,'captions':True,

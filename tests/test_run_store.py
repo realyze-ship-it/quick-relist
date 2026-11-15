@@ -9,6 +9,30 @@ def start(store):
                        reference='RXCU1000', listing_id='123456')
 
 
+def test_stopped_commission_requires_target_read_before_continuation():
+    from quick_relist.relist_runner import copy_can_be_checked
+    store = RunStore(':memory:')
+    run = start(store)
+    target = {'reference':'RXCU2000', 'listing_id':'654321'}
+    for name in ('remove_portals','archive','create'):
+        store.perform_once(run, name, lambda:target)
+    def interrupt():
+        raise RuntimeError('dialog')
+    with pytest.raises(RuntimeError):
+        store.perform_once(run, 'copy_commission', interrupt)
+    assert copy_can_be_checked(store.get('job'))
+    with pytest.raises(RunNeedsReview):
+        store.record_commission_review('job', reference='RXCU3000', listing_id='654321', rate='5', amount='100')
+    store.record_commission_review('job', **target, rate='5', amount='100')
+    observed = {**target,'commission_copied':True, 'reconciled_by':'fresh_unpublished_commission_read'}
+    with pytest.raises(RunNeedsReview):
+        store.reconcile_commission(run, {**observed,'listing_id':'1'})
+    store.reconcile_commission(run, observed)
+    assert store.perform_once(run, 'copy_commission', lambda:pytest.fail('No rewrite')) == observed
+    with pytest.raises(RunNeedsReview):
+        store.record_commission_review('job', **target, rate='6', amount='120')
+
+
 @pytest.mark.parametrize('blocker',[None,'missing_media','published'])
 def test_only_content_read_can_retry_after_completed_unpublished_copy(blocker):
     store=RunStore(':memory:'); run=start(store)

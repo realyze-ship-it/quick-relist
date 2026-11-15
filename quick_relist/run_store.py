@@ -265,6 +265,44 @@ class RunStore:
                               (run_id,_now(),'archive_not_applied',_json({'prior_action':dict(next(a for a in actions if a['action']=='archive')),'observed':receipt})))
             self.conn.execute("UPDATE relist_actions SET state='retry_ready',receipt_json=? WHERE run_id=? AND action='archive'",(_json(receipt),run_id))
 
+    def _stopped_commission(self, run_id, target):
+        rows = self.conn.execute('SELECT * FROM relist_actions WHERE run_id=?', (run_id,)).fetchall()
+        actions = {a['action']:a for a in rows}
+        earlier = ('remove_portals', 'archive', 'create')
+        if (set(actions) != {*earlier, 'copy_commission'} or any(actions[k]['state'] != 'done' for k in earlier)
+                or actions['copy_commission']['state'] not in ('started','uncertain')):
+            raise RunNeedsReview('Only an interrupted commission on an existing replacement can be checked here.')
+        created = json.loads(actions['create']['receipt_json'])
+        if any(not target.get(k) or target[k] != created.get(k) for k in ('reference', 'listing_id')):
+            raise RunNeedsReview('The commission belongs to a different replacement.')
+        return actions['copy_commission']
+
+    def record_commission_review(self, job_id, *, reference, listing_id, rate, amount):
+        """Record an explicit operator correction, scoped to the already created sale."""
+        if any(not isinstance(v, str) or not re.fullmatch(r'[0-9]+(?:\.[0-9]{1,2})?', v)
+               for v in (rate, amount)):
+            raise RunNeedsReview('Enter the exact reviewed commission rate and amount.')
+        review = dict(reference=reference, listing_id=listing_id, rate=rate, amount=amount)
+        with self._lock, self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            run = self.get(job_id)
+            if not run:
+                raise RunNeedsReview('There is no existing sale to review.')
+            self._stopped_commission(run['id'], review)
+            self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
+                              (run['id'], _now(), 'commission_review', _json(review)))
+
+    def reconcile_commission(self, run_id, receipt):
+        if receipt.get('reconciled_by') != 'fresh_unpublished_commission_read' or receipt.get('commission_copied') is not True:
+            raise RunNeedsReview('Read the saved commission on the unpublished sale first.')
+        with self._lock, self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            prior = self._stopped_commission(run_id, receipt)
+            self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
+                              (run_id, _now(), 'commission_reconciled', _json({'prior_action':dict(prior), 'observed':receipt})))
+            self.conn.execute("UPDATE relist_actions SET state='done',finished_at=?,receipt_json=? WHERE run_id=? AND action='copy_commission'",
+                              (_now(), _json(receipt), run_id))
+
     def reconcile_uploaded_photo(self, run_id, action, receipt):
         """Confirm a received photo without issuing another upload."""
         match = re.fullmatch(r'upload_photo_([0-9]+)_attempt_[1-3]', action)

@@ -41,6 +41,9 @@ def copy_can_be_checked(run):
     actions = {a['action']: a for a in (run or {}).get('actions', [])}
     if any(actions.get(name, {}).get('state') != 'done' for name in ('remove_portals','archive','create')):
         return False
+    commission = actions.get('copy_commission', {})
+    if commission.get('state') in ('started', 'uncertain'):
+        return set(actions) == {'remove_portals', 'archive', 'create', 'copy_commission'}
     for name, action in actions.items():
         if name in ('remove_portals','archive','create'):
             continue
@@ -104,6 +107,9 @@ class RelistRunner:
                    'reference':data['rxcu'], 'listing_id':data['listing_id']}
         if previous and previous['binding'] != binding:
             raise RunNeedsReview('The source or reviewed address changed after the stopped run. Review it before continuing.')
+        if resuming_copy:
+            plan['commission_review'] = next((event['data'] for event in reversed(previous['events'])
+                                              if event['kind'] == 'commission_review'), None)
         policy = apply_relist_dates(plan, previous, self.today())
         if self.cancelled():
             raise CopyStopped('Relisting stopped before the original was changed.')
