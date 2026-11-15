@@ -103,6 +103,17 @@ def test_townhouse_subtype_reaches_the_copy_inventory(extract):
     assert mapped['townhouse_descriptive_property_type']['status'] == 'observed'
 
 
+def test_house_type_and_portion_are_saved_without_losing_the_selected_code(extract):
+    html = '''<main><div><div role="combobox" id="mui-component-select-house_descriptive_property_type">Double Storey</div>
+        <input id="house_descriptive_property_type" name="house_descriptive_property_type" aria-hidden="true" value="Double Storey"></div>
+        <input name="portion_number" id="portion_number" value="004A"></main>'''
+    observed = extract(html, url='https://hub.remax.co.za/app/listings/edit/123456/particulars')
+    assert 'unsupported_business_selector' not in observed['limitations']
+    inventory = entries(extract_source_fields(capture(page(fields=observed['fields']))))
+    assert inventory['house_descriptive_property_type']['selected_code'] == 'Double Storey'
+    assert inventory['portion_number']['value'] == '004A'
+
+
 @pytest.mark.parametrize('name,hidden,blocked', [('synthetic_new_type',False,True),
                                               ('synthetic_new_type',True,False), ('listing',False,False)])
 def test_unknown_visible_business_selector_blocks_instead_of_disappearing(extract,name,hidden,blocked):

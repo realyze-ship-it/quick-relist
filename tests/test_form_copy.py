@@ -73,6 +73,23 @@ def test_stale_address_review_is_rejected_before_any_form_input():
         particulars_plan(source, review)
 
 
+def test_house_plan_requires_subtype_and_copies_portion_verbatim():
+    source, review = source_and_review()
+    fields = source['pages'][0]['fields']
+    kind = next(f for f in fields if f.get('name') == 'property_type_id')
+    kind.update(value='House', selected_options=[{'value':'1','text':'House'}])
+    with pytest.raises(CopyStopped, match='house again'):
+        particulars_plan(source, review)
+    fields.append({'type':'text','name':'portion_number','value':'004A'})
+    fields.append({'type':'custom-combobox','name':'house_descriptive_property_type',
+                   'value':'Double Storey','observed_business_selection_code': True,
+                   'selected_options':[{'value':'DoubleStorey','text':'Double Storey'}]})
+    controls = {c['key']:c for c in particulars_plan(source,review)['controls']}
+    assert controls['house_descriptive_property_type']['value'] == 'DoubleStorey'
+    assert controls['house_descriptive_property_type']['text'] == 'Double Storey'
+    assert controls['portion_number']['value'] == '004A'
+
+
 @pytest.mark.parametrize('name', ['lightstone_erf_number', 'scheme_number'])
 @pytest.mark.parametrize('changed', ['5X', '', '999'])
 def test_old_registered_number_override_stops_before_form_preparation(name, changed):

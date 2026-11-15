@@ -21,13 +21,14 @@ class CopyStopped(RuntimeError):
 
 TEXT_NAMES = frozenset((
     'land_area', 'floor_area', 'street_number', 'street_name', 'street_type',
-    'estate_name', 'lightstone_erf_number', 'lightstone_sectional_scheme_unit_number',
+    'estate_name', 'lightstone_erf_number', 'portion_number', 'lightstone_sectional_scheme_unit_number',
     'scheme_number', 'scheme_name', 'lightstone_id_reg_number', 'door_number',
     'latitude', 'longitude', 'selling_price', 'rates', 'levy', 'special_levies',
     'ensuites', 'rental_price', 'deposit',
 ))
 COMBO_ORDER = ('deed_office_id', 'office_id', 'listing_type_id', 'mandate_type_id',
                'property_type_id', 'apartment_descriptive_property_type', 'townhouse_descriptive_property_type',
+               'house_descriptive_property_type',
                'land_area_units', 'floor_area_units', 'country_id', 'rental_price_period', 'bank_mandate')
 CHECKS = frozenset((*LIFESTYLE_FIELDS, *GENERAL_FIELDS, 'poa', 'featured', 'transfer_cost', 'address_hidden'))
 RADIOS = frozenset(('sale_state_id', 'rental_state_id'))
@@ -132,6 +133,9 @@ def particulars_plan(capture, address_revision):
     if any(c.get('text') == 'Townhouse' for c in property_types) and not any(
             c['key'] == 'townhouse_descriptive_property_type' for c in controls):
         raise CopyStopped('Collect this townhouse again to include its descriptive property type. The original will stay active.')
+    if any(c.get('text') == 'House' for c in property_types) and not any(
+            c['key'] == 'house_descriptive_property_type' for c in controls):
+        raise CopyStopped('Collect this house again to include its descriptive property type.')
     required = {'property_type_id', 'office_id', 'country_id', 'suburb', 'street_number',
                 'street_name', 'date_listed', 'expiry_date',
                 'selling_price' if mode == 'sale' else 'rental_price'}

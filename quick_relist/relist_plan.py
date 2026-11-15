@@ -78,6 +78,9 @@ def build_relist_plan(collection, review):
         raise CopyStopped('The sale or rental source pages are incomplete.')
     for page in pages.values():
         lossy = ('truncated','omitted','unresolved','unsupported')
+        if 'unsupported_business_selector' in page.get('limitations', []):
+            raise CopyStopped('Hub shows a dropdown on the ' + page['page_key'].replace('_', ' ')
+                              + ' page that this app could not copy. The original is still in Hub.')
         if any(any(word in issue for word in lossy) for issue in page.get('limitations', [])
                if issue != 'date_semantics_unresolved'):
             raise CopyStopped('Some copied data was incomplete or changed during capture. Review it before relisting.')

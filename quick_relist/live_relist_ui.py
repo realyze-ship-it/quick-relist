@@ -272,7 +272,7 @@ class HubRelistUI:
                   'Hub did not finish opening the selected page.')
         self.guard()
 
-    def captured_editor(self, reference, *, include_media_captions=True):
+    def captured_editor(self, reference, *, include_media_captions=True, include_suburb_selection=False):
         self.current = None
         binding = self.hub.editor_bindings.get(reference)
         if binding and binding['handle'] in self.driver.window_handles:
@@ -309,7 +309,8 @@ class HubRelistUI:
         self.wait(identity_ready, 'The listing headings did not finish loading. No further action was taken.')
         self.current = {'reference':reference, **binding}
         reader = MatchedHubCapture(self.hub, reference, timeout=30, cancelled=self.cancelled,
-            include_room_options=True, include_general_features=True, include_media_captions=include_media_captions)
+            include_room_options=True, include_general_features=True, include_media_captions=include_media_captions,
+            include_suburb_selection=include_suburb_selection)
         capture = reader.capture()
         if capture.get('stop_reason'):
             from .matched_capture import matched_capture_failure_note

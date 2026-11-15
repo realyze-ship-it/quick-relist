@@ -38,6 +38,7 @@ _SELECTS = (
     ("floor_area_units", "Floor area units"),
     ("apartment_descriptive_property_type", "Apartment descriptive property type"),
     ("townhouse_descriptive_property_type", "Townhouse descriptive property type"),
+    ("house_descriptive_property_type", "House descriptive property type"),
     ("deed_office_id", "Deed office"),
     ("rental_price_period", "Rental price period"),
 )
@@ -46,6 +47,7 @@ _DETAILS = (
     ("street_number", "Street number"), ("street_name", "Street name"),
     ("street_type", "Street type"), ("estate_name", "Estate name"),
     ("lightstone_erf_number", "Erf number"),
+    ("portion_number", "Portion number"),
     ("lightstone_sectional_scheme_unit_number", "Sectional scheme unit number"),
     ("scheme_number", "Scheme number"), ("scheme_name", "Scheme name"),
     ("lightstone_id_reg_number", "ID / registration number"),

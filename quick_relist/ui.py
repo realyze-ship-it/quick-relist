@@ -1878,9 +1878,13 @@ class MainWindow(QMainWindow):
         from .live_relist_ui import HubRelistUI
         from .form_copy import CopyStopped
         from .run_store import RunNeedsReview
+        from .collection_refresh import needs_house_refresh, refresh_house_collection
+        preflight_stop = threading.Event()
         def preflight():
             prepared=[]
             for job in jobs:
+                if preflight_stop.is_set():
+                    raise CopyStopped('The batch check was stopped. Your reviews are saved.')
                 if job.get('state')=='cancelled' or (_run_status(self.runs,job) or {}).get('state') in ('published','manual_completed'):
                     continue
                 previous = self.runs.get(job['id'])
@@ -1893,8 +1897,22 @@ class MainWindow(QMainWindow):
                 reviews=self.drafts.list_addresses(saved['capture']['source_capture_id'])
                 if not reviews:
                     raise CopyStopped('Save every address review first.')
-                build_relist_plan(saved['capture'],reviews[0])
+                data = saved['capture']
+                try:
+                    if not previous and needs_house_refresh(data):
+                        self._wait_for_hub(preflight_stop)
+                        self.collection_progress.emit(job['rxcu'] + ': reading the missing house type from Hub')
+                        provider = HubRelistUI(self.hub, self.media_root, clipboard=self._description_clipboard,
+                                             cancelled=preflight_stop.is_set, progress=self.collection_progress.emit)
+                        fresh = provider.captured_editor(data['rxcu'], include_suburb_selection=True)
+                        refresh_house_collection(self.drafts, job['id'], data, reviews[0], fresh)
+                    else:
+                        build_relist_plan(data, reviews[0])
+                except CopyStopped as exc:
+                    raise CopyStopped(job['rxcu'] + ': ' + str(exc)) from None
                 prepared.append(job)
+            if preflight_stop.is_set():
+                raise CopyStopped('The batch check was stopped. Your reviews are saved.')
             return prepared
         def confirm(prepared):
             if not prepared:
@@ -1960,7 +1978,8 @@ class MainWindow(QMainWindow):
                 except Exception:
                     raise RuntimeError('Relisting stopped. Check the activity record and the existing Hub listing before continuing. No uncertain action was retried.') from None
             self._run_operation('Relisting one listing at a time…',run,'Batch processing finished. Check each listing’s recorded result.',cancel=stop.set)
-        self._run_operation('Checking the reviewed batch…',preflight,'The reviewed batch is ready.',confirm)
+        self._run_operation('Checking the reviewed batch…',preflight,'The reviewed batch is ready.',confirm,
+                            cancel=preflight_stop.set)
 
     def _confirm_local_observation(self, purpose: str) -> bool:
         if not self.selected_job:

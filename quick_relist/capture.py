@@ -260,7 +260,7 @@ return (() => {
     // this exception to arbitrary hidden fields or credential-like controls.
     const observedSelects = ['country_id','property_type_id','mandate_type_id',
       'office_id','listing_type_id','land_area_units','floor_area_units',
-      'apartment_descriptive_property_type','townhouse_descriptive_property_type',
+      'apartment_descriptive_property_type','townhouse_descriptive_property_type','house_descriptive_property_type',
       'deed_office_id','rental_price_period'];
     // Unknown visible business selectors must block copying, not silently
     // disappear because their native inputs are aria-hidden. The agent picker
@@ -284,6 +284,7 @@ return (() => {
       const code = inputs.length === 1 ? String(inputs[0].value) : '';
       const codeShape = name === 'country_id' ? /^[A-Za-z]{2}$/.test(code)
         : name === 'rental_price_period' ? /^per (day|week|month|year)$/.test(code)
+        : name === 'house_descriptive_property_type' ? /^[A-Za-z0-9 _.:/-]{0,128}$/.test(code)
         : /^[A-Za-z0-9_.:-]{0,128}$/.test(code);
       if (combos.length === 1 && inputs.length === 1 && combos[0].nextElementSibling === inputs[0]
           && combos[0].parentElement === inputs[0].parentElement && inputs[0].type === 'text'
