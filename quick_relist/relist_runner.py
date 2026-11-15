@@ -43,7 +43,10 @@ def copy_can_be_checked(run):
         return False
     commission = actions.get('copy_commission', {})
     if commission.get('state') in ('started', 'uncertain'):
-        return set(actions) == {'remove_portals', 'archive', 'create', 'copy_commission'}
+        return (set(actions) - {'save_estate_name'} == {'remove_portals', 'archive', 'create', 'copy_commission'}
+                and actions.get('save_estate_name', {}).get('state', 'done') == 'done')
+    if actions.get('save_estate_name', {}).get('state') in ('started','uncertain'):
+        return set(actions) == {'remove_portals','archive','create','save_estate_name'}
     for name, action in actions.items():
         if name in ('remove_portals','archive','create'):
             continue
@@ -53,7 +56,7 @@ def copy_can_be_checked(run):
         elif name == 'copy_media_text':
             if action['state'] not in ('done','uncertain','started','retry_ready'):
                 return False
-        elif name == 'copy_commission' or re.fullmatch(r'caption_[0-9]+', name):
+        elif name in ('copy_commission', 'save_estate_name') or re.fullmatch(r'caption_[0-9]+', name):
             if action['state'] != 'done':
                 return False
         elif name == 'verify_content':

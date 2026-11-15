@@ -98,14 +98,28 @@ def only_media_interface_artwork(media):
     return isinstance(media, list) and all(decoration(item) for item in media)
 
 
-def same_particulars(expected, actual):
+def particulars_differences(expected, actual):
     def controls(plan):
         return {(c['key'],c.get('code')):normalized_value(c) for c in plan['controls']}
     def rooms(plan):
         return [(r['opener'],r['groups'],[(f.get('name'),f.get('label'),f.get('value'),f.get('checked')) for f in r['fields']]) for r in plan['rooms']]
-    return (expected['mode'] == actual['mode'] and controls(expected) == controls(actual)
-            and sorted(expected['agents'], key=lambda a:a['name']) == sorted(actual['agents'], key=lambda a:a['name'])
-            and rooms(expected) == rooms(actual))
+    differences = []
+    if expected['mode'] != actual['mode']:
+        differences.append('listing type')
+    left, right = controls(expected), controls(actual)
+    for key in sorted(left.keys() | right.keys(), key=str):
+        if key not in left or key not in right or left[key] != right[key]:
+            label = key[0].replace('_',' ') + (f' ({key[1]})' if key[1] else '')
+            differences.append(f'{label}: expected {left.get(key, "[missing]")!s}, saved {right.get(key, "[missing]")!s}')
+    if sorted(expected['agents'], key=lambda a:a['name']) != sorted(actual['agents'], key=lambda a:a['name']):
+        differences.append('listing agents or primary selection')
+    if rooms(expected) != rooms(actual):
+        differences.append('room options')
+    return differences
+
+
+def same_particulars(expected, actual):
+    return not particulars_differences(expected, actual)
 
 
 def resolve_saved_suburb(expected, actual, read_selected):
@@ -601,6 +615,12 @@ class HubRelistUI:
         state = read_portals(self.driver, guard=self.guard)
         if state['published'] or any(state['portals'][d]['state'] != 'unpublished' for d in plan['destinations']):
             raise CopyStopped('The unfinished replacement is already published or pending. Review it before copying.')
+        estate = actions.get('save_estate_name', {})
+        if estate.get('state') in ('started', 'uncertain'):
+            wanted = self.planned_estate_name(plan)
+            if not wanted or self.saved_estate_name() != wanted:
+                raise CopyStopped('The estate name on the existing copy still differs. Review Listing Particulars before continuing.')
+            runs.reconcile_estate_name(previous['id'], target)
         commission = actions.get('copy_commission', {})
         if commission.get('state') in ('started', 'uncertain'):
             self.tab('Deal Particulars')
@@ -702,11 +722,48 @@ class HubRelistUI:
 
     @diagnosed
     def copy_content(self, target, plan, runs, run_id):
+        wanted = self.planned_estate_name(plan)
+        if wanted:
+            self.bind(target)
+            saved = self.saved_estate_name()
+            if saved != wanted:
+                if saved:
+                    raise CopyStopped('The saved estate name differs from the reviewed address. Check Listing Particulars.')
+                runs.perform_once(run_id, 'save_estate_name', lambda:self.restore_estate_name(target, wanted, plan))
         # Keep the original commission facts; rental has no Deal Particulars.
         if plan['deal'] is not None:
             runs.perform_once(run_id,'copy_commission',lambda:self.copy_commission(target,plan['deal']))
         self.copy_photos(target,plan,runs,run_id)
         runs.perform_once(run_id,'copy_media_text',lambda:self.fill_media_text(target,plan))
+
+    @staticmethod
+    def planned_estate_name(plan):
+        return next((c['value'] for c in plan['particulars']['controls'] if c['key'] == 'estate_name'), '')
+
+    def saved_estate_name(self):
+        self.tab('Listing particulars')
+        self.wait(lambda:self.driver.find_elements('css selector', 'main input#estate_name'), 'The estate name field did not load.')
+        self.guard()
+        return self.one('main input#estate_name').get_property('value')
+
+    def restore_estate_name(self, target, wanted, plan):
+        from selenium.webdriver.common.keys import Keys
+        self.bind(target)
+        self.tab('Portals')
+        portals = read_portals(self.driver, guard=self.guard)
+        if portals['published'] or any(portals['portals'][d]['state'] != 'unpublished' for d in plan['destinations']):
+            raise CopyStopped('Check the publication state before editing the estate name.')
+        if self.saved_estate_name() != '':
+            raise CopyStopped('The estate name changed while opening the copy. Review it before editing.')
+        self.one('main input#estate_name').send_keys(wanted, Keys.TAB)
+        if self.one('main input#estate_name').get_property('value') != wanted:
+            raise CopyStopped('Hub did not retain the reviewed estate name.')
+        self.button('Next')
+        next_page = 'deal_particulars' if plan['particulars']['mode'] == 'sale' else 'media'
+        self.wait(lambda:parse_editor_url(self.driver.current_url)['page_key'] == next_page, 'The particulars save did not finish.')
+        if self.saved_estate_name() != wanted:
+            raise CopyStopped('Hub did not save the estate name. Check the existing replacement.')
+        return {'estate_name_verified':True, 'reference':target['reference'], 'listing_id':target['listing_id']}
 
     def confirm_commission_warning(self, target, rate):
         dialogs = [d for d in self.driver.find_elements('css selector', '[role="dialog"]') if d.is_displayed()]
@@ -862,8 +919,9 @@ class HubRelistUI:
         original = {v['path']:v['field'] for v in proposed['fields'].values()}
         copied = particulars_plan(actual,{'original':original,'edited':deepcopy(original)})
         copied, suburb_label = resolve_saved_suburb(plan['particulars'], copied, self.selected_suburb_label)
-        if not same_particulars(plan['particulars'],copied):
-            raise CopyStopped('Saved particulars or room options differ. The replacement remains unpublished.')
+        differences = particulars_differences(plan['particulars'], copied)
+        if differences:
+            raise CopyStopped('Saved particulars differ. ' + '\n'.join(differences) + '\nThe replacement remains unpublished.')
         pages = {p['page_key']:p for p in actual['pages']}
         require_empty_related(pages['details'])
         return suburb_label

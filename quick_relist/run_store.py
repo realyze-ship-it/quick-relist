@@ -269,7 +269,9 @@ class RunStore:
         rows = self.conn.execute('SELECT * FROM relist_actions WHERE run_id=?', (run_id,)).fetchall()
         actions = {a['action']:a for a in rows}
         earlier = ('remove_portals', 'archive', 'create')
-        if (set(actions) != {*earlier, 'copy_commission'} or any(actions[k]['state'] != 'done' for k in earlier)
+        if (set(actions) - {'save_estate_name'} != {*earlier, 'copy_commission'}
+                or 'save_estate_name' in actions and actions['save_estate_name']['state'] != 'done'
+                or any(actions[k]['state'] != 'done' for k in earlier)
                 or actions['copy_commission']['state'] not in ('started','uncertain')):
             raise RunNeedsReview('Only an interrupted commission on an existing replacement can be checked here.')
         created = json.loads(actions['create']['receipt_json'])
@@ -301,6 +303,25 @@ class RunStore:
             self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
                               (run_id, _now(), 'commission_reconciled', _json({'prior_action':dict(prior), 'observed':receipt})))
             self.conn.execute("UPDATE relist_actions SET state='done',finished_at=?,receipt_json=? WHERE run_id=? AND action='copy_commission'",
+                              (_now(), _json(receipt), run_id))
+
+    def reconcile_estate_name(self, run_id, target):
+        with self._lock, self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            rows = self.conn.execute('SELECT * FROM relist_actions WHERE run_id=?', (run_id,)).fetchall()
+            actions = {r['action']:r for r in rows}
+            earlier = ('remove_portals','archive','create')
+            if (set(actions) != {*earlier,'save_estate_name'} or any(actions[k]['state'] != 'done' for k in earlier)
+                    or actions['save_estate_name']['state'] not in ('started','uncertain')):
+                raise RunNeedsReview('Only the interrupted estate-name save can be checked here.')
+            saved = json.loads(actions['create']['receipt_json'])
+            if any(not target.get(k) or target[k] != saved.get(k) for k in ('reference','listing_id')):
+                raise RunNeedsReview('The estate name belongs to a different replacement.')
+            receipt = {'reference':target['reference'],'listing_id':target['listing_id'],
+                       'estate_name_verified':True,'reconciled_by':'fresh_unpublished_estate_read'}
+            self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
+                              (run_id, _now(), 'estate_name_reconciled', _json(receipt)))
+            self.conn.execute("UPDATE relist_actions SET state='done',finished_at=?,receipt_json=? WHERE run_id=? AND action='save_estate_name'",
                               (_now(), _json(receipt), run_id))
 
     def reconcile_uploaded_photo(self, run_id, action, receipt):

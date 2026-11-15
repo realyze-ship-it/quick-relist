@@ -69,6 +69,29 @@ def test_recovered_photo_count_is_scoped_to_one_copy():
         check({'reference':'B'}, 3)
 
 
+@pytest.mark.parametrize('mode,page',[('sale','deal_particulars'),('rent','media')])
+def test_blank_estate_repair_verifies_saved_value_on_the_same_copy(monkeypatch, mode, page):
+    from unittest.mock import Mock
+    ui = object.__new__(module.HubRelistUI)
+    ui.bind, ui.tab, ui.guard = Mock(), Mock(), Mock()
+    ui.driver = Mock(current_url='https://hub.remax.co.za/app/listings/edit/42/particulars')
+    ui.saved_estate_name = Mock(side_effect=['','Sample Estate'])
+    field = Mock()
+    field.get_property.return_value = 'Sample Estate'
+    ui.one = Mock(return_value=field)
+    ui.button = lambda name: setattr(ui.driver,'current_url','https://hub.remax.co.za/app/listings/edit/42/'+page)
+    ui.wait = lambda read, message: read() or pytest.fail(message)
+    monkeypatch.setattr(module,'read_portals',lambda *args,**kwargs:{'published':False,'portals':{'website':{'state':'unpublished'}}})
+    target = {'reference':'RXCU1000','listing_id':'42'}
+    plan = {'particulars':{'mode':mode}, 'destinations':['website']}
+    assert ui.restore_estate_name(target,'Sample Estate',plan) == {**target, 'estate_name_verified':True}
+    assert field.send_keys.call_count == 1 and ui.saved_estate_name.call_count == 2
+    ui.saved_estate_name = Mock(return_value='Different')
+    with pytest.raises(CopyStopped, match='changed'):
+        ui.restore_estate_name(target,'Sample Estate',plan)
+    assert field.send_keys.call_count == 1
+
+
 def commission_page():
     return {'page_key':'deal_particulars', 'fields':[{'name':'total_commission_percentage','value':'3.0'}],
         'rich_text':[], 'dialogs':[], 'media':[], 'tables':[{'rows':[
