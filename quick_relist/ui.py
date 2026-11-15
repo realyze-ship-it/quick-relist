@@ -251,7 +251,7 @@ def _collected_job_view(drafts, job):
         address['unit_number' if key == 'ss_unit_number' else key] = field.get('value')
     return {'address': address, 'reviewed': bool(revisions),
             'state': 'Address review saved' if revisions else 'Ready for address review',
-            'media_count': capture['media_count']}
+            'media_count': capture['media_count'], 'download_needs_review': capture.get('download_needs_review', False)}
 
 
 def _run_status(runs, job):
@@ -1495,14 +1495,49 @@ class MainWindow(QMainWindow):
             self.notice_title.setText('Review addresses before relisting')
             self.notice_body.setText('Collect the listings and photos, save each address review, then relist the batch. Each original is removed and archived before its replacement is saved and published.')
         self.stat_values["queued"].setText(str(len(self.jobs)))
-        self.collect_batch_button.setEnabled(any(job.get('state') == 'queued' for job in self.jobs) and self.hub is not None and self.drafts is not None and self.media_root is not None and not self._is_busy)
         collected_views = {job['id']: _collected_job_view(self.drafts, job) for job in self.jobs}
         self.stat_values["reviewed"].setText(str(sum(bool(job.get("approved")) or bool((collected_views[job['id']] or {}).get('reviewed')) for job in self.jobs)))
-        run_statuses = {job['id']: _run_status(self.runs, job) for job in self.jobs}
+        from .relist_runner import display_status, copy_can_be_checked, removal_can_be_checked
+        runs = {j['id']: self.runs.get(j['id']) if self.runs is not None else None for j in self.jobs}
+        run_statuses = {key: display_status(run) for key, run in runs.items()}
+        self._collection_rows = []
+        self._review_rows = []
+        self._publication_rows = []
+        for index, job in enumerate(self.jobs):
+            key = job['id']
+            view = collected_views[key]
+            if (run_statuses[key] or {}).get('state') in ('publication_pending', 'manual_publication_pending'):
+                self._publication_rows.append(index)
+            elif job.get('state') == 'queued' and not runs[key]:
+                if not view or view.get('download_needs_review'):
+                    self._collection_rows.append(index)
+                elif not view['reviewed']:
+                    self._review_rows.append(index)
+        can_collect = self.hub is not None and self.drafts is not None and self.media_root is not None
+        if self._collection_rows:
+            label, enabled = 'Resume collection', can_collect
+        elif self._review_rows:
+            label, enabled = 'Review saved address', True
+        elif self._publication_rows:
+            label, enabled = 'Check publication', self.hub is not None
+        else:
+            label, enabled = ('Collection complete' if self.jobs else 'Resume collection'), False
+        self.collect_batch_button.setText(label)
+        self.collect_batch_button.setEnabled(enabled)
+        if self._publication_rows and not self._collection_rows and not self._review_rows:
+            self.operation_message.setText('Choose Check publication to refresh the existing portal requests.')
+        elif self._review_rows and not self._collection_rows:
+            self.operation_message.setText('Choose Review saved address to continue with the next listing.')
+        elif self._collection_rows:
+            self.operation_message.setText('Resume collection to finish collecting this saved batch.')
+        elif self.jobs:
+            self.operation_message.setText('Collection is complete. See the listing queue for the next step.')
         pending_jobs = [j for j in self.jobs if j.get('state')!='cancelled'
                         and (run_statuses[j['id']] or {}).get('state') not in ('published','manual_completed')]
         self.relist_batch_button.setEnabled(bool(pending_jobs) and self.runs is not None
-            and getattr(self.hub,'driver',None) is not None and not self._is_busy
+            and self.hub is not None and not self._publication_rows and not self._collection_rows
+            and all(not runs[j['id']] or copy_can_be_checked(runs[j['id']])
+                    or removal_can_be_checked(runs[j['id']]) for j in pending_jobs)
             and all(bool((collected_views[j['id']] or {}).get('reviewed')) for j in pending_jobs))
         self.stat_values["live"].setText(str(sum(job.get("state") == "live" or (run_statuses[job['id']] or {}).get('state') in ('published','manual_completed') for job in self.jobs)))
         batch = next((item for item in self.batches if str(item.get("id")) == self.batch_id), None)
@@ -1829,6 +1864,7 @@ class MainWindow(QMainWindow):
                 self._safe_readonly_call(self.hub.open, opening=True)
             wait_for_hub_login(self.hub.driver, cancelled=stop.is_set, progress=self.collection_progress.emit)
             provider=HubRelistUI(self.hub,self.media_root,clipboard=self._description_clipboard,cancelled=stop.is_set)
+            self.collection_progress.emit('Checking portal status for ' + status['target_reference'] + '…')
             outcome=provider.recheck_publication(status)
             if status.get('mode') == 'manual_recovery':
                 return self.runs.check_manual_publication(job['id'], status, outcome)
@@ -1839,7 +1875,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _relist_reviewed_batch(self):
-        if self._is_busy or self.runs is None or getattr(self.hub,'driver',None) is None:
+        if self._is_busy or self.runs is None or self.hub is None or not self.relist_batch_button.isEnabled():
             return
         jobs = deepcopy(self.jobs)
         from .collection import latest_collection
@@ -1918,10 +1954,14 @@ class MainWindow(QMainWindow):
             if box.exec()!=QMessageBox.StandardButton.Yes:
                 return
             stop=threading.Event()
-            provider=HubRelistUI(self.hub,self.media_root,clipboard=self._description_clipboard,
-                cancelled=stop.is_set,progress=self.collection_progress.emit)
-            runner=RelistRunner(self.drafts,self.runs,provider,cancelled=stop.is_set,progress=self.collection_progress.emit)
             def run():
+                from .hub_login import wait_for_hub_login
+                if self.hub.driver is None:
+                    self._safe_readonly_call(self.hub.open, opening=True)
+                wait_for_hub_login(self.hub.driver, cancelled=stop.is_set, progress=self.collection_progress.emit)
+                provider=HubRelistUI(self.hub,self.media_root,clipboard=self._description_clipboard,
+                    cancelled=stop.is_set,progress=self.collection_progress.emit)
+                runner=RelistRunner(self.drafts,self.runs,provider,cancelled=stop.is_set,progress=self.collection_progress.emit)
                 try:
                     return runner.batch(prepared)
                 except (CopyStopped,RunNeedsReview):
@@ -1947,9 +1987,17 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _collect_batch(self):
-        if self._is_busy or not self.hub or not self.drafts or not self.media_root:
+        if self._is_busy or not self.collect_batch_button.isEnabled():
             return
-        if not any(job.get('state') == 'queued' for job in self.jobs):
+        if not self._collection_rows:
+            if self._review_rows:
+                self.queue_table.selectRow(self._review_rows[0])
+                self._verify_captured_address()
+            elif self._publication_rows:
+                row = self.queue_table.currentRow()
+                if row not in self._publication_rows:
+                    self.queue_table.selectRow(self._publication_rows[0])
+                self._check_publication()
             return
         # Developer launches can refresh read-only collectors between tests
         # without discarding the operator's manual sign-in. Packaged builds do
@@ -1966,7 +2014,7 @@ class MainWindow(QMainWindow):
         from .downloads import DownloadReviewError
         from .hub_login import LoginStopped, wait_for_hub_login
         stop = threading.Event()
-        jobs = deepcopy(self.jobs)
+        jobs = [deepcopy(self.jobs[i]) for i in self._collection_rows]
         def collect():
             if stop.is_set():
                 raise LoginStopped('Collection stopped. Your saved batch is ready to resume.')
@@ -1980,11 +2028,17 @@ class MainWindow(QMainWindow):
                                      cancelled=stop.is_set, progress=self.collection_progress.emit)
             except (CollectionStopped, CopyStopped, CaptureError, OriginalMediaError, DownloadReviewError, LoginStopped):
                 raise
-            except Exception:
-                raise RuntimeError('Collection stopped. Saved information and photos have been kept. Check Hub and the collection tools before continuing; no listing was changed.') from None
+            except Exception as exc:
+                from .diagnostics import record_error
+                code = record_error(self.media_root.parent / 'diagnostics', 'resume_collection', exc)
+                message = 'Collection stopped. Your saved information and photos have been kept.'
+                raise RuntimeError(message + (' Private diagnostic: ' + code[:8] + '.' if code else '')) from None
+        def open_review(_):
+            if self._review_rows:
+                self.queue_table.selectRow(self._review_rows[0])
+                self._verify_captured_address()
         self._run_operation('Opening Hub and waiting for your sign-in…', collect,
-                            'Collection finished. Select a listing and verify its address.',
-                            lambda _: self._verify_captured_address(), cancel=stop.set)
+                            'Collection finished.', open_review, cancel=stop.set)
 
     @Slot()
     def _verify_captured_address(self):

@@ -227,6 +227,8 @@ def test_repeated_create_after_input_cleared_is_a_noop(window):
 def test_start_batch_opens_waits_collects_and_stops_at_address_review(window, application, monkeypatch, tmp_path, already_open):
     from quick_relist import collection, hub_login
     calls = []
+    saved_views = {}
+    monkeypatch.setattr(ui, '_collected_job_view', lambda drafts, job: saved_views.get(job['id']))
     hub = SimpleNamespace(driver=object() if already_open else None)
     def open_browser():
         calls.append('open')
@@ -239,6 +241,7 @@ def test_start_batch_opens_waits_collects_and_stops_at_address_review(window, ap
     def collect(*args, **kwargs):
         assert calls[-1] == 'login_and_otp'
         calls.append('collect')
+        saved_views[args[2][0]['id']] = {'address': {}, 'reviewed': False, 'state': 'Ready for address review'}
         return []
     monkeypatch.setattr(hub_login, 'wait_for_hub_login', wait)
     monkeypatch.setattr(collection, 'collect_batch', collect)
@@ -250,6 +253,60 @@ def test_start_batch_opens_waits_collects_and_stops_at_address_review(window, ap
     assert calls == ([] if already_open else ['open']) + ['login_and_otp', 'collect', 'address_review']
     assert len(window.store.list_batches()) == 1
     assert window.jobs[0]['state'] == 'queued' and not window.jobs[0]['approved']
+
+
+def test_resume_uses_next_unfinished_row_then_reviews_it_locally(window, application, monkeypatch, tmp_path):
+    from quick_relist import collection, hub_login
+    _add_batch(window)
+    first, second = [j['id'] for j in window.jobs]
+    saved = {first: {'address': {}, 'reviewed': True, 'state': 'Address review saved'}}
+    monkeypatch.setattr(ui, '_collected_job_view', lambda drafts, job: saved.get(job['id']))
+    window.drafts = SimpleNamespace(list_captures=lambda _: [])
+    window.media_root = tmp_path
+    window.hub = SimpleNamespace(driver=object())
+    calls = []
+    def collect(hub, drafts, jobs, root, **kwargs):
+        calls.append([j['id'] for j in jobs])
+        saved[second] = {'address': {}, 'reviewed': False, 'state': 'Ready for address review'}
+    monkeypatch.setattr(collection, 'collect_batch', collect)
+    monkeypatch.setattr(hub_login, 'wait_for_hub_login', lambda *a, **kw: calls.append('login'))
+    monkeypatch.setattr(window, '_verify_captured_address', lambda: calls.append(window.selected_job['id']))
+    window.refresh()
+    window.collect_batch_button.click()
+    _finish_worker(application, window)
+    assert calls == ['login', [second], second]
+    window.hub.driver = None
+    window.queue_table.selectRow(0)
+    assert window.collect_batch_button.text() == 'Review saved address'
+    window.collect_batch_button.click()
+    assert calls == ['login', [second], second, second]
+    saved[second]['reviewed'] = True
+    window.runs = SimpleNamespace(get=lambda _: None)
+    window.refresh()
+    assert not window.collect_batch_button.isEnabled()
+    assert window.relist_batch_button.isEnabled()
+
+
+def test_saved_portal_wait_routes_resume_to_existing_copy(window, monkeypatch):
+    _add_batch(window)
+    first, second = [j['id'] for j in window.jobs]
+    states = {first: 'published', second: 'publication_pending'}
+    def run(job_id):
+        return {'events': [{'kind': 'status', 'data': {'state': states[job_id], 'target_reference': 'RXCU9999'}}],
+                'actions': []}
+    window.runs = SimpleNamespace(get=run)
+    window.hub = SimpleNamespace(driver=None)
+    monkeypatch.setattr(ui, '_collected_job_view', lambda *_: {'address': {}, 'reviewed': True, 'state': 'Address review saved'})
+    checked = []
+    monkeypatch.setattr(window, '_check_publication', lambda: checked.append(window.selected_job['id']))
+    window.refresh()
+    assert window.collect_batch_button.text() == 'Check publication'
+    assert not window.relist_batch_button.isEnabled()
+    window.collect_batch_button.click()
+    assert checked == [second]
+    states[second] = 'published'
+    window.refresh()
+    assert not window.collect_batch_button.isEnabled() and not window.relist_batch_button.isEnabled()
 
 
 @pytest.mark.parametrize('failure', ['cancel', 'timeout'])

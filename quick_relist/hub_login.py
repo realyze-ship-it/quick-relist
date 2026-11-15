@@ -54,7 +54,7 @@ def wait_for_hub_login(driver, *, cancelled=lambda: False, progress=lambda messa
     from selenium.webdriver.common.by import By
     if driver is None or not .01 <= poll_interval <= 2 or (timeout is not None and not .05 <= timeout <= 1800):
         raise ValueError('Invalid Hub login wait')
-    progress('Sign in and enter your OTP in the RE/MAX Chrome window. Collection will continue automatically.')
+    progress('If Hub asks you to sign in, enter your password and OTP in the RE/MAX Chrome window.')
     # Manual login is not a failed browser action when the user steps away.
     # Keep waiting until sign-in or Stop; bounded waits remain available to callers.
     deadline = time.monotonic() + timeout if timeout is not None else None
@@ -88,7 +88,7 @@ def wait_for_hub_login(driver, *, cancelled=lambda: False, progress=lambda messa
                     if len(inputs) == len(buttons) == 1 and driver.current_url == url:
                         if cancelled():
                             raise LoginStopped('Collection stopped. Your saved batch is ready to resume.')
-                        progress('Signed in. Collecting your saved batch automatically…')
+                        progress('Signed in. Continuing your saved task automatically…')
                         return
         except StaleElementReferenceException:
             pass  # Hub is still rendering after login or navigation.
