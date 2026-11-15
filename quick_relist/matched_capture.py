@@ -143,7 +143,8 @@ class MatchedHubCapture(PartialHubCapture):
     """
 
     def __init__(self, hub, rxcu, *, timeout=15.0, poll_interval=0.2,
-                 stable_for=1.0, cancelled=None, include_room_options=False, include_media_captions=False, include_general_features=False):
+                 stable_for=1.0, cancelled=None, include_room_options=False, include_media_captions=False,
+                 include_general_features=False, include_suburb_selection=False):
         super().__init__(hub.driver)
         self.hub = hub
         self.reference = normalize_rxcu(rxcu)
@@ -160,6 +161,7 @@ class MatchedHubCapture(PartialHubCapture):
         if type(include_media_captions) is not bool:
             raise ValueError("Caption capture mode must be explicit")
         self.include_media_captions = include_media_captions
+        self.include_suburb_selection = include_suburb_selection
         self._room_results = []
         self._pending_rooms = []
         self._binding = None
@@ -417,6 +419,33 @@ class MatchedHubCapture(PartialHubCapture):
             raise CaptureReadError(reason)
         self._identity(url)
 
+    def _capture_suburb_selection(self, sample, url):
+        from .suburb_selection import read_selected_suburb
+        fields = [field for field in sample['fields']
+                  if (field.get('label') or '').strip().rstrip(' *:').casefold() == 'suburb']
+        if len(fields) != 1:
+            return
+        short = fields[0].get('value')
+        if not isinstance(short, str) or not short.strip() or ',' in short:
+            return
+
+        def wait_optional(read, message):
+            deadline = time.monotonic() + min(5, self.timeout)
+            while time.monotonic() < deadline:
+                result = read()
+                if result:
+                    return result
+                time.sleep(self.poll_interval)
+            return None
+
+        observed = read_selected_suburb(self.driver, short, lambda: self._identity(url),
+                                        wait_optional, optional=True)
+        parts = [part.strip() for part in (observed or '').split(',')]
+        if len(parts) >= 3 and all(parts) and parts[0] == short:
+            fields[0]['selected_suburb_label'] = observed
+            sample.pop('integrity')
+            sample['integrity'] = {'algorithm': 'sha256', 'sha256': _digest(sample)}
+
     def capture(self):
         """Return partial JSON on success, safety stop, read failure or cancel.
 
@@ -459,6 +488,9 @@ class MatchedHubCapture(PartialHubCapture):
                 if self.include_room_options and sample['page_key'] == 'details':
                     self._failure_phase = 'room_capture'
                     self._capture_rooms(sample, url)
+                if self.include_suburb_selection and sample['page_key'] == 'details':
+                    self._failure_phase = 'suburb_selection'
+                    self._capture_suburb_selection(sample, url)
                 if self.include_media_captions and sample['page_key'] == 'media':
                     from .media_captions import capture_captions
                     sample['photo_captions'] = []

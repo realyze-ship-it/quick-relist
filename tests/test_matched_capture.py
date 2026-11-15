@@ -108,6 +108,27 @@ def assert_partial(result):
     assert verify_capture_integrity(result)
 
 
+@pytest.mark.parametrize('selection,expected', [
+    ('Example Park, First City, Province', 'Example Park, First City, Province'),
+    (None, None), ('Other Park, First City, Province', None), ('Example Park, , Province', None),
+])
+def test_collection_preserves_short_value_and_only_qualifies_matching_selection(setup, monkeypatch, selection, expected):
+    from quick_relist import suburb_selection
+    hub, driver, _ = setup
+    driver.pages[BASE]['fields'].append({'label': 'Suburb', 'type': 'text', 'value': 'Example Park'})
+    def read(current, short, guard, wait, *, optional):
+        assert current is driver and optional and short == 'Example Park'
+        assert guard()
+        return wait(lambda: selection, 'suburb')
+    monkeypatch.setattr(suburb_selection, 'read_selected_suburb', read)
+    result = capture(hub, include_suburb_selection=True)
+    assert result['stop_reason'] is None
+    field = result['pages'][0]['fields'][1]
+    assert field['value'] == 'Example Park'
+    assert field.get('selected_suburb_label') == expected
+    assert_partial(result)
+
+
 def test_traverse_all_observed_tabs_after_async_hydration(setup):
     hub, driver, clock = setup
     driver.hydrating = 3

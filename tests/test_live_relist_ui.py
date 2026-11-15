@@ -243,6 +243,25 @@ def test_saved_suburb_reads_owned_selected_option_without_selecting(tmp_path,sel
     assert events==['Listing particulars',(Keys.CONTROL,'a',Keys.NULL,'Example Park'),(Keys.ESCAPE,Keys.TAB)]
 
 
+def test_source_recheck_detects_a_move_between_two_identically_named_suburbs(tmp_path):
+    from copy import deepcopy
+    field = {'type': 'text', 'label': 'Suburb', 'value': 'Example Park'}
+    page = {'page_key': 'details', 'fields': [field], 'rich_text': [], 'tables': [], 'dialogs': [], 'media': []}
+    fresh = {'complete': False, 'pages': [page]}
+    source = deepcopy(fresh)
+    full = 'Example Park, First City, Province'
+    source['pages'][0]['fields'][0]['selected_suburb_label'] = full
+    provider = module.HubRelistUI(SimpleNamespace(driver=None), tmp_path, clipboard=None)
+    selections = iter((full, 'Example Park, Other City, Province'))
+    def read(short):
+        assert short == 'Example Park'
+        return next(selections)
+    provider.selected_suburb_label = read
+    assert provider._source_matches({'source': source}, fresh)
+    assert not provider._source_matches({'source': source}, fresh)
+    assert provider._source_matches({'source': fresh}, fresh)
+
+
 @pytest.mark.parametrize('button_count,enabled', [(0, True), (2, True), (1, False), (1, True)])
 def test_preparation_requires_one_enabled_save_without_clicking_it(monkeypatch, tmp_path, button_count, enabled):
     events = []

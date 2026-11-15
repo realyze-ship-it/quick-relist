@@ -31,6 +31,27 @@ def test_prefilled_address_changes_are_saved_separately_from_original():
     app.processEvents()
 
 
+def test_review_prefills_verified_suburb_and_preserves_saved_edits():
+    app = QApplication.instance() or QApplication([])
+    full = 'Example Park, First City, Province'
+    field = {'label': 'Suburb', 'type': 'text', 'value': 'Example Park', 'selected_suburb_label': full}
+    capture = {'complete': False, 'pages': [{'page_key': 'details', 'fields': [field]}]}
+    store = DraftStore(':memory:')
+    capture_id = store.save_capture('synthetic-job', capture)
+    dialog = VerifyAddressDialog('RXCU1000', capture)
+    path = 'pages/0/fields/0'
+    assert dialog.widgets[path].text() == full
+    assert dialog.original[path]['value'] == 'Example Park'
+    dialog.widgets[path].setText('Example Park, Other City, Province')
+    review = store.get_address(store.save_address(capture_id, dialog.original, dialog.edited_address()))
+    reopened = VerifyAddressDialog('RXCU1000', capture, review)
+    assert reopened.widgets[path].text() == 'Example Park, Other City, Province'
+    assert store.get_capture(capture_id)['capture']['pages'][0]['fields'][0] == field
+    reopened.close()
+    dialog.close()
+    app.processEvents()
+
+
 @pytest.mark.parametrize('erf,scheme', [('58', '712/2021'), ('', ''), ('RE/58', 'SS712')])
 def test_registered_numbers_survive_old_reviews_and_remain_read_only(erf, scheme):
     app = QApplication.instance() or QApplication([])

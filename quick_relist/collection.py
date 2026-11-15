@@ -82,7 +82,7 @@ def collect_listing(hub, drafts, job, media_root, *, cancelled=lambda: False, pr
     progress(f'{reference}: copying details, descriptions, room options and captions')
     reader = MatchedHubCapture(hub, reference, timeout=30, cancelled=cancelled,
                                include_room_options=True, include_media_captions=True,
-                               include_general_features=True)
+                               include_general_features=True, include_suburb_selection=True)
     capture = reader.capture()
     capture_id = drafts.save_capture(job_id, capture)
     if capture.get('stop_reason') or {p['page_key'] for p in capture['pages']} != required_pages(capture):

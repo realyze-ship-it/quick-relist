@@ -317,10 +317,18 @@ class HubRelistUI:
             raise CopyStopped(('The saved listing could not be read completely. No further action was taken. ' + detail).strip())
         return capture
 
+    def _source_matches(self, collection, fresh):
+        source = collection['source']
+        if content_signature(fresh) != content_signature(source):
+            return False
+        suburb = propose_address_fields(source)['fields'].get('suburb', {}).get('field', {})
+        full = suburb.get('selected_suburb_label')
+        return not full or self.selected_suburb_label(suburb['value']) == full
+
     @diagnosed
     def check_source(self, collection, plan):
         fresh = self.captured_editor(plan['source_reference'])
-        if content_signature(fresh) != content_signature(collection['source']):
+        if not self._source_matches(collection, fresh):
             raise CopyStopped('The original changed after collection. Collect it again and review its address before relisting.')
         self.source = deepcopy(self.current)
         self.tab('Portals')
@@ -331,7 +339,7 @@ class HubRelistUI:
     @diagnosed
     def check_removed_source(self, collection, plan):
         fresh = self.captured_editor(plan['source_reference'])
-        if content_signature(fresh) != content_signature(collection['source']):
+        if not self._source_matches(collection, fresh):
             raise CopyStopped('The original content changed after removal. Review it before continuing.')
         self.source = deepcopy(self.current)
         self.tab('Portals')
@@ -784,38 +792,9 @@ class HubRelistUI:
 
     def selected_suburb_label(self, short):
         """Read the existing selection via its owned autocomplete; never select."""
-        from selenium.webdriver.common.keys import Keys
+        from .suburb_selection import read_selected_suburb
         self.tab('Listing particulars')
-        inputs = [e for e in self.driver.find_elements('css selector', 'main input[role="combobox"]')
-                  if e.is_displayed() and self.driver.execute_script(
-                      'return Array.from(arguments[0].labels||[]).some(e=>e.textContent.replace(/\\s*\\*\\s*$/, "").trim()==="Suburb")', e)]
-        if len(inputs) != 1 or inputs[0].get_property('value') != short or not short:
-            raise CopyStopped('The saved suburb control is missing or changed.')
-        field = inputs[0]
-        self.guard()
-        # Typing the existing name triggers Hub's search while retaining its
-        # selected value. aria-selected identifies that value, not keyboard focus.
-        field.send_keys(Keys.CONTROL, 'a', Keys.NULL, short)
-        try:
-            def selected():
-                self.guard()
-                owner = field.get_attribute('aria-controls')
-                menus = [e for e in self.driver.find_elements('css selector', '[role="listbox"]')
-                         if e.is_displayed() and owner and e.get_attribute('id') == owner]
-                if len(menus) != 1:
-                    return None
-                choices = [e for e in menus[0].find_elements('css selector', '[role="option"]')
-                           if e.is_displayed() and e.get_attribute('aria-selected') == 'true']
-                if len(choices) > 1:
-                    raise CopyStopped('The saved suburb has ambiguous selected options.')
-                return choices[0].get_attribute('textContent').strip() if choices else None
-            observed = self.wait(selected, 'Hub did not identify the saved suburb selection.')
-        finally:
-            self.guard()
-            field.send_keys(Keys.ESCAPE, Keys.TAB)
-        if field.get_property('value') != short:
-            raise CopyStopped('The suburb search did not return to its saved value.')
-        return observed
+        return read_selected_suburb(self.driver, short, self.guard, self.wait)
 
     def _verify_particulars(self, actual, plan):
         proposed = propose_address_fields(actual)

@@ -53,7 +53,10 @@ class VerifyAddressDialog(QDialog):
                 widget = QCheckBox()
                 widget.setChecked(previous['checked'])
             else:
-                widget = QLineEdit(str(previous.get('value') or ''))
+                value = previous.get('value') or ''
+                if key == 'suburb' and not revision:
+                    value = original.get('selected_suburb_label') or value
+                widget = QLineEdit(str(value))
                 if key == 'country':
                     # Keep the observed country identity. Country changes need
                     # Hub's full country/suburb selection flow, not a typed ID.
