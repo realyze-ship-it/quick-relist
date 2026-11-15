@@ -143,19 +143,69 @@ def test_warning_confirms_only_original_rate_and_target(rate, heading, target_id
     from selenium.webdriver.remote.webelement import WebElement
     dialog = Mock(spec=WebElement)
     dialog.text = heading + "\nYou've entered a total commission rate of 17.5%, which is unusually high. Please confirm this is correct before continuing.\nLET ME FIX IT\nYES, THIS IS CORRECT"
-    dialog.is_displayed.side_effect = [True, False]
-    ui = object.__new__(module.HubRelistUI)
-    ui.driver = Mock(current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars')
-    ui.driver.find_elements.return_value = [dialog]
-    ui.guard, ui.button = Mock(), Mock()
-    ui.wait = lambda read, message: read() or pytest.fail(message)
+    button = Mock()
+    button.get_attribute.return_value = 'YES, THIS IS CORRECT'
+    dialog.find_elements.return_value = [button]
+    dialog.is_displayed.return_value = True
+    button.send_keys.side_effect = lambda key: setattr(dialog.is_displayed, 'return_value', False)
+    driver = Mock(current_window_handle='sale', current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars')
+    driver.find_elements.return_value = [dialog]
+    ui = module.HubRelistUI(SimpleNamespace(driver=driver), '.', clipboard=None)
+    ui.guard = Mock(side_effect=AssertionError('Hub hides the headings behind the modal'))
+    target = {'listing_id':target_id, 'handle':'sale', 'reference':'RXCU1000'}
+    ui.current = target.copy()
     if confirms:
-        ui.confirm_commission_warning({'listing_id':target_id}, rate)
-        ui.button.assert_called_once_with('Yes, this is correct', dialog)
+        ui.confirm_commission_warning(target, rate)
+        button.send_keys.assert_called_once()
     else:
         with pytest.raises(CopyStopped):
-            ui.confirm_commission_warning({'listing_id':target_id}, rate)
-        ui.button.assert_not_called()
+            ui.confirm_commission_warning(target, rate)
+        button.send_keys.assert_not_called()
+
+
+@pytest.mark.parametrize('change', ['none','agent','role','route','handle','title','split','extra dialog','cancelled'])
+def test_agent_editor_saves_only_the_verified_split_on_the_bound_copy(change):
+    from unittest.mock import Mock
+    from selenium.webdriver.remote.webelement import WebElement
+    driver = Mock(current_window_handle='sale', current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars')
+    ui = module.HubRelistUI(SimpleNamespace(driver=driver), '.', clipboard=None)
+    target = {'handle':'sale','reference':'RXCU1000','listing_id':'42'}
+    ui.current = target.copy()
+    dialog = Mock(spec=WebElement)
+    dialog.text = 'Edit Agent Listing Commission\nAgent'
+    dialog.is_displayed.return_value = False
+    ui.guard = lambda: None if not dialog.is_displayed() else pytest.fail('Headings are hidden')
+    agent, role, field, save = Mock(), Mock(), Mock(), Mock()
+    agent.text, role.text = 'Example A', 'Listing Agent'
+    save.get_attribute.return_value = 'SAVE'
+    field.get_property.return_value = '20.00'
+    controls = {'#mui-component-select-agent_id[role="combobox"]':agent,
+                '#mui-component-select-agent_type[role="combobox"]':role,
+                'input[name="commission_sales_percentage"]':field, 'button':save}
+    dialog.find_elements.side_effect = lambda by, selector: [controls[selector]]
+    driver.find_elements.return_value = [dialog]
+    row, edit = Mock(), Mock()
+    row.find_elements.return_value = [Mock(), edit]
+    def open_dialog(key):
+        dialog.is_displayed.return_value = True
+        if change == 'agent': agent.text = 'Example B'
+        if change == 'role': role.text = 'Other Role'
+        if change == 'route': driver.current_url = driver.current_url.replace('/42/', '/43/')
+        if change == 'handle': driver.current_window_handle = 'other'
+        if change == 'title': dialog.text = 'Another dialog'
+        if change == 'split': field.get_property.return_value = '50.00'
+        if change == 'extra dialog': driver.find_elements.return_value = [dialog, Mock()]
+        if change == 'cancelled': ui.cancelled = lambda: True
+    edit.send_keys.side_effect = open_dialog
+    save.send_keys.side_effect = lambda key: setattr(dialog.is_displayed, 'return_value', False)
+    saved = ['Example A','RE/MAX','listing agent','20.00']
+    if change == 'none':
+        ui.edit_commission_split(target, row, saved)
+        save.send_keys.assert_called_once()
+    else:
+        with pytest.raises(CopyStopped):
+            ui.edit_commission_split(target, row, saved)
+        save.send_keys.assert_not_called()
 
 
 @pytest.mark.parametrize('column',range(8))

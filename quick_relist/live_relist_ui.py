@@ -252,15 +252,16 @@ class HubRelistUI:
             raise CopyStopped('A required Hub control is missing or ambiguous.')
         return found[0]
 
-    def button(self, text, root=None):
+    def button(self, text, root=None, *, guard=None):
         from selenium.common.exceptions import StaleElementReferenceException
         from selenium.webdriver.common.keys import Keys
-        self.guard()
+        validate = guard or self.guard
+        validate()
         handle, url = self.driver.current_window_handle, self.driver.current_url
         unavailable = 'The ' + text + ' control is unavailable or ambiguous.'
 
         def check_page():
-            self.guard()
+            validate()
             if self.driver.current_window_handle != handle or self.driver.current_url != url:
                 raise CopyStopped('Hub changed pages while locating the ' + text + ' control.')
 
@@ -765,22 +766,59 @@ class HubRelistUI:
             raise CopyStopped('Hub did not save the estate name. Check the existing replacement.')
         return {'estate_name_verified':True, 'reference':target['reference'], 'listing_id':target['listing_id']}
 
+    def guard_commission_dialog(self, target, dialog):
+        # Hub hides the previously verified editor headings behind these modals.
+        # Bind the modal to that same tab, listing ID and Deal Particulars route.
+        route = parse_editor_url(self.driver.current_url)
+        visible = [d for d in self.driver.find_elements('css selector', '[role="dialog"]') if d.is_displayed()]
+        if (self.cancelled() or self.current != target or self.driver.current_window_handle != target['handle']
+                or route['listing_id'] != target['listing_id'] or route['page_key'] != 'deal_particulars'
+                or visible != [dialog]):
+            raise CopyStopped('The active commission dialog or its listing changed. Check Deal Particulars.')
+
     def confirm_commission_warning(self, target, rate):
         dialogs = [d for d in self.driver.find_elements('css selector', '[role="dialog"]') if d.is_displayed()]
         if not dialogs:
             return
-        self.guard()
-        route = parse_editor_url(self.driver.current_url)
-        if len(dialogs) != 1 or route['listing_id'] != target['listing_id'] or route['page_key'] != 'deal_particulars':
-            raise CopyStopped('Review the unexpected Hub dialog before continuing.')
         dialog = dialogs[0]
-        message = ' '.join(dialog.text.split()).replace('’', "'")
-        match = re.fullmatch(r"Confirm commission rate You've entered a total commission rate of ([0-9]+(?:\.[0-9]+)?)\s*%, which is unusually (?:high|low)\. Please confirm this is correct before continuing\. Let me fix it Yes, this is correct", message, re.I)
-        if not match or Decimal(match[1]) != Decimal(rate):
-            raise CopyStopped('The commission warning differs from the original rate or wording. Check the rate in Hub.')
-        self.button('Yes, this is correct', dialog)
+        def validate():
+            self.guard_commission_dialog(target, dialog)
+            message = ' '.join(dialog.text.split()).replace('’', "'")
+            match = re.fullmatch(r"Confirm commission rate You've entered a total commission rate of ([0-9]+(?:\.[0-9]+)?)\s*%, which is unusually (?:high|low)\. Please confirm this is correct before continuing\. Let me fix it Yes, this is correct", message, re.I)
+            if not match or Decimal(match[1]) != Decimal(rate):
+                raise CopyStopped('The commission warning differs from the original rate or wording. Check the rate in Hub.')
+        self.button('Yes, this is correct', dialog, guard=validate)
         from selenium.webdriver.support.expected_conditions import invisibility_of_element
         self.wait(lambda:invisibility_of_element(dialog)(self.driver), 'Hub did not close its commission confirmation.')
+
+    def edit_commission_split(self, target, row, saved):
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.support.expected_conditions import invisibility_of_element
+        self.guard()
+        buttons = row.find_elements('css selector', 'button')
+        if len(buttons) != 2:
+            raise CopyStopped('The commission edit action changed.')
+        buttons[1].send_keys(Keys.ENTER)
+        dialog = self.wait(lambda:next((d for d in self.driver.find_elements('css selector','[role="dialog"]')
+                                        if d.is_displayed()), None), 'The commission editor did not open.')
+        def validate_agent():
+            self.guard_commission_dialog(target, dialog)
+            if dialog.text.splitlines()[:1] != ['Edit Agent Listing Commission']:
+                raise CopyStopped('The expected agent commission editor is unavailable.')
+            for key, expected in [('agent_id', saved[0]), ('agent_type', saved[2])]:
+                selected = self.one(f'#mui-component-select-{key}[role="combobox"]', dialog)
+                if not selected.is_displayed() or selected.text.strip().casefold() != expected.strip().casefold():
+                    raise CopyStopped('The agent or role in the commission editor differs from the original.')
+        selector = 'input[name="commission_sales_percentage"]'
+        validate_agent()
+        self.one(selector, dialog).send_keys(Keys.CONTROL, 'a', Keys.NULL, saved[3], Keys.TAB)
+        def validate_save():
+            validate_agent()
+            entered = self.one(selector, dialog).get_property('value')
+            if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', entered or '') or Decimal(entered) != Decimal(saved[3]):
+                raise CopyStopped('The entered commission split differs from the original.')
+        self.button('Save', dialog, guard=validate_save)
+        self.wait(lambda:invisibility_of_element(dialog)(self.driver), 'Hub did not close its agent commission editor.')
 
     def copy_commission(self, target, source):
         from selenium.webdriver.common.keys import Keys
@@ -810,14 +848,7 @@ class HubRelistUI:
                 raise CopyStopped('An original commission agent is missing from the copy.')
             cells = rows[0].find_elements('css selector','td')
             if cells[3].get_attribute('textContent').strip()!=saved[3]:
-                buttons = rows[0].find_elements('css selector','button')
-                if len(buttons)!=2:
-                    raise CopyStopped('The commission edit action changed.')
-                buttons[1].send_keys(Keys.ENTER)
-                dialog = self.wait(lambda:next((e for e in self.driver.find_elements('css selector','[role="dialog"]') if e.is_displayed()),None), 'The commission editor did not open.')
-                value = self.one('input[name="commission_sales_percentage"]',dialog)
-                value.send_keys(Keys.CONTROL,'a',Keys.NULL,saved[3],Keys.TAB)
-                self.button('Save',dialog)
+                self.edit_commission_split(target, rows[0], saved)
         self.confirm_commission_warning(target, fields['total_commission_percentage'])
         self.button('Next')
         def saved_to_media():
