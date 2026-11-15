@@ -1828,7 +1828,6 @@ class MainWindow(QMainWindow):
             return
         from .creation_recovery import can_check_creation, check_existing_replacement, recovery_dialog
         from .live_relist_ui import HubRelistUI
-        from .hub_login import wait_for_hub_login
         job = deepcopy(self.selected_job)
         run = self.runs.get(job['id'])
         if not can_check_creation(run):
@@ -1840,9 +1839,7 @@ class MainWindow(QMainWindow):
         reference, listing_id = values()
         stop = threading.Event()
         def check():
-            if self.hub.driver is None:
-                self._safe_readonly_call(self.hub.open, opening=True)
-            wait_for_hub_login(self.hub.driver, cancelled=stop.is_set, progress=self.collection_progress.emit)
+            self._wait_for_hub(stop)
             provider = HubRelistUI(self.hub, self.media_root, clipboard=self._description_clipboard, cancelled=stop.is_set)
             return check_existing_replacement(self.drafts, self.runs, provider, job, reference, listing_id, cancelled=stop.is_set)
         self._run_operation('Checking the original and the existing replacement…', check,
@@ -1857,12 +1854,9 @@ class MainWindow(QMainWindow):
         if not status or status.get('state') not in ('publication_pending','manual_publication_pending'):
             return
         from .live_relist_ui import HubRelistUI
-        from .hub_login import wait_for_hub_login
         stop = threading.Event()
         def check():
-            if self.hub.driver is None:
-                self._safe_readonly_call(self.hub.open, opening=True)
-            wait_for_hub_login(self.hub.driver, cancelled=stop.is_set, progress=self.collection_progress.emit)
+            self._wait_for_hub(stop)
             provider=HubRelistUI(self.hub,self.media_root,clipboard=self._description_clipboard,cancelled=stop.is_set)
             self.collection_progress.emit('Checking portal status for ' + status['target_reference'] + '…')
             outcome=provider.recheck_publication(status)
@@ -1955,10 +1949,7 @@ class MainWindow(QMainWindow):
                 return
             stop=threading.Event()
             def run():
-                from .hub_login import wait_for_hub_login
-                if self.hub.driver is None:
-                    self._safe_readonly_call(self.hub.open, opening=True)
-                wait_for_hub_login(self.hub.driver, cancelled=stop.is_set, progress=self.collection_progress.emit)
+                self._wait_for_hub(stop)
                 provider=HubRelistUI(self.hub,self.media_root,clipboard=self._description_clipboard,
                     cancelled=stop.is_set,progress=self.collection_progress.emit)
                 runner=RelistRunner(self.drafts,self.runs,provider,cancelled=stop.is_set,progress=self.collection_progress.emit)
@@ -2012,18 +2003,14 @@ class MainWindow(QMainWindow):
         from .capture import CaptureError
         from .original_media import OriginalMediaError
         from .downloads import DownloadReviewError
-        from .hub_login import LoginStopped, wait_for_hub_login
+        from .hub_login import LoginStopped
         stop = threading.Event()
         jobs = [deepcopy(self.jobs[i]) for i in self._collection_rows]
         def collect():
             if stop.is_set():
                 raise LoginStopped('Collection stopped. Your saved batch is ready to resume.')
-            if self.hub.driver is None:
-                self.collection_progress.emit('Opening the RE/MAX Chrome window…')
-                self._safe_readonly_call(self.hub.open, opening=True)
+            self._wait_for_hub(stop)
             try:
-                wait_for_hub_login(self.hub.driver, cancelled=stop.is_set,
-                                   progress=self.collection_progress.emit)
                 return collect_batch(self.hub, self.drafts, jobs, self.media_root,
                                      cancelled=stop.is_set, progress=self.collection_progress.emit)
             except (CollectionStopped, CopyStopped, CaptureError, OriginalMediaError, DownloadReviewError, LoginStopped):
@@ -2434,6 +2421,11 @@ class MainWindow(QMainWindow):
             self.operation_message.setText(self._operation_success)
             if callback:
                 callback(result)
+
+    def _wait_for_hub(self, stop):
+        from .hub_login import ensure_hub_window, wait_for_hub_login
+        self._safe_readonly_call(lambda: ensure_hub_window(self.hub), opening=True)
+        wait_for_hub_login(self.hub.driver, cancelled=stop.is_set, progress=self.collection_progress.emit)
 
     def _safe_readonly_call(self, operation: Callable[[], Any], *, opening=False) -> Any:
         try:

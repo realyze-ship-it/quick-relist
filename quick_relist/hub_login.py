@@ -15,6 +15,22 @@ class LoginStopped(RuntimeError):
     pass
 
 
+def ensure_hub_window(hub):
+    """Reuse the current browser, or reopen one proven closed before this task."""
+    from selenium.common.exceptions import InvalidSessionIdException
+    if hub.driver is not None:
+        try:
+            handles = hub.driver.window_handles
+        except InvalidSessionIdException:
+            handles = []
+        if handles:
+            return
+        # close() verifies cleanup and discards the old tab bindings. If it
+        # cannot confirm closure, leave recovery to the operator.
+        hub.close()
+    hub.open()
+
+
 def _hub_url(url):
     parsed = urlsplit(url)
     if (parsed.scheme != 'https' or parsed.hostname != 'hub.remax.co.za'

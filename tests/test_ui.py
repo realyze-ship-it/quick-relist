@@ -223,13 +223,17 @@ def test_repeated_create_after_input_cleared_is_a_noop(window):
     assert len(window.store.list_batches()) == 1
 
 
-@pytest.mark.parametrize('already_open', [False, True])
-def test_start_batch_opens_waits_collects_and_stops_at_address_review(window, application, monkeypatch, tmp_path, already_open):
+@pytest.mark.parametrize('session', ['new', 'open', 'closed'])
+def test_start_batch_opens_waits_collects_and_stops_at_address_review(window, application, monkeypatch, tmp_path, session):
     from quick_relist import collection, hub_login
     calls = []
     saved_views = {}
     monkeypatch.setattr(ui, '_collected_job_view', lambda drafts, job: saved_views.get(job['id']))
-    hub = SimpleNamespace(driver=object() if already_open else None)
+    hub = SimpleNamespace(driver=None if session == 'new' else SimpleNamespace(window_handles=['main'] if session == 'open' else []))
+    def close_browser():
+        calls.append('close')
+        hub.driver = None
+    hub.close = close_browser
     def open_browser():
         calls.append('open')
         hub.driver = object()
@@ -250,7 +254,7 @@ def test_start_batch_opens_waits_collects_and_stops_at_address_review(window, ap
     window.rxcu_input.setPlainText('RXCU000123')
     window.create_button.click()
     _finish_worker(application, window)
-    assert calls == ([] if already_open else ['open']) + ['login_and_otp', 'collect', 'address_review']
+    assert calls == {'open': [], 'new': ['open'], 'closed': ['close', 'open']}[session] + ['login_and_otp', 'collect', 'address_review']
     assert len(window.store.list_batches()) == 1
     assert window.jobs[0]['state'] == 'queued' and not window.jobs[0]['approved']
 
@@ -263,7 +267,7 @@ def test_resume_uses_next_unfinished_row_then_reviews_it_locally(window, applica
     monkeypatch.setattr(ui, '_collected_job_view', lambda drafts, job: saved.get(job['id']))
     window.drafts = SimpleNamespace(list_captures=lambda _: [])
     window.media_root = tmp_path
-    window.hub = SimpleNamespace(driver=object())
+    window.hub = SimpleNamespace(driver=SimpleNamespace(window_handles=['main']))
     calls = []
     def collect(hub, drafts, jobs, root, **kwargs):
         calls.append([j['id'] for j in jobs])
@@ -314,7 +318,7 @@ def test_login_pause_never_starts_collection_and_retains_saved_batch(window, app
     import threading
     from quick_relist import collection, hub_login
     entered = threading.Event()
-    window.hub = SimpleNamespace(driver=object())
+    window.hub = SimpleNamespace(driver=SimpleNamespace(window_handles=['main']))
     window.drafts, window.media_root = SimpleNamespace(list_captures=lambda _: []), tmp_path / 'media'
     def wait(driver, **kwargs):
         entered.set()

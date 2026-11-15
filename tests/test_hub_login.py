@@ -7,6 +7,21 @@ from selenium.common.exceptions import InvalidSessionIdException, StaleElementRe
 from quick_relist import hub_login
 
 
+@pytest.mark.parametrize('failure', [InvalidSessionIdException, TimeoutError])
+def test_only_confirmed_session_loss_reopens_the_browser(failure):
+    from unittest.mock import Mock, PropertyMock
+    hub = Mock()
+    type(hub.driver).window_handles = PropertyMock(side_effect=failure)
+    if failure is InvalidSessionIdException:
+        hub_login.ensure_hub_window(hub)
+        assert [c[0] for c in hub.method_calls] == ['close', 'open']
+    else:
+        with pytest.raises(TimeoutError):
+            hub_login.ensure_hub_window(hub)
+        hub.close.assert_not_called()
+        hub.open.assert_not_called()
+
+
 class Element:
     def __init__(self, text='', placeholder=None):
         self.text, self.placeholder = text, placeholder
