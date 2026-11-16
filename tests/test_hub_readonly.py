@@ -620,3 +620,19 @@ def test_profile_cleanup_refuses_replaced_directory(tmp_path):
         hub.close()
     assert retained.is_file()
     assert hub._profile_path == profile
+
+
+def test_manage_tab_discovery_reads_metadata_without_switching_through_editors():
+    from quick_relist.hub_readonly import manage_handles
+    from types import SimpleNamespace
+    handles = ['CDwindow-A','CDwindow-B','CDwindow-C']
+    urls = ['https://hub.remax.co.za/app/listings/edit/12/media',
+            'https://hub.remax.co.za/app/listings/manage/all',
+            'https://hub.remax.co.za/app/listings/edit/13/portals']
+    def targets(command, args):
+        assert command == 'Target.getTargets' and args == {}
+        return {'targetInfos':[{'type':'page','targetId':h[-1],'url':url} for h,url in zip(handles,urls)]}
+    driver = SimpleNamespace(window_handles=handles, execute_cdp_cmd=targets)
+    assert manage_handles(driver) == ['CDwindow-B']
+    urls[2] = urls[1]
+    assert manage_handles(driver) == ['CDwindow-B','CDwindow-C']

@@ -62,10 +62,17 @@ class RunStore:
         with self._lock:
             self.conn.close()
 
-    def start(self, job_id, *, source_capture_id, address_revision_id, reference, listing_id):
+    def start(self, job_id, *, source_capture_id, address_revision_id, reference, listing_id, archive_before_review=False):
         binding = {'source_capture_id': source_capture_id, 'address_revision_id': address_revision_id,
                    'reference': reference, 'listing_id': listing_id}
-        if any(not isinstance(v, str) or not v for v in [job_id, *binding.values()]):
+        if archive_before_review:
+            if address_revision_id is not None:
+                raise ValueError('The archive phase precedes address review.')
+            binding['archive_before_review'] = True
+        required = [job_id, source_capture_id, reference, listing_id]
+        if not archive_before_review:
+            required.append(address_revision_id)
+        if any(not isinstance(v, str) or not v for v in required):
             raise ValueError('A collected listing and saved address review are required.')
         encoded = _json(binding)
         with self._lock, self.conn:
@@ -79,6 +86,20 @@ class RunStore:
             ident = uuid4().hex
             self.conn.execute('INSERT INTO relist_runs VALUES(?,?,?,?)', (ident, job_id, _now(), encoded))
             return ident
+
+    def bind_archived_review(self, job_id, binding, policy):
+        """Freeze the first operator review and relist day in one transaction."""
+        with self._lock, self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            run = self.get(job_id)
+            expected = {**binding, 'address_revision_id': None, 'archive_before_review': True}
+            states = {a['action']:a['state'] for a in (run or {}).get('actions', [])}
+            if (not run or run['binding'] != expected or not binding.get('address_revision_id')
+                    or states != {'remove_portals':'done', 'archive':'done'}):
+                raise RunNeedsReview('The archived source or its address review changed. Reopen the saved batch.')
+            self.conn.execute('UPDATE relist_runs SET binding_json=? WHERE id=?', (_json(binding), run['id']))
+            self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
+                              (run['id'], _now(), 'date_policy', _json(policy)))
 
     def _assert_source_available(self, job_id, reference, listing_id=None):
         # A new saved batch must not bypass an earlier source's journal.
@@ -153,7 +174,7 @@ class RunStore:
         with self._lock, self.conn:
             self.conn.execute('BEGIN IMMEDIATE')
             actions = self.conn.execute('SELECT action,state FROM relist_actions WHERE run_id=?', (run_id,)).fetchall()
-            if len(actions) != 1 or actions[0]['action'] != 'remove_portals' or actions[0]['state'] != 'uncertain':
+            if len(actions) != 1 or actions[0]['action'] != 'remove_portals' or actions[0]['state'] not in ('started','uncertain'):
                 raise RunNeedsReview('Only a stopped removal with no later actions can be reconciled here.')
             self.conn.execute("UPDATE relist_actions SET state='done', finished_at=?, receipt_json=? WHERE run_id=? AND action='remove_portals'",
                               (_now(), _json(receipt), run_id))
@@ -247,6 +268,21 @@ class RunStore:
                               (run_id, _now(), 'status', _json({'state':'created', 'original_archived':True,
                                'target_reference':receipt['reference'], 'target_listing_id':receipt['listing_id']})))
 
+    def reconcile_observed_archive(self, run_id, receipt):
+        if receipt.get('reconciled_by') != 'fresh_manage_listing_archive_action' or receipt.get('archived') is not True:
+            raise RunNeedsReview('A verified archived listing is required.')
+        with self._lock, self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            row = self.conn.execute('SELECT binding_json FROM relist_runs WHERE id=?', (run_id,)).fetchone()
+            binding = json.loads(row[0]) if row else {}
+            states = dict(self.conn.execute('SELECT action,state FROM relist_actions WHERE run_id=?', (run_id,)))
+            if (not binding.get('archive_before_review') or any(receipt.get(k) != binding[k] for k in ('reference','listing_id'))
+                    or states.get('remove_portals') != 'done' or set(states) != {'remove_portals','archive'}
+                    or states['archive'] not in ('started','uncertain','retry_ready')):
+                raise RunNeedsReview('The archive observation does not match the interrupted listing.')
+            self.conn.execute("UPDATE relist_actions SET state='done',finished_at=?,receipt_json=? WHERE run_id=? AND action='archive'",
+                              (_now(), _json(receipt), run_id))
+
     def reconcile_archive_not_applied(self, run_id, receipt):
         """Allow archive only after a freshly matched row still offers Archive."""
         if receipt.get('reconciled_by') != 'fresh_manage_listing_archive_action' or receipt.get('archived') is not False:
@@ -259,7 +295,7 @@ class RunStore:
                 raise RunNeedsReview('The archive check belongs to a different listing.')
             actions=self.conn.execute('SELECT * FROM relist_actions WHERE run_id=?',(run_id,)).fetchall()
             states={a['action']:a['state'] for a in actions}
-            if states.get('remove_portals')!='done' or set(states)!={'remove_portals','archive'} or states['archive'] not in ('uncertain','retry_ready'):
+            if states.get('remove_portals')!='done' or set(states)!={'remove_portals','archive'} or states['archive'] not in ('started','uncertain','retry_ready'):
                 raise RunNeedsReview('This run cannot resume at archiving.')
             self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
                               (run_id,_now(),'archive_not_applied',_json({'prior_action':dict(next(a for a in actions if a['action']=='archive')),'observed':receipt})))

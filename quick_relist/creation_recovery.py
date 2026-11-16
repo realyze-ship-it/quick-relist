@@ -37,6 +37,8 @@ def check_existing_replacement(drafts, runs, provider, job, reference, listing_i
     binding = {'source_capture_id': data['source_capture_id'],
                'address_revision_id': reviews[0]['id'] if reviews else None,
                'reference': data['rxcu'], 'listing_id': data['listing_id']}
+    if job.get('archive_before_review'):
+        binding['archive_before_review'] = True
     if binding != run['binding']:
         raise RunNeedsReview('The source or address review changed after this run started.')
     runs.assert_source_available(job['id'], data['rxcu'], data['listing_id'])

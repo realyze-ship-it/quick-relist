@@ -619,6 +619,112 @@ def test_small_window_scrolls_instead_of_clipping_action_buttons(window, applica
     assert not window.grab().isNull()
 
 
+@pytest.mark.parametrize('width,height', [(480,400),(800,540),(1100,700)])
+def test_resized_workspace_keeps_navigation_and_actions_reachable(window, application, width, height):
+    window.runs = SimpleNamespace(get=lambda _:None)
+    window.resize(width,height)
+    window.show()
+    window.refresh()
+    application.processEvents()
+    assert window.width() == width
+    assert (window.workspace_splitter.orientation() == Qt.Orientation.Vertical) == (width < 850)
+    assert window.page_picker.isVisible() == (width < 1020)
+    window.diagnostics_toggle.setChecked(True)
+    for page in range(3):
+        window._show_page(page)
+        QTest.qWait(35)
+        scroll = window.stack.currentWidget()
+        assert isinstance(scroll,QtWidgets.QScrollArea)
+        if page == 0:
+            scroll.ensureWidgetVisible(window.audit_button)
+            QTest.qWait(20)
+            assert scroll.viewport().rect().contains(window.audit_button.mapTo(scroll.viewport(),window.audit_button.rect().center()))
+    window._show_page(0)
+    assert window.create_button.isEnabled() is False
+
+
+def test_early_archive_queue_unlocks_review_only_after_archive(window, monkeypatch, tmp_path):
+    from quick_relist.run_store import RunStore
+    window.runs = RunStore(':memory:')
+    window.hub = SimpleNamespace(driver=None)
+    window.drafts = SimpleNamespace(list_captures=lambda _:[])
+    window.media_root = tmp_path
+    view = {'state':'Ready for address review','reviewed':False,'address':{},'media_count':3}
+    monkeypatch.setattr(ui, '_collected_job_view', lambda *args:view)
+    window.rxcu_input.setPlainText('RXCU123456')
+    window._create_batch(archive_before_review=True)
+    job = window.jobs[0]
+    assert job['archive_before_review'] and window._collection_rows == [0]
+    assert not window.verify_captured_address_button.isEnabled()
+    run = window.runs.start(job['id'],source_capture_id='capture',reference=job['rxcu'],listing_id='12',
+                            archive_before_review=True,address_revision_id=None)
+    window.runs.perform_once(run,'remove_portals',lambda:{'removed':True})
+    window.refresh()
+    assert window._collection_rows == [0] and not window._review_rows
+    window.runs.perform_once(run,'archive',lambda:{'archived':True})
+    window.refresh()
+    assert window._review_rows == [0] and not window._collection_rows
+    assert window.verify_captured_address_button.isEnabled()
+    assert not window.relist_batch_button.isEnabled()
+    view['reviewed'] = True
+    window.refresh()
+    assert window.relist_batch_button.isEnabled() and not window._review_rows
+    window.runs.close()
+
+
+def test_archived_review_can_proceed_when_next_backup_is_incomplete(window, monkeypatch, tmp_path):
+    from quick_relist.run_store import RunStore
+    window.runs = RunStore(':memory:')
+    window.hub,window.media_root = SimpleNamespace(driver=None),tmp_path
+    window.drafts = SimpleNamespace(list_captures=lambda _:[])
+    window.rxcu_input.setPlainText('RXCU123456\nRXCU123457')
+    window._create_batch(archive_before_review=True)
+    first = window.jobs[0]
+    monkeypatch.setattr(ui,'_collected_job_view',lambda drafts,job:
+        {'state':'Address review saved','reviewed':True,'address':{},'media_count':3} if job['id']==first['id'] else None)
+    rid = window.runs.start(first['id'],source_capture_id='capture',reference=first['rxcu'],
+        listing_id='12',archive_before_review=True,address_revision_id=None)
+    for name in ('remove_portals','archive'):
+        window.runs.perform_once(rid,name,lambda:{'verified':True})
+    window.refresh()
+    assert window._collection_rows == [1] and window.relist_batch_button.isEnabled()
+    assert window._relist_jobs == [first]
+    window.runs.close()
+
+
+def test_new_live_batch_collects_archives_then_opens_local_review(window, application, monkeypatch, tmp_path):
+    from quick_relist import collection, hub_login, relist_runner
+    from quick_relist.run_store import RunStore
+    window.runs = RunStore(':memory:')
+    window.hub = SimpleNamespace(driver=SimpleNamespace(window_handles=['hub']))
+    window.drafts = SimpleNamespace(list_captures=lambda _:[])
+    window.media_root = tmp_path
+    seen, events = set(), []
+    view = {'state':'Ready for review','reviewed':False,'address':{},'media_count':3}
+    monkeypatch.setattr(ui,'_collected_job_view',lambda drafts,job:view if job['id'] in seen else None)
+    monkeypatch.setattr(hub_login,'wait_for_hub_login',lambda *a,**kw:events.append('login'))
+    def collect(hub, drafts, job, root, **kwargs):
+        events.append('collect ' + job['rxcu'])
+        seen.add(job['id'])
+        return {'capture':{'rxcu':job['rxcu']}}
+    def archive(runner, job, data, *, freshly_collected):
+        assert freshly_collected and data['rxcu'] == job['rxcu']
+        rid = runner.runs.start(job['id'],source_capture_id='capture',reference=job['rxcu'],
+            listing_id=job['rxcu'][4:],archive_before_review=True,address_revision_id=None)
+        for action in ('remove_portals','archive'):
+            runner.runs.perform_once(rid,action,lambda:{'verified':True})
+        events.append('archive ' + job['rxcu'])
+    monkeypatch.setattr(collection,'collect_listing',collect)
+    monkeypatch.setattr(relist_runner.RelistRunner,'archive_collected',archive)
+    monkeypatch.setattr(window,'_verify_captured_address',lambda:events.append('address review'))
+    window.rxcu_input.setPlainText('RXCU123456\nRXCU123457')
+    window.create_button.click()
+    _finish_worker(application,window)
+    assert events == ['login','collect RXCU123456','archive RXCU123456','collect RXCU123457','archive RXCU123457','address review']
+    assert window._review_rows == [0,1] and not window.relist_batch_button.isEnabled()
+    window.runs.close()
+
+
 def test_invalid_or_credential_bearing_hub_urls_are_rejected(window):
     for url in ("http://example.invalid", "javascript:alert(1)", "https://user:password@example.invalid", "not a URL"):
         window.hub_url.setText(url)

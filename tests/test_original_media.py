@@ -51,6 +51,23 @@ def test_archive_order_does_not_replace_observed_display_order(tmp_path):
     assert result['metadata_verified'] is False
 
 
+def test_appends_download_only_the_new_photo_and_detect_reordered_prefix(tmp_path):
+    from quick_relist.original_media import download_appended_photo
+    media, prefix, calls = inventory(29), [], []
+    image = picture(0xff123456)
+    def fetch(url):
+        calls.append(url)
+        return image
+    for position in range(len(media)):
+        card, photo = download_appended_photo(media[:position+1], '123', prefix, tmp_path, fetch=fetch)
+        assert card['position'] == photo['position'] == position
+        prefix.append(card)
+    assert calls == [item['original_source_ref']['url'] for item in media]
+    with pytest.raises(OriginalMediaError, match='Earlier photo cards changed'):
+        download_appended_photo(media, '123', list(reversed(prefix[:-1])), tmp_path, fetch=fetch)
+    assert len(calls) == 29
+
+
 def test_count_is_insufficient_when_photo_bytes_differ(tmp_path):
     source = originals(tmp_path, [picture(0xffff0000)])
     with pytest.raises(OriginalMediaError, match='exactly'):

@@ -30,6 +30,25 @@ def is_manage_url(url):
             and parsed.path.rstrip('/') in MANAGE_PATHS and not parsed.query and not parsed.fragment)
 
 
+def manage_handles(driver):
+    """Find the results tab without bringing every editor to the foreground."""
+    from selenium.common.exceptions import WebDriverException
+    handles = driver.window_handles
+    try:
+        targets = driver.execute_cdp_cmd('Target.getTargets', {})['targetInfos']
+        urls = {t['targetId']:t['url'] for t in targets if t['type'] == 'page'}
+        if all(h.removeprefix('CDwindow-') in urls for h in handles) and set(handles) == set(driver.window_handles):
+            return [h for h in handles if is_manage_url(urls[h.removeprefix('CDwindow-')])]
+    except (AttributeError, KeyError, TypeError, WebDriverException):
+        pass  # Drivers without Chrome tab metadata still support ordinary selection.
+    matches = []
+    for handle in driver.window_handles:
+        driver.switch_to.window(handle)
+        if is_manage_url(driver.current_url):
+            matches.append(handle)
+    return matches
+
+
 class EditorNavigationInProgress(ValueError):
     """The same listing changed editor sections during an identity read."""
 
@@ -290,15 +309,14 @@ class ReadOnlyHub:
         reference = normalize_rxcu(rxcu)
         from selenium.webdriver.common.by import By
         original = self.driver.current_window_handle
-        matches = []
-        for handle in self.driver.window_handles:
-            self.driver.switch_to.window(handle)
-            if is_manage_url(self.driver.current_url):
-                matches.append(handle)
+        matches = manage_handles(self.driver)
         if len(matches) != 1:
             self.driver.switch_to.window(original)
             raise ValueError("Open exactly one Manage Listings tab in the Hub browser first")
-        self.driver.switch_to.window(matches[0])
+        if self.driver.current_window_handle != matches[0]:
+            self.driver.switch_to.window(matches[0])
+        if not is_manage_url(self.driver.current_url):
+            raise ValueError("The Manage Listings tab changed before search.")
         # A stopped action-menu check may leave MUI's modal listbox open.
         # Its background search input remains visible but cannot receive keys.
         menus = [m for m in self.driver.find_elements(By.CSS_SELECTOR, '[role="listbox"]')

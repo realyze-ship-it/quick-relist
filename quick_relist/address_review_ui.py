@@ -16,7 +16,8 @@ class VerifyAddressDialog(QDialog):
     def __init__(self, reference, capture, revision=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f'Verify address — {reference}')
-        self.resize(660, 740)
+        available = self.screen().availableGeometry()
+        self.resize(min(660, available.width() - 32), min(740, available.height() - 64))
         self.proposal = propose_address_fields(capture)
         self.widgets = {}
         self.original = {}
@@ -36,6 +37,7 @@ class VerifyAddressDialog(QDialog):
         scroll.setWidgetResizable(True)
         content = QWidget()
         form = QFormLayout(content)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         form.setSpacing(13)
         for key, label in LABELS.items():
             item = self.proposal['fields'].get(key)

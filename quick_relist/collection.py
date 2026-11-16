@@ -16,6 +16,10 @@ class CollectionStopped(RuntimeError):
     pass
 
 
+class ListingNotFound(CollectionStopped):
+    pass
+
+
 def latest_collection(drafts, job_id):
     for row in drafts.list_captures(job_id):
         if row['capture'].get('schema_version') == 'hub-collected-listing/v1':
@@ -53,7 +57,7 @@ def _wait_search(hub, reference, cancelled, timeout=30):
         if len(found) == 1:
             return
         time.sleep(.2)
-    raise CollectionStopped('The reference did not appear in Hub. Check the listing filters and your sign-in.')
+    raise ListingNotFound('The reference did not appear in Hub. Check the listing filters and your sign-in.')
 
 
 def collect_listing(hub, drafts, job, media_root, *, cancelled=lambda: False, progress=lambda message: None):
@@ -134,7 +138,8 @@ def collect_listing(hub, drafts, job, media_root, *, cancelled=lambda: False, pr
     return {'id': result_id, 'source_capture_id': capture_id, 'capture': result}
 
 
-def collect_batch(hub, drafts, jobs, media_root, *, cancelled=lambda: False, progress=lambda message: None):
+def collect_batch(hub, drafts, jobs, media_root, *, cancelled=lambda: False, progress=lambda message: None,
+                  after_collection=None):
     # Development builds refresh handlers between idle UI operations so fixes
     # do not discard the operator's signed-in browser. This performs no Hub
     # action; ordinary installed builds never reload modules.
@@ -174,9 +179,13 @@ def collect_batch(hub, drafts, jobs, media_root, *, cancelled=lambda: False, pro
                 # Preserve the original observation and all source/address IDs.
                 saved = drafts.get_capture(drafts.save_capture(job['id'], reviewed))
             collected.append(saved)
+            if after_collection is not None:
+                after_collection(job, saved['capture'], freshly_collected=False)
             continue
         result = collect_listing(hub, drafts, job, media_root, cancelled=cancelled, progress=progress)
         collected.append(result)
         if result['capture'].get('download_needs_review'):
             raise CollectionStopped('The listing and its original photos were saved. Review the completed download before continuing the batch.')
+        if after_collection is not None:
+            after_collection(job, result['capture'], freshly_collected=True)
     return collected

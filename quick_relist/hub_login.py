@@ -5,7 +5,7 @@ OTP inputs, cookies and tokens are never read or supplied by this module.
 """
 from urllib.parse import urlsplit
 import time
-from .hub_readonly import is_manage_url
+from .hub_readonly import is_manage_url, manage_handles
 
 
 MANAGE_URL = 'https://hub.remax.co.za/app/listings'
@@ -42,16 +42,15 @@ def _hub_url(url):
 def _manage_tab(driver):
     """Reuse one results tab, preserving any already-open listing editors."""
     original = driver.current_window_handle
-    matches = []
-    for handle in driver.window_handles:
-        driver.switch_to.window(handle)
-        if is_manage_url(driver.current_url):
-            matches.append(handle)
+    matches = manage_handles(driver)
     if len(matches) > 1:
         driver.switch_to.window(original)
         raise LoginStopped('More than one Manage Listings tab is open. Keep one, then resume collection.')
     if matches:
-        driver.switch_to.window(matches[0])
+        if driver.current_window_handle != matches[0]:
+            driver.switch_to.window(matches[0])
+        if not is_manage_url(driver.current_url):
+            raise LoginStopped('The Manage Listings tab changed before sign-in finished.')
     else:
         driver.switch_to.window(original)
         # Do not navigate away from a captured editor or discard its bindings.

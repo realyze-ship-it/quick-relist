@@ -16,7 +16,7 @@ from .collection import _wait_search
 from .core import normalize_rxcu
 from .form_copy import CopyStopped, ParticularsFiller, particulars_plan
 from .matched_capture import MatchedHubCapture
-from .original_media import download_originals
+from .original_media import download_originals, download_appended_photo, observed_originals
 from .portal_ui import PORTALS, read_portals, active_destinations, only_moderation_pending
 from .relist_plan import media_plan, require_empty_related
 from .upload_review import compare_uploaded_images
@@ -288,7 +288,8 @@ class HubRelistUI:
 
     def bind(self, target):
         self.current = deepcopy(target)
-        self.driver.switch_to.window(target['handle'])
+        if self.driver.current_window_handle != target['handle']:
+            self.driver.switch_to.window(target['handle'])
         self.guard()
 
     def tab(self, name):
@@ -387,6 +388,23 @@ class HubRelistUI:
     @diagnosed
     def prepare(self, plan):
         self.current = None
+        if not plan.get('source_already_archived'):
+            self.anchor_source(plan)
+        self.driver.switch_to.new_window('tab')
+        return self.fill_new_form(plan)
+
+    def use_collected_source(self, collection):
+        reference, ident = collection['rxcu'], collection['listing_id']
+        matched = collection['source'].get('matched_source', {})
+        binding = self.hub.editor_bindings.get(reference)
+        if (not binding or binding['listing_id'] != ident or self.driver.current_window_handle != binding['handle']
+                or matched.get('rxcu') != reference or matched.get('listing_id') != ident
+                or matched.get('all_accepted_observations_guarded') is not True):
+            raise CopyStopped('The collected editor changed before portal removal. Resume to recheck the saved source.')
+        self.bind({'reference':reference, **binding})
+        self.source = deepcopy(self.current)
+
+    def anchor_source(self, plan):
         # A discarded unsaved tab may still be WebDriver's selected context.
         # Re-anchor to the collected editor before asking Chrome for a new tab.
         binding = self.hub.editor_bindings.get(plan['source_reference'])
@@ -404,23 +422,25 @@ class HubRelistUI:
             self.driver.get('https://hub.remax.co.za/app/listings/edit/' + plan['source_listing_id'])
             self.wait(lambda:bool(self.driver.find_elements('css selector','main button[role="tab"]')), 'The original editor did not reopen.')
         self.hub.verify_editor_reference(plan['source_reference'], plan['source_listing_id'])
-        self.driver.switch_to.new_window('tab')
+
+    def fill_new_form(self, plan):
         self.driver.get('https://hub.remax.co.za/app/listings/add/' + plan['particulars']['mode'])
         self.wait(lambda: self.driver.find_elements('css selector','input[name="listing_type_id"]'),
                   'The new listing form did not load.')
         filler = ParticularsFiller(self.driver, cancelled=self.cancelled, progress=self.progress)
         filler.fill(plan['particulars'])
+        original_status = ' The original is archived.' if plan.get('source_already_archived') else ' The original remains active.'
         def ready_to_save():
             filler.guard()
             buttons = [e for e in self.driver.find_elements('css selector', 'main button')
                        if e.is_displayed() and e.get_attribute('textContent').strip() == 'Save']
             if len(buttons) != 1:
-                raise CopyStopped('The new listing Save control is missing or ambiguous. The original remains active.')
+                raise CopyStopped('The new listing Save control is missing or ambiguous.' + original_status)
             return buttons[0].is_enabled()
         # Readiness is client-side only; saving can still be rejected by Hub.
         # Never remove the original while the form is visibly invalid.
         self.wait(ready_to_save,
-                  'Hub has not enabled Save for the reviewed form. Check its required fields; the original remains active.', timeout=15)
+                  'Hub has not enabled Save for the reviewed form. Check its required fields.' + original_status, timeout=15)
         return {'handle':self.driver.current_window_handle,'url':self.driver.current_url}
 
     @diagnosed
@@ -439,6 +459,13 @@ class HubRelistUI:
     @diagnosed
     def check_unarchived_source(self, plan):
         return self._check_source_archive(plan, archived=False)
+
+    def inspect_archive(self, plan):
+        from .collection import ListingNotFound
+        try:
+            return self._check_source_archive(plan, archived=True, restore=False)
+        except ListingNotFound:
+            return self._check_source_archive(plan, archived=False, restore=False)
 
     def _check_source_archive(self, plan, *, archived, restore=True):
         from selenium.webdriver.common.keys import Keys
@@ -684,6 +711,7 @@ class HubRelistUI:
             runs.reconcile_media_text(previous['id'], {'reference':reference,'listing_id':ident,
                 'reconciled_by':'fresh_unpublished_media_read','outcome':outcome})
         target['verified_photo_prefix_count'] = count
+        target['verified_photo_inventory'] = observed_originals(page['media'], ident) if count else []
         return target
 
     @diagnosed
@@ -894,6 +922,7 @@ class HubRelistUI:
         prefix = target.get('verified_photo_prefix_count', 0)
         if received_count != prefix:
             raise CopyStopped('The new copy already contains images. Check them before sending more files.')
+        inventory = list(target.get('verified_photo_inventory', []))
         # One photo at a time avoids Hub silently dropping a large batch. Each
         # received original is downloaded and compared before the next upload.
         for index, photo in enumerate(plan['photos']):
@@ -926,12 +955,17 @@ class HubRelistUI:
                 outcome=self.wait(received,'Hub has not confirmed this photo. No duplicate or later photo was sent.',timeout=90)
                 if outcome=='failed':
                     return {'upload_failed':True,'missing_position':index,'explicit_hub_error':True}
-                page = PartialHubCapture(self.driver).capture_current_page()['pages'][-1]
-                downloaded = download_originals(page['media'],target['listing_id'],self.media_root,cancelled=self.cancelled)
-                check = compare_uploaded_images(plan['photos'][:index+1],downloaded['media_manifest'])
+                page = PartialHubCapture(self.driver).capture_current_page(target['listing_id'])['pages'][-1]
+                card, downloaded = download_appended_photo(page['media'], target['listing_id'], inventory,
+                                                          self.media_root, cancelled=self.cancelled)
+                if card['position'] != index:
+                    raise CopyStopped('The uploaded photo appeared in an unexpected position.')
+                check = compare_uploaded_images([{**photo,'position':0}], [{**downloaded,'position':0}])
                 if not check['order_matches']:
                     raise CopyStopped('Hub saved different, extra or reordered photos. Review them before continuing.')
-                return {'received_count':index+1,'photo_comparison':check}
+                inventory.append(card)
+                return {'received_count':index+1, 'verified_position':index, 'received_asset_id':card['id'],
+                        'comparison':check['matches'][0]['comparison']}
             for attempt in range(3):
                 receipt=runs.perform_once(run_id,f'upload_photo_{index}_attempt_{attempt+1}',upload)
                 if not receipt.get('upload_failed'):
@@ -965,7 +999,9 @@ class HubRelistUI:
         proposed = propose_address_fields(actual)
         original = {v['path']:v['field'] for v in proposed['fields'].values()}
         copied = particulars_plan(actual,{'original':original,'edited':deepcopy(original)})
-        copied, suburb_label = resolve_saved_suburb(plan['particulars'], copied, self.selected_suburb_label)
+        captured_label = proposed['fields'].get('suburb', {}).get('field', {}).get('selected_suburb_label')
+        copied, suburb_label = resolve_saved_suburb(plan['particulars'], copied,
+                                                  lambda short: captured_label or self.selected_suburb_label(short))
         differences = particulars_differences(plan['particulars'], copied)
         if differences:
             raise CopyStopped('Saved particulars differ. ' + '\n'.join(differences) + '\nThe replacement remains unpublished.')
@@ -981,7 +1017,7 @@ class HubRelistUI:
         self.hub.search_reference(target['reference'],all_listing_types=True)
         _wait_search(self.hub,target['reference'],self.cancelled)
         self.hub.open_listing_editor(target['reference'],timeout=30)
-        actual = self.captured_editor(target['reference'])
+        actual = self.captured_editor(target['reference'], include_suburb_selection=True)
         suburb_label = self._verify_particulars(actual, plan)
         pages = {p['page_key']:p for p in actual['pages']}
         if not same_saved_media(plan['media'], media_plan(pages['media'])):

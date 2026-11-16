@@ -88,6 +88,46 @@ def test_completed_manual_pilot_is_never_recreated(setup):
     assert provider.calls==[]
 
 
+def test_archive_before_review_restarts_without_recollecting_or_rearchiving(setup):
+    drafts, runs, job = setup
+    job = {**job, 'archive_before_review':1}
+    provider = Provider()
+    provider.use_collected_source = lambda data:provider.operation('bind_recent_collection')
+    data = {**module.latest_collection(drafts,job['id'])['capture'], 'source':{}}
+    runner = module.RelistRunner(drafts, runs, provider, today=lambda:date(2099,8,31))
+    with pytest.raises(RunNeedsReview, match='Finish collecting'):
+        runner.one(job)
+    runner.archive_collected(job, data, freshly_collected=True)
+    runner.archive_collected(job, data, freshly_collected=False)
+    assert provider.calls == ['bind_recent_collection','remove','archive']
+    assert runs.get(job['id'])['binding']['address_revision_id'] is None
+    drafts.list_addresses = lambda capture:[]
+    with pytest.raises(module.CopyStopped, match='address review'):
+        runner.one(job)
+    drafts.list_addresses = lambda capture:[{'id':'review'}]
+    result = module.RelistRunner(drafts, runs, provider, today=lambda:date(2099,9,1)).one(job)
+    assert result['state'] == 'published' and result['original_archived']
+    assert result['dates']['date_listed'] == '2099-09-01'
+    assert runs.get(job['id'])['binding']['address_revision_id'] == 'review'
+    assert provider.calls == ['bind_recent_collection','remove','archive','prepare','create','copy','verify',
+                              'publish_website','publish_p24','publication']
+
+
+def test_interrupted_early_archive_reconciles_visible_outcome_once(setup):
+    drafts, runs, job = setup
+    job = {**job, 'archive_before_review':1}
+    provider = Provider(fail='archive')
+    data = {**module.latest_collection(drafts,job['id'])['capture'], 'source':{}}
+    runner = module.RelistRunner(drafts, runs, provider)
+    with pytest.raises(RuntimeError):
+        runner.archive_collected(job, data, freshly_collected=False)
+    provider.inspect_archive = lambda plan: {'reference':job['rxcu'], 'listing_id':data['listing_id'],
+        'reconciled_by':'fresh_manage_listing_archive_action','archived':True}
+    runner.archive_collected(job, data, freshly_collected=False)
+    assert module.archived_for_review(runs.get(job['id']))
+    assert provider.calls == ['check','remove','archive']
+
+
 def test_moderation_is_tracked_while_next_reviewed_listing_runs(setup):
     drafts,runs,job=setup
     runner=module.RelistRunner(drafts,runs,Provider())

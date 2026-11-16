@@ -45,6 +45,21 @@ def test_user_stop_does_not_begin_another_listing(monkeypatch):
     assert calls == ['0']
 
 
+def test_archive_follows_each_completed_photo_backup_in_order(monkeypatch):
+    drafts = DraftStore(':memory:')
+    drafts.save_capture('0', {'schema_version':'hub-collected-listing/v1','complete':False})
+    events = []
+    def collect(hub, store, job, root, **kwargs):
+        events.append(('collect',job['id']))
+        return {'capture':{'download_needs_review':job['id']=='2'}}
+    def archive(job, data, *, freshly_collected):
+        events.append(('archive',job['id'],freshly_collected))
+    monkeypatch.setattr(collection,'collect_listing',collect)
+    with pytest.raises(collection.CollectionStopped, match='Review the completed download'):
+        collection.collect_batch(None,drafts,jobs(),None,after_collection=archive)
+    assert events == [('archive','0',False),('collect','1'),('archive','1',True),('collect','2')]
+
+
 def test_resuming_does_not_skip_an_unresolved_download(monkeypatch):
     drafts = DraftStore(':memory:')
     drafts.save_capture('0', {'schema_version': 'hub-collected-listing/v1', 'complete': False,

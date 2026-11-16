@@ -6,11 +6,11 @@ A Windows app for collecting Hub listings, reviewing each address, and processin
 
 ## Workflow
 
-1. Enter one or more RXCU references and choose **Start batch**. The batch is saved and Chrome opens automatically.
+1. Enter the RXCU references you want taken off market and choose **Collect and archive**. Chrome opens automatically.
 2. Complete the login and OTP in that RE/MAX Chrome window. The app waits for the signed-in page and listing search to finish loading, then continues automatically. It does not read or enter your credentials.
-3. The app reads each matching listing, descriptions, agents, supported room options, original photos and portal destinations. It processes references sequentially and checks the photo pack against the downloaded originals. **Resume collection** uses an existing browser or opens one if necessary and waits for sign-in in the same way.
-4. Review the prefilled **Verify address** form for each listing, make any corrections and save the review. This saves a local review only.
-5. **Relist reviewed batch** first checks the collected data and shows the reviewed references and addresses for confirmation. For each supported listing, it prepares and checks an unsaved form, rechecks the source, removes the original from its portals, archives sales as **Listing has been cancelled → Mandate expired** and rentals as **Listing has been withdrawn**, saves the replacement, copies and checks its content, then publishes to the original destinations.
+3. For each listing, the app saves its details, rooms, agents, descriptions, photos and portal destinations. It checks the backup and photo pack, removes the original from its portals and archives it. Sales use **Listing has been cancelled → Mandate expired**. Rentals use **Listing has been withdrawn**.
+4. Review and save each prefilled address. The originals are off market during review. A saved batch can be reopened here after closing the app.
+5. Choose **Relist reviewed batch** and confirm the addresses. Quick Relist creates each replacement, verifies its saved details and photos, then publishes to the original destinations. Batches saved by earlier versions keep their original review-before-archive sequence.
 
 If Save stops after creating a copy, **Check existing replacement** can verify its RXCU and Hub edit URL against the freshly verified archived row, completed removal record and saved reviewed particulars before accepting that existing empty, unpublished copy. The original failed Save stays in the activity record. This read-only recovery check never creates another listing.
 
@@ -24,7 +24,7 @@ If an original brochure summary exceeds Hub's current 250-character limit, the a
 
 - Sale and rental use their own prices and status controls. On the operator's requested date rule, new runs set **Date listed** and **On market since** to the South African relist day and **Listing expiry** six calendar months later. Sale **Mandate signed date** follows Date listed and **Mandate expiry** follows Listing expiry. Rental **Occupation date** and rental period stay exactly as collected. If the target month has fewer days, expiry uses its last day.
 - Erf and registered scheme numbers stay exactly as captured, including their original formatting. They are read-only in Verify address; street, unit and door fields remain editable. An older review that changed a registered identifier must be reopened and saved before relisting.
-- The source backup retains every original date. The replacement's date plan is recorded before removal and checked after saving. An interrupted run keeps that recorded plan on resume; a run started by an older build retains its original date contract.
+- The source backup retains every original date. Quick Relist records the replacement dates when it starts creating the reviewed listing and checks them after saving. An interrupted replacement keeps its recorded dates.
 - Sale commission preserves the exact captured amount as well as agent shares. Hub rounds the displayed percentage, so copying that percentage alone can change the money. The writer enters the amount last and compares the saved commission before uploading photos, then repeats the comparison with the final listing check.
 - The collector includes the observed lifestyle and General Property Features checkboxes, primary and secondary agents, rich description, photo captions, and ten room categories. Every nonzero supported room must have its dialog captured before relisting.
 - The current writer requires empty custom-feature, party, document and note tables. Listings with related records or floorplans stop before the original is removed. Unsupported or missing fields also stop the run.

@@ -266,6 +266,8 @@ class Store:
         # operation requests cannot be dispatched/reconciled by the new contract.
         self.conn.execute("BEGIN IMMEDIATE")
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(jobs)")}
+        if "archive_before_review" not in columns:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN archive_before_review INTEGER NOT NULL DEFAULT 0")
         if "replacement_revision" not in columns:
             self.conn.execute("ALTER TABLE jobs ADD COLUMN replacement_revision TEXT")
         self.conn.commit()
@@ -407,7 +409,7 @@ class Engine:
             raise SafetyBlocked("The authenticated Hub account or agency changed. No new action is allowed.")
         return identity
 
-    def new_batch(self, rxcus: list[str]) -> str:
+    def new_batch(self, rxcus: list[str], *, archive_before_review=False) -> str:
         if not isinstance(rxcus, (list, tuple)) or not rxcus:
             raise ValidationError("Enter at least one RXCU reference.")
         normalized = [normalize_rxcu(rxcu) for rxcu in rxcus]
@@ -423,8 +425,8 @@ class Engine:
             db.execute("INSERT INTO batches VALUES(?,?)", (batch_id, now))
             for index, rxcu in enumerate(normalized):
                 job_id = uuid4().hex
-                db.execute("INSERT INTO jobs(id,batch_id,position,rxcu,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                           (job_id, batch_id, index, rxcu, "queued", now, now))
+                db.execute("INSERT INTO jobs(id,batch_id,position,rxcu,state,created_at,updated_at,archive_before_review) VALUES(?,?,?,?,?,?,?,?)",
+                           (job_id, batch_id, index, rxcu, "queued", now, now, int(archive_before_review)))
                 self.store._event(db, job_id, "queue", "saved", {"rxcu": rxcu, "position": index})
             return batch_id
 

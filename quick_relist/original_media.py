@@ -94,6 +94,19 @@ def _dimensions(data):
 
 def download_originals(media, listing_id, destination_root, *, fetch=None, cancelled=lambda: False):
     records = observed_originals(media, listing_id)
+    return _download_records(records, listing_id, destination_root, fetch, cancelled)
+
+
+def download_appended_photo(media, listing_id, verified_prefix, destination_root, *, fetch=None, cancelled=lambda:False):
+    records = observed_originals(media, listing_id)
+    if records[:-1] != verified_prefix:
+        raise OriginalMediaError('Earlier photo cards changed during upload. Check their identity and order.')
+    last = records[-1]
+    result = _download_records([last], listing_id, destination_root, fetch, cancelled)
+    return last, result['media_manifest'][0]
+
+
+def _download_records(records, listing_id, destination_root, fetch, cancelled):
     root = Path(destination_root)
     _prepare_root(root)
     directory = root / ('originals-' + uuid4().hex)
