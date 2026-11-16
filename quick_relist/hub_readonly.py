@@ -295,7 +295,7 @@ class ReadOnlyHub:
         except Exception as exc:
             raise RuntimeError("The dedicated Hub browser could not be opened. Close any new browser window and restart Quick Relist before trying again. Protected temporary session files may remain.") from exc
 
-    def search_reference(self, rxcu, *, all_listing_types=False, archived=False):
+    def search_reference(self, rxcu, *, all_listing_types=False, archived=False, refresh_results=False):
         """Submit a read-only Manage Listings search; do not infer a match.
 
         Hub filters may hide listings, so an empty result never proves absence.
@@ -317,6 +317,16 @@ class ReadOnlyHub:
             self.driver.switch_to.window(matches[0])
         if not is_manage_url(self.driver.current_url):
             raise ValueError("The Manage Listings tab changed before search.")
+        prompts = {"Search fusion ref, listing ID or address", "Enter fusion ref, listing ID or address"}
+        if refresh_results:
+            from selenium.webdriver.support.ui import WebDriverWait
+            selector = ','.join(f'input[{attr}="{prompt}"]' for prompt in prompts for attr in ('placeholder', 'aria-label'))
+            self.driver.refresh()
+            def search_loaded(driver):
+                if driver.current_window_handle != matches[0] or not is_manage_url(driver.current_url):
+                    raise ValueError("The Manage Listings tab changed while refreshing the search.")
+                return any(e.is_displayed() for e in driver.find_elements(By.CSS_SELECTOR, selector))
+            WebDriverWait(self.driver, 30).until(search_loaded, 'The fresh listing search did not load.')
         # A stopped action-menu check may leave MUI's modal listbox open.
         # Its background search input remains visible but cannot receive keys.
         menus = [m for m in self.driver.find_elements(By.CSS_SELECTOR, '[role="listbox"]')
@@ -332,8 +342,6 @@ class ReadOnlyHub:
         self._select_listing_view(archived=archived)
         if all_listing_types:
             self._select_all_listing_types()
-        # Both strings were observed in Hub: the visible label and input placeholder.
-        prompts = {"Search fusion ref, listing ID or address", "Enter fusion ref, listing ID or address"}
         candidates = self.driver.find_elements(By.XPATH, "//input[@placeholder or @aria-label or @id]")
         inputs = []
         for el in candidates:
@@ -550,10 +558,12 @@ class ReadOnlyHub:
         except Exception:
             raise RuntimeError("Opening the editor is uncertain. Use Recheck opened editor (read only) for this selected job; do not open it again.") from None
         deadline = time.monotonic() + timeout
+        watching_target = False
         while time.monotonic() < deadline:
-            result = self.recheck_opened_editor(reference)
+            result = self._recheck_opened_editor(reference, watching_target=watching_target)
             if not result.get("editor_pending"):
                 return result
+            watching_target = intent.target_handle is not None
             time.sleep(poll_interval)
         raise RuntimeError("The editor is still unverified. Leave its tabs and results unchanged, then use Recheck opened editor (read only) for this selected job.")
 
@@ -583,6 +593,9 @@ class ReadOnlyHub:
         A blank/loading target remains pending; any observed context, route or
         qualifying title conflict blocks this intent until confirmed close.
         """
+        return self._recheck_opened_editor(rxcu, watching_target=False)
+
+    def _recheck_opened_editor(self, rxcu, *, watching_target):
         state = self.editor_open_state(rxcu)
         if state != "pending":
             raise RuntimeError("There is no safely recheckable opening for this selected job. Select the original job, or safely close and restart the browser session.")
@@ -599,10 +612,14 @@ class ReadOnlyHub:
                 intent.target_handle = next(iter(new_handles))
             if driver.current_window_handle not in {intent.source_handle, intent.target_handle}:
                 raise ValueError("Changed active context")
-            self._check_editor_source(intent, handles)
+            # Keep the new tab in front while Hub loads. Every explicit recheck
+            # and every successful binding still verifies the original result.
+            if not watching_target or driver.current_window_handle != intent.target_handle:
+                self._check_editor_source(intent, handles)
             if intent.target_handle is None:
                 return {"editor_pending": True, "complete": False}
-            driver.switch_to.window(intent.target_handle)
+            if driver.current_window_handle != intent.target_handle:
+                driver.switch_to.window(intent.target_handle)
             url = driver.current_url
             if url == "about:blank" and not intent.route_observed:
                 self._editor_headings_pending(driver.execute_script(IDENTITY_SCRIPT, intent.reference))
@@ -615,12 +632,11 @@ class ReadOnlyHub:
             self._check_editor_target(intent, handles, url)
             # Missing headings can load later. A wrong or duplicate qualifying
             # title is a conflict, not a transient loading condition.
-            pending_headings = self._editor_headings_pending(result)
+            if self._editor_headings_pending(result):
+                return {"editor_pending": True, "complete": False}
             self._check_editor_source(intent, handles)
             driver.switch_to.window(intent.target_handle)
             self._check_editor_target(intent, handles, url)
-            if pending_headings:
-                return {"editor_pending": True, "complete": False}
             # Repeat the guarded identity read after the source round trip.
             # Headings can disappear while loading even after an earlier match.
             final_identity = self._read_editor_identity(intent.reference, intent.listing_id)
@@ -650,7 +666,8 @@ class ReadOnlyHub:
         driver = intent.driver
         if self.driver is not driver or frozenset(driver.window_handles) != handles:
             raise ValueError("Changed browser context")
-        driver.switch_to.window(intent.source_handle)
+        if driver.current_window_handle != intent.source_handle:
+            driver.switch_to.window(intent.source_handle)
         if (driver.current_url != intent.source_url
                 or driver.execute_script(SOURCE_CONTEXT_SCRIPT, intent.source_root, intent.source_row, intent.reference) is not True
                 or driver.current_window_handle != intent.source_handle or driver.current_url != intent.source_url

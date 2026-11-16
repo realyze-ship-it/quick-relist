@@ -308,23 +308,28 @@ class HubRelistUI:
                   'Hub did not finish opening the selected page.')
         self.guard()
 
-    def captured_editor(self, reference, *, include_media_captions=True, include_suburb_selection=False):
+    def captured_editor(self, reference, *, include_media_captions=True, include_suburb_selection=False,
+                        expected_listing_id=None, open_from_results=False):
         self.current = None
         binding = self.hub.editor_bindings.get(reference)
-        if binding and binding['handle'] in self.driver.window_handles:
-            self.driver.switch_to.window(binding['handle'])
+        if not open_from_results and binding and binding['handle'] in self.driver.window_handles:
+            if self.driver.current_window_handle != binding['handle']:
+                self.driver.switch_to.window(binding['handle'])
             try:
                 route = parse_editor_url(self.driver.current_url)
             except ValueError:
                 route = None
             if not route or route['listing_id'] != binding['listing_id']:
                 self.driver.get('https://hub.remax.co.za/app/listings/edit/' + binding['listing_id'])
+            else:
+                self.driver.refresh()  # Existing tab needs a fresh server-backed observation.
         else:
             self.hub.search_reference(reference, all_listing_types=True)
             _wait_search(self.hub, reference, self.cancelled)
             self.hub.open_listing_editor(reference, timeout=30)
             binding = self.hub.editor_bindings[reference]
-        self.driver.refresh()
+        if expected_listing_id is not None and binding['listing_id'] != expected_listing_id:
+            raise CopyStopped('The replacement reference opened a different Hub listing. Check the saved replacement.')
         self.wait(lambda: bool(self.driver.find_elements('css selector','main button[role="tab"]')),
                   'The saved listing did not finish loading.')
         def identity_ready():
@@ -360,11 +365,15 @@ class HubRelistUI:
             return False
         suburb = propose_address_fields(source)['fields'].get('suburb', {}).get('field', {})
         full = suburb.get('selected_suburb_label')
-        return not full or self.selected_suburb_label(suburb['value']) == full
+        if not full:
+            return True
+        current = propose_address_fields(fresh)['fields'].get('suburb', {}).get('field', {})
+        label = current.get('selected_suburb_label') or self.selected_suburb_label(suburb['value'])
+        return label == full
 
     @diagnosed
     def check_source(self, collection, plan):
-        fresh = self.captured_editor(plan['source_reference'])
+        fresh = self.captured_editor(plan['source_reference'], include_suburb_selection=True)
         if not self._source_matches(collection, fresh):
             raise CopyStopped('The original changed after collection. Collect it again and review its address before relisting.')
         self.source = deepcopy(self.current)
@@ -375,7 +384,7 @@ class HubRelistUI:
 
     @diagnosed
     def check_removed_source(self, collection, plan):
-        fresh = self.captured_editor(plan['source_reference'])
+        fresh = self.captured_editor(plan['source_reference'], include_suburb_selection=True)
         if not self._source_matches(collection, fresh):
             raise CopyStopped('The original content changed after removal. Review it before continuing.')
         self.source = deepcopy(self.current)
@@ -471,10 +480,7 @@ class HubRelistUI:
         from selenium.webdriver.common.keys import Keys
         self.current = None
         reference, ident = plan['source_reference'], plan['source_listing_id']
-        self.hub.search_reference(reference, all_listing_types=True, archived=archived)
-        self.driver.refresh()
-        self.wait(lambda:bool(self.driver.find_elements('css selector','input[placeholder="Enter fusion ref, listing ID or address"]')), 'The fresh listing search did not load.')
-        self.hub.search_reference(reference, all_listing_types=True, archived=archived)
+        self.hub.search_reference(reference, all_listing_types=True, archived=archived, refresh_results=True)
         _wait_search(self.hub, reference, self.cancelled)
         rows = [r for r in self.driver.find_elements('css selector','[role="row"]')
                 if [normalize_rxcu(m[1]) for p in r.find_elements('tag name','p')
@@ -612,13 +618,9 @@ class HubRelistUI:
         state = read_portals(self.driver, guard=self.guard)
         if state['published']:
             raise CopyStopped('Hub reports publication during media saving. Review the replacement before further portal actions.')
-        self.tab('Media')
-        self.driver.refresh()
-        self.wait(lambda:self.driver.find_elements('css selector','textarea[name="marketing_header"]'), 'The saved media page did not load.')
-        actual = media_plan(PartialHubCapture(self.driver).capture_current_page()['pages'][-1])
-        if not same_saved_media(plan['media'], actual):
-            raise CopyStopped('The saved descriptions differ from the source. The replacement was not sent to portals.')
-        return {'descriptions_saved_and_reloaded':True}
+        # The independent replacement read checks the server-saved text before
+        # publication. A submission receipt alone cannot pass that check.
+        return {'descriptions_submitted': True, 'unpublished_observed': True}
 
     @diagnosed
     def recover_copy(self, plan, previous, runs):
@@ -700,7 +702,8 @@ class HubRelistUI:
                 'reconciled_by':'fresh_replacement_photo_comparison', 'reference': reference,
                 'listing_id': ident, 'received_count': count, 'photo_comparison': comparison})
         media_action = actions.get('copy_media_text')
-        if media_action and media_action['state'] != 'done':
+        submitted = (media_action or {}).get('receipt') or {}
+        if media_action and (media_action['state'] != 'done' or submitted.get('descriptions_submitted') is True):
             saved_media = media_plan(page)
             empty = not saved_media['description_text'].strip() and all(
                 not value.strip() for key,value in saved_media.items() if key not in ('description_html','description_text'))
@@ -708,8 +711,9 @@ class HubRelistUI:
                        'formatting_changed' if only_description_formatting_changed(plan['media'], saved_media) else None)
             if not outcome:
                 raise CopyStopped('The saved descriptions contain other text. Review them before overwriting.')
-            runs.reconcile_media_text(previous['id'], {'reference':reference,'listing_id':ident,
-                'reconciled_by':'fresh_unpublished_media_read','outcome':outcome})
+            if media_action['state'] != 'done' or outcome != 'matching':
+                runs.reconcile_media_text(previous['id'], {'reference':reference,'listing_id':ident,
+                    'reconciled_by':'fresh_unpublished_media_read','outcome':outcome})
         target['verified_photo_prefix_count'] = count
         target['verified_photo_inventory'] = observed_originals(page['media'], ident) if count else []
         return target
@@ -1013,11 +1017,8 @@ class HubRelistUI:
     def verify_content(self, target, plan):
         # Open by the new reference through Manage Listings, establishing the
         # same observed row/link association as ordinary source collection.
-        self.current = None
-        self.hub.search_reference(target['reference'],all_listing_types=True)
-        _wait_search(self.hub,target['reference'],self.cancelled)
-        self.hub.open_listing_editor(target['reference'],timeout=30)
-        actual = self.captured_editor(target['reference'], include_suburb_selection=True)
+        actual = self.captured_editor(target['reference'], include_suburb_selection=True,
+                                      expected_listing_id=target['listing_id'], open_from_results=True)
         suburb_label = self._verify_particulars(actual, plan)
         pages = {p['page_key']:p for p in actual['pages']}
         if not same_saved_media(plan['media'], media_plan(pages['media'])):

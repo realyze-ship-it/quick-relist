@@ -11,7 +11,7 @@ import pytest
 import test_room_capture as fixture
 from test_room_capture import setup  # noqa: F401: shared synthetic pytest fixture
 from test_room_capture_integration import IntegratedDriver
-from test_matched_capture import NativeTab
+from test_matched_capture import NativeTab, tab_attributes
 import quick_relist.room_capture as room_module
 import quick_relist.matched_capture as matched_module
 from quick_relist.capture import READ_PAGE_SCRIPT, verify_capture_integrity
@@ -143,6 +143,8 @@ def matched_failure(monkeypatch, error, navigation='native'):
                     if navigation == 'native' else [])
 
         def execute_script(self, script, *args):
+            if script == matched_module.TAB_ATTRIBUTES:
+                return tab_attributes(args[0])
             result = super().execute_script(script, *args)
             if navigation == 'links' and script == READ_PAGE_SCRIPT:
                 result['editor_links'] = [{'url': fixture.BASE + '/media', 'text': 'Media'}]

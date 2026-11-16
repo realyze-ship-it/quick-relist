@@ -61,6 +61,7 @@ def _wait_search(hub, reference, cancelled, timeout=30):
 
 
 def collect_listing(hub, drafts, job, media_root, *, cancelled=lambda: False, progress=lambda message: None):
+    started = time.monotonic()
     reference, job_id = normalize_rxcu(job['rxcu']), job['id']
     if hub.driver is None:
         raise CollectionStopped('Open Hub and sign in first.')
@@ -73,7 +74,8 @@ def collect_listing(hub, drafts, job, media_root, *, cancelled=lambda: False, pr
     progress(f'{reference}: finding the listing')
     binding = hub.editor_bindings.get(reference)
     if binding and binding['handle'] in hub.driver.window_handles:
-        hub.driver.switch_to.window(binding['handle'])
+        if hub.driver.current_window_handle != binding['handle']:
+            hub.driver.switch_to.window(binding['handle'])
         hub.verify_editor_reference(reference, binding['listing_id'])
     else:
         try:
@@ -87,55 +89,75 @@ def collect_listing(hub, drafts, job, media_root, *, cancelled=lambda: False, pr
     reader = MatchedHubCapture(hub, reference, timeout=30, cancelled=cancelled,
                                include_room_options=True, include_media_captions=True,
                                include_general_features=True, include_suburb_selection=True)
-    capture = reader.capture()
-    capture_id = drafts.save_capture(job_id, capture)
-    if capture.get('stop_reason') or {p['page_key'] for p in capture['pages']} != required_pages(capture):
-        raise CollectionStopped(capture.get('stop_reason') or 'Some Hub pages are missing. Saved information has been kept.')
-    media_page = next(p for p in capture['pages'] if p['page_key'] == 'media')
-    inventory = observed_originals(media_page['media'], binding['listing_id'])
-    captions = media_page.get('photo_captions', [])
-    if [c['id'] for c in captions] != [i['id'] for i in inventory] or not all(c.get('close_verified') is True for c in captions):
-        raise CollectionStopped('Some photo captions could not be verified. Saved information has been kept.')
-    url = hub.driver.current_url
-    from .capture import parse_editor_url
     from .portal_ui import read_portals
-    if parse_editor_url(url)['page_key'] != 'portals':
-        url = reader._navigate_tab(url, 'portals')
-    portals = read_portals(hub.driver, guard=lambda: reader._identity(url), timeout=45)
-    if parse_editor_url(url)['page_key'] != 'media':
-        url = reader._navigate_tab(url, 'media')
-    current = reader._settled_page(url)
-    if observed_originals(current['media'], binding['listing_id']) != inventory:
-        raise CollectionStopped('The photos changed during collection. Review Hub before trying again.')
-    progress(f'{reference}: downloading {len(inventory)} original images')
-    originals = download_originals(media_page['media'], binding['listing_id'], Path(media_root), cancelled=cancelled)
-    originals_id = drafts.save_capture(job_id, originals)
-    reader._identity(url)
-    progress(f'{reference}: checking the photo pack against the originals')
-    downloaded = hub.download_photo_pack(reference, binding['listing_id'], Path(media_root).parent / 'downloads')
-    imported = import_media_zip(downloaded['candidate_path'], media_root)
-    drafts.save_capture(job_id, imported)
-    verified = verify_pack_bytes(originals, imported)
-    for item, caption in zip(verified['media_manifest'], captions):
-        item['caption'] = caption['caption']
-    verified['captions_observed'] = True
-    media_id = drafts.save_capture(job_id, verified)
+    media_backup = None
+    portals = None
+
+    def collect_page(page, url):
+        nonlocal media_backup, portals
+        if page['page_key'] == 'media':
+            media_backup = _backup_media(hub, drafts, job_id, page, media_root,
+                                        guard=lambda: reader._identity(url), cancelled=cancelled, progress=progress)
+        elif page['page_key'] == 'portals':
+            portals = read_portals(hub.driver, guard=lambda: reader._identity(url), timeout=45)
+
+    try:
+        capture = reader.capture(on_page=collect_page, start_on_details=True)
+    except Exception:
+        drafts.save_capture(job_id, reader.get_result())
+        raise
+    capture_id = drafts.save_capture(job_id, capture)
+    if (capture.get('stop_reason') or {p['page_key'] for p in capture['pages']} != required_pages(capture)
+            or media_backup is None or portals is None):
+        raise CollectionStopped(capture.get('stop_reason') or 'Some Hub pages are missing. Saved information has been kept.')
+    originals_id, media_id, verified, attributed = media_backup
+    photo_count = len(verified['media_manifest'])
     result = {'schema_version': 'hub-collected-listing/v1', 'complete': False,
               'rxcu': reference, 'listing_id': binding['listing_id'],
               'source_capture_id': capture_id, 'originals_capture_id': originals_id,
-              'media_capture_id': media_id, 'media_count': len(inventory),
+              'media_capture_id': media_id, 'media_count': photo_count,
               'source': deepcopy(capture), 'media': verified,
-              'portal_observation': portals,
+              'portal_observation': portals, 'collection_seconds': round(time.monotonic() - started, 2),
               'status': 'ready_for_address_review', 'live_ready': False,
               'remaining': ['Verify the copied fields in an unpublished listing before enabling live relisting.']}
-    if downloaded.get('attribution_verified') is True:
-        from .downloads import finish_verified_download
-        finish_verified_download(Path(media_root).parent / 'downloads', downloaded, verified)
-    else:
+    if not attributed:
         result['download_needs_review'] = True
     result_id = drafts.save_capture(job_id, result)
-    progress(f'{reference}: {len(inventory)} original images saved; ready for address review')
+    progress(f'{reference}: {photo_count} original images saved and matched to the photo pack')
     return {'id': result_id, 'source_capture_id': capture_id, 'capture': result}
+
+
+def _backup_media(hub, drafts, job_id, page, media_root, *, guard, cancelled, progress):
+    from .capture import PartialHubCapture
+    reference = page['matched_source']['rxcu']
+    listing_id = page['matched_source']['listing_id']
+    inventory = observed_originals(page['media'], listing_id)
+    captions = page.get('photo_captions', [])
+    if [c['id'] for c in captions] != [i['id'] for i in inventory] or not all(c.get('close_verified') is True for c in captions):
+        raise CollectionStopped('Some photo captions could not be verified. Saved information has been kept.')
+    progress(f'{reference}: downloading {len(inventory)} original images')
+    originals = download_originals(page['media'], listing_id, Path(media_root), cancelled=cancelled)
+    originals_id = drafts.save_capture(job_id, originals)
+    guard()
+    progress(f'{reference}: checking the photo pack against the originals')
+    root = Path(media_root).parent / 'downloads'
+    downloaded = hub.download_photo_pack(reference, listing_id, root)
+    imported = import_media_zip(downloaded['candidate_path'], media_root)
+    drafts.save_capture(job_id, imported)
+    verified = verify_pack_bytes(originals, imported)
+    for item, caption in zip(verified['media_manifest'], captions, strict=True):
+        item['caption'] = caption['caption']
+    verified['captions_observed'] = True
+    media_id = drafts.save_capture(job_id, verified)
+    attributed = downloaded.get('attribution_verified') is True
+    if attributed:
+        from .downloads import finish_verified_download
+        finish_verified_download(root, downloaded, verified)
+    guard()
+    current = PartialHubCapture(hub.driver).capture_current_page(listing_id)['pages'][-1]
+    if observed_originals(current['media'], listing_id) != inventory:
+        raise CollectionStopped('The photos changed during collection. Review Hub before trying again.')
+    return originals_id, media_id, verified, attributed
 
 
 def collect_batch(hub, drafts, jobs, media_root, *, cancelled=lambda: False, progress=lambda message: None,

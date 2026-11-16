@@ -589,11 +589,16 @@ class _RoomCapture:
             self.identity()
             self.baseline = self.settled_main()
             self.result['main_fields_fingerprint'] = self.baseline
+            # Enter with a settled baseline. Closing a dialog already settles and
+            # compares the full form. A skipped room has no such closing check.
+            needs_settle = False
             for descriptor in self.descriptors:
                 self.descriptor = descriptor
                 self.escape_attempted = False
-                self.settled_main()
+                if needs_settle:
+                    self.settled_main()
                 count = self.open()
+                needs_settle = count is None
                 if count is None:
                     continue
                 dialog = self.read_dialog(count)

@@ -116,3 +116,40 @@ def test_operator_review_resumes_only_exact_saved_original_bytes(tmp_path, monke
         assert result[0]['capture']['source_capture_id'] == 'preserved-source'
         assert 'download_review_receipt' in result[0]['capture']
     assert drafts.get_capture(original_id)['capture'] == capture
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_media_backup_matches_pack_and_rechecks_order_before_leaving_media(monkeypatch, tmp_path, changed):
+    from test_original_media import inventory, picture
+    from quick_relist import capture, original_media
+    import zipfile
+    records = inventory()
+    page = {'matched_source':{'rxcu':'RXCU12345','listing_id':'123'}, 'media':records,
+            'photo_captions':[{'id':item['observed_asset_id'], 'caption':'caption '+str(index), 'close_verified':True}
+                              for index, item in enumerate(records)]}
+    contents = [picture(0xff0000ff), picture(0xffff0000)]
+    lookup = {r['original_source_ref']['url']: b for r,b in zip(records, contents)}
+    monkeypatch.setattr(collection, 'download_originals',
+        lambda *args, **kw: original_media.download_originals(*args, fetch=lookup.__getitem__, **kw))
+    def pack(reference, ident, root):
+        assert (reference, ident) == ('RXCU12345','123')
+        archive = tmp_path / 'pack.zip'
+        with zipfile.ZipFile(archive,'w') as z:
+            for index, item in enumerate(contents):
+                z.writestr(f'{index}.png', item)
+        return {'candidate_path':str(archive), 'attribution_verified':False}
+    hub = SimpleNamespace(driver=object(), download_photo_pack=pack)
+    monkeypatch.setattr(capture, 'PartialHubCapture', lambda driver: SimpleNamespace(
+        capture_current_page=lambda ident: {'pages':[{'media':records[:1] if changed else records}]}))
+    store = DraftStore(':memory:')
+    def backup():
+        return collection._backup_media(hub, store, 'job', page, tmp_path/'media', guard=lambda:True,
+                                        progress=lambda message:None, cancelled=lambda:False)
+    if changed:
+        with pytest.raises(collection.CollectionStopped, match='photos changed'):
+            backup()
+    else:
+        _, media_id, verified, attributed = backup()
+        assert [m['caption'] for m in verified['media_manifest']] == ['caption 0','caption 1']
+        assert store.get_capture(media_id)['capture']['source_bytes_verified'] is True
+        assert attributed is False

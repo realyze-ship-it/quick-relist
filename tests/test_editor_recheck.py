@@ -155,6 +155,19 @@ class EditorRecheckTests(unittest.TestCase):
         self.assertEqual(self.driver.link.clicks, 1)
         self.assertEqual(self.driver.archive.clicks, 0)
 
+    def test_loading_editor_stays_in_front_until_final_row_verification(self):
+        polls = []
+        def slow_headings():
+            polls.append(self.driver.current_window_handle)
+            if len(polls) == 5:
+                self.driver.identity = deepcopy(MATCH)
+        self.driver.after_identity = slow_headings
+        result = self.hub.open_listing_editor(REF, timeout=2, poll_interval=.01)
+        self.assertTrue(result["row_link_verified"])
+        self.assertGreaterEqual(len(polls), 7)
+        self.assertEqual(self.driver.switches, ["target", "source", "target"])
+        self.assertEqual(self.driver.link.clicks, 1)
+
     def test_timeout_then_successful_recheck_clicks_original_link_only_once(self):
         self.timeout()
         self.assertFalse(self.driver.menu_open)

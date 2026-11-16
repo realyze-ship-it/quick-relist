@@ -83,4 +83,4 @@ def test_archive_status_check_requests_archived_search(monkeypatch, tmp_path):
     monkeypatch.setattr(module, '_wait_search', stop_after_search)
     with pytest.raises(SearchObserved):
         ui._check_source_archive({'source_reference':'RXCU1000','source_listing_id':'123'},archived=True)
-    assert observed == [('RXCU1000',{'all_listing_types':True,'archived':True})] * 2
+    assert observed == [('RXCU1000',{'all_listing_types':True,'archived':True,'refresh_results':True})]

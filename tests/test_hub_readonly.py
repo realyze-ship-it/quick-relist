@@ -63,7 +63,8 @@ def test_multiple_editor_tabs_are_not_guessed():
 
 @pytest.mark.parametrize("prompt", ["Search fusion ref, listing ID or address", "Enter fusion ref, listing ID or address"])
 @pytest.mark.parametrize('menu_open', [False, True])
-def test_search_only_fills_and_submits_unique_observed_controls(prompt, menu_open):
+@pytest.mark.parametrize('refresh', [False, True])
+def test_search_only_fills_and_submits_unique_observed_controls(prompt, menu_open, refresh):
     pytest.importorskip("selenium")
     from selenium.webdriver.common.keys import Keys
     class Menu:
@@ -92,13 +93,20 @@ def test_search_only_fills_and_submits_unique_observed_controls(prompt, menu_ope
             super().__init__("https://hub.remax.co.za/app/listings")
             self.field = Control(placeholder=prompt)
             self.button = Control(text="Get listings")
+        def refresh(self):
+            assert self.field.events == [] and self.button.events == []
+            self.calls.append("refresh")
         def find_elements(self, by, query):
             if query == '[role="listbox"]': return [menu] if menu.opened else []
+            if query.startswith('input['):
+                assert f'[placeholder="{prompt}"]' in query
+                return [self.field]
             if query.startswith("//input"): return [self.field]
             if query == '//button': return [self.button]
             raise AssertionError(query)
     driver = SearchDriver()
-    result = ReadOnlyHub(driver).search_reference("rxcu12345")
+    result = ReadOnlyHub(driver).search_reference("rxcu12345", refresh_results=refresh)
+    assert driver.calls.count("refresh") == int(refresh)
     assert result["searched"] is True
     from selenium.webdriver.common.keys import Keys
     assert driver.field.events == [('type', (Keys.CONTROL, 'a', Keys.NULL, 'RXCU-12345', Keys.TAB))]

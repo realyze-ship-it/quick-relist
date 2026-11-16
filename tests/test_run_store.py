@@ -207,3 +207,31 @@ def test_description_recovery_is_bound_to_existing_target_and_preserves_history(
     store.perform_once(run,'copy_media_text',lambda:calls.append('save') or {'saved':True})
     assert calls==([] if outcome=='matching' else ['save'])
     assert any(e['kind']=='media_text_reconciled' for e in store.get('job')['events'])
+
+
+@pytest.mark.parametrize('phase', ['interrupted_read', 'before_read', 'verified', 'publication_started'])
+def test_submitted_descriptions_can_be_corrected_only_before_publication(phase):
+    store = RunStore(':memory:')
+    run = start(store)
+    for name in ('archive','remove_portals'):
+        store.perform_once(run, name, lambda: {'confirmed':True})
+    target = {'reference':'RXCU2000','listing_id':'654321'}
+    store.perform_once(run, 'create', lambda: target)
+    store.perform_once(run, 'copy_media_text', lambda: {'descriptions_submitted':True,'unpublished_observed':True})
+    if phase == 'interrupted_read':
+        with pytest.raises(TimeoutError):
+            store.perform_once(run, 'verify_content', lambda: (_ for _ in ()).throw(TimeoutError()))
+    elif phase in ('verified','publication_started'):
+        store.perform_once(run, 'verify_content', lambda: {'verified':True})
+    if phase == 'publication_started':
+        store.perform_once(run, 'publish_web', lambda: {'submitted':True})
+    observation = dict(target, outcome='empty', reconciled_by='fresh_unpublished_media_read')
+    if phase in ('verified','publication_started'):
+        with pytest.raises(RunNeedsReview):
+            store.reconcile_media_text(run, observation)
+        return
+    store.reconcile_media_text(run, observation)
+    assert store.perform_once(run, 'copy_media_text', lambda: {'submitted_again':True}) == {'submitted_again':True}
+    assert store.perform_once(run, 'verify_content', lambda: {'fresh':True}) == {'fresh':True}
+    events = store.get('job')['events']
+    assert any(e['kind'] == 'verification_before_media_correction' for e in events) == (phase == 'interrupted_read')

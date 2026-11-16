@@ -48,6 +48,18 @@ TAB_PAGES = {'Listing particulars': 'details', 'Deal Particulars': 'deal_particu
              'Media': 'media', 'Portals': 'portals'}
 
 
+# Read attributes together so checking every tile does not need a separate
+# browser trip per attribute. Selenium still decides which buttons are visible.
+TAB_ATTRIBUTES = """
+return arguments[0].map(e => ({
+  label: e.textContent, tag: e.tagName.toLowerCase(), type: e.getAttribute('type'),
+  role: e.getAttribute('role'), active: e.getAttribute('aria-selected'),
+  index: e.getAttribute('tabindex'), enabled: !e.matches(':disabled') &&
+    e.getAttribute('aria-disabled') !== 'true'
+}));
+"""
+
+
 class _Cancelled(Exception):
     pass
 
@@ -209,24 +221,22 @@ class MatchedHubCapture(PartialHubCapture):
         tabs = {}
         selected = []
         ready = True
-        for element in self.driver.find_elements('css selector', TAB_SELECTOR):
-            if not element.is_displayed():
-                continue
-            label = ' '.join((element.get_attribute('textContent') or '').split())
-            key = TAB_PAGES.get(label)
-            if element.get_attribute('aria-selected') == 'true':
+        elements = [e for e in self.driver.find_elements('css selector', TAB_SELECTOR) if e.is_displayed()]
+        attributes = self.driver.execute_script(TAB_ATTRIBUTES, elements) if elements else []
+        for element, attrs in zip(elements, attributes, strict=True):
+            key = TAB_PAGES.get(' '.join(attrs['label'].split()))
+            active = attrs['active']
+            if active == 'true':
                 selected.append(key)
             if key is None:
                 continue  # Stats, Notes, History, etc. are never candidates.
             if key in tabs:
                 raise CaptureSafetyError("The editor tab controls are ambiguous. No tab was clicked.")
-            if (element.tag_name.lower() != 'button' or element.get_attribute('type') != 'button'
-                    or element.get_attribute('role') != 'tab'):
+            if (attrs['tag'], attrs['type'], attrs['role']) != ('button', 'button', 'tab'):
                 raise CaptureSafetyError("The editor tab control changed. No tab was clicked.")
-            active = element.get_attribute('aria-selected')
-            if active not in ('true', 'false') or element.get_attribute('tabindex') != ('0' if active == 'true' else '-1'):
+            if active not in ('true', 'false') or attrs['index'] != ('0' if active == 'true' else '-1'):
                 raise CaptureSafetyError("The editor tab selection could not be verified.")
-            ready = ready and element.is_enabled() and element.get_attribute('aria-disabled') != 'true'
+            ready = ready and attrs['enabled'] is True
             tabs[key] = element
         if tabs:
             ready = ready and selected == [parse_editor_url(url)['page_key']]
@@ -446,7 +456,7 @@ class MatchedHubCapture(PartialHubCapture):
             sample.pop('integrity')
             sample['integrity'] = {'algorithm': 'sha256', 'sha256': _digest(sample)}
 
-    def capture(self):
+    def capture(self, *, on_page=None, start_on_details=False):
         """Return partial JSON on success, safety stop, read failure or cancel.
 
         Invalid RXCU/options raise at construction. A capture instance is single
@@ -471,6 +481,11 @@ class MatchedHubCapture(PartialHubCapture):
             # A stale/reused tab must already match; missing headings here do
             # not justify treating an old binding as fresh navigation evidence.
             self._identity(url)
+            if start_on_details and route['page_key'] != 'details':
+                tabs, _ = self._tabs(url)
+                if 'details' in tabs:
+                    self._target_page_key = 'details'
+                    url = self._navigate_tab(url, 'details')
             visited = set()
             while True:
                 self._failure_phase = 'page_read'
@@ -501,6 +516,14 @@ class MatchedHubCapture(PartialHubCapture):
                     finally:
                         sample.pop('integrity')
                         sample['integrity'] = {'algorithm': 'sha256', 'sha256': _digest(sample)}
+                if on_page is not None:
+                    self._identity(url)
+                    try:
+                        on_page(sample, url)
+                    except Exception:
+                        self._failure_phase = 'page_work'
+                        raise
+                    self._identity(url)
                 self._failure_phase = 'tab_probe'
                 tabs, ready = self._tabs(url)
                 tab_candidates = [key for key in TAB_PAGES.values() if key in tabs and key not in visited]
@@ -531,6 +554,9 @@ class MatchedHubCapture(PartialHubCapture):
             self._reason = 'Capture cancelled. Only earlier fully guarded observations were retained.'
         except Exception as exc:
             self._stopped = True
+            if self._failure_phase == 'page_work':
+                self._reason = 'Collection stopped while processing the current guarded page.'
+                raise  # Preserve typed download/review errors for the batch controller.
             if any(type(exc) is known for known in (CaptureError, CaptureReadError, CaptureSafetyError)) and self._failure_phase != 'timeout_restore':
                 self._reason = str(exc)  # Existing internal, fixed guard/read reasons.
             else:

@@ -610,3 +610,34 @@ def test_archive_uses_type_specific_reason_and_accepts_success_redirect(tmp_path
     result=provider.archive({'source_listing_id':'123456','particulars':{'mode':mode}})
     assert result['archived'] is True and result['reason']==reason
     assert events==(['selected','Archive Listing'] if mode=='rent' else ['selected','mandate expired','Archive Listing'])
+
+
+@pytest.mark.parametrize('wrong_id', [False, True])
+def test_final_read_opens_exact_replacement_once_without_another_refresh(tmp_path, monkeypatch, wrong_id):
+    calls = []
+    reference = 'RXCU12345'
+    identity = {'outer_count':1, 'inner_count':1, 'outer_matches':True, 'inner_matches':True}
+    binding = {'listing_id':'654321' if wrong_id else '123456', 'handle':'new'}
+    driver = SimpleNamespace(find_elements=lambda *args: [object()],
+                             refresh=lambda: pytest.fail('Fresh result was already opened'))
+    hub = SimpleNamespace(driver=driver, editor_bindings={reference:{'listing_id':'123456', 'handle':'old'}},
+                          search_reference=lambda *a, **kw: calls.append('search'),
+                          _read_editor_identity=lambda *a:identity, _verified_editor_identity=lambda value:value)
+    def opened(ref, *, timeout):
+        assert ref == reference
+        calls.append('open')
+        hub.editor_bindings[ref] = binding
+    hub.open_listing_editor = opened
+    monkeypatch.setattr(module, '_wait_search', lambda *a: None)
+    monkeypatch.setattr(module, 'MatchedHubCapture', lambda *a, **kw:
+        SimpleNamespace(capture=lambda: calls.append('capture') or {'stop_reason':None}))
+    ui = module.HubRelistUI(hub, tmp_path, clipboard=None)
+    def read():
+        return ui.captured_editor(reference, open_from_results=True, expected_listing_id='123456')
+    if wrong_id:
+        with pytest.raises(CopyStopped, match='different Hub listing'):
+            read()
+        assert calls == ['search','open']
+    else:
+        assert read() == {'stop_reason':None}
+        assert calls == ['search','open','capture']

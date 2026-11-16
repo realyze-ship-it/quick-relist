@@ -404,9 +404,22 @@ class RunStore:
             if any(receipt.get(key) != target.get(key) for key in ('reference','listing_id')):
                 raise RunNeedsReview('The description check belongs to a different replacement.')
             existing = actions.get('copy_media_text')
-            if existing is None or existing['state'] not in ('uncertain','started','retry_ready'):
-                raise RunNeedsReview('Only a stopped description save can be reconciled.')
-            if any(a['state'] != 'done' for n,a in actions.items() if n != 'copy_media_text'):
+            submitted = (existing is not None and existing['state'] == 'done'
+                         and json.loads(existing['receipt_json']).get('descriptions_submitted') is True)
+            if existing is None or (not submitted and existing['state'] not in ('uncertain','started','retry_ready')):
+                raise RunNeedsReview('Only a stopped or unverified description save can be reconciled.')
+            if any(n.startswith('publish') for n in actions):
+                raise RunNeedsReview('Publication already started for this replacement.')
+            verification = actions.get('verify_content')
+            if verification is not None:
+                if not submitted or verification['state'] not in ('started', 'uncertain'):
+                    raise RunNeedsReview('Review the existing replacement verification before changing its descriptions.')
+                # Preserve the interrupted read in history. Once the media is
+                # corrected the full read must run again before publication.
+                self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
+                                  (run_id,_now(),'verification_before_media_correction',_json(dict(verification))))
+                self.conn.execute("DELETE FROM relist_actions WHERE run_id=? AND action='verify_content'", (run_id,))
+            if any(a['state'] != 'done' for n,a in actions.items() if n not in ('copy_media_text','verify_content')):
                 raise RunNeedsReview('Resolve earlier upload outcomes first.')
             self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
                               (run_id,_now(),'media_text_reconciled',_json({'prior_action':dict(existing),'observed':receipt})))

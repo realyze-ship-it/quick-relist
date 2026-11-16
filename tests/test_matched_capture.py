@@ -22,6 +22,13 @@ def observation(url, links=()):
             'discovery': [], 'limitations': []}
 
 
+def tab_attributes(elements):
+    return [dict(label=e.get_attribute('textContent'), tag=e.tag_name, type=e.get_attribute('type'),
+                 role=e.get_attribute('role'), active=e.get_attribute('aria-selected'),
+                 index=e.get_attribute('tabindex'),
+                 enabled=e.is_enabled() and e.get_attribute('aria-disabled') != 'true') for e in elements]
+
+
 class Driver:
     def __init__(self):
         self.current_url = BASE
@@ -41,6 +48,8 @@ class Driver:
 
     def execute_script(self, script, *args):
         from quick_relist.tab_positioning import TAB_POSITION_SCRIPT
+        if script == module.TAB_ATTRIBUTES:
+            return tab_attributes(args[0])
         if script == TAB_POSITION_SCRIPT:
             self.calls.append(('tab_position', args[-1]))
             self.hook('tab_position')
@@ -555,3 +564,62 @@ def test_room_capture_not_enabled_implicitly(setup, monkeypatch):
     assert result['status'] == 'partial'
     assert result['room_option_capture'] == []
     assert result['pending_room_observations'] == []
+
+
+@pytest.mark.parametrize('rental', [False, True])
+@pytest.mark.parametrize('start', ['details', 'media', 'portals'])
+def test_collect_and_archive_finishes_on_portals_after_one_read_of_each_page(setup, monkeypatch, tmp_path, rental, start):
+    from quick_relist import collection, portal_ui
+    from quick_relist.drafts import DraftStore
+    hub, driver, _ = setup
+    tabs = use_native_tabs(driver)
+    if rental:
+        tabs[:] = [tab for tab in tabs if tab.key != 'deal_particulars']
+    driver.current_url = URLS[list(EDITOR_PAGES).index(start)]
+    hub.verify_editor_reference = lambda *args: True
+    driver.pages[BASE]['fields'] = [{'name':'listing_type_id', 'tag':'select', 'type':'select-one',
+                                     'value':'2' if rental else '1',
+                                     'selected_options':[{'value':'2' if rental else '1','text':'Type'}]}]
+    # Exercise the real traversal, source backup dispatch and batch handoff.
+    # The individual room/caption dialogs and transfer have dedicated fixtures.
+    monkeypatch.setattr(collection, 'MatchedHubCapture',
+        lambda hub, ref, **kwargs: MatchedHubCapture(hub, ref, timeout=2, poll_interval=.1, stable_for=.2))
+    visited = []
+    def backup(hub, drafts, job_id, page, media_root, *, guard, **kwargs):
+        assert page['page_key'] == 'media' and driver.current_url == URLS[2]
+        guard()
+        visited.append('backup')
+        return ('original-id', 'media-id', {'media_manifest':[{}]}, True)
+    def portals(driver, *, guard, timeout):
+        assert driver.current_url == URLS[3]
+        guard()
+        visited.append('portals')
+        return {'published':True}
+    def archive(job, data, *, freshly_collected):
+        assert driver.current_url == URLS[3] and freshly_collected and data['media_count'] == 1
+        visited.append('archive')
+    monkeypatch.setattr(collection, '_backup_media', backup)
+    monkeypatch.setattr(portal_ui, 'read_portals', portals)
+    store = DraftStore(':memory:')
+    result, = collection.collect_batch(hub, store, [{'id':'job','rxcu':REF,'state':'queued'}],
+                                      tmp_path, after_collection=archive)
+    pages = ['details', 'media', 'portals'] if rental else list(EDITOR_PAGES)
+    assert [p['page_key'] for p in result['capture']['source']['pages']] == pages
+    assert [value for kind,value in driver.calls if kind == 'tab_click'] == (
+        ([] if start == 'details' else ['details']) + pages[1:])
+    assert visited == ['backup','portals','archive']
+
+
+def test_page_work_failure_preserves_partial_capture_and_original_exception(setup):
+    hub, driver, _ = setup
+    use_native_tabs(driver)
+    reader = MatchedHubCapture(hub, REF, timeout=2, poll_interval=.1, stable_for=.2)
+    def observe(page, url):
+        if page['page_key'] == 'media':
+            raise OSError('synthetic download failure')
+    with pytest.raises(OSError, match='synthetic download failure'):
+        reader.capture(on_page=observe)
+    saved = reader.get_result()
+    assert saved['status'] == 'stopped' and verify_capture_integrity(saved)
+    assert [p['page_key'] for p in saved['pages']] == ['details','deal_particulars','media']
+    assert 'synthetic download failure' not in str(saved)
