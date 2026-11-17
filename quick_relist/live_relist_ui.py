@@ -11,7 +11,7 @@ import re
 import time
 
 from .address import propose_address_fields
-from .capture import PartialHubCapture, parse_editor_url
+from .capture import PartialHubCapture, parse_editor_url, read_gallery_media
 from .collection import _wait_search
 from .core import normalize_rxcu
 from .form_copy import CopyStopped, ParticularsFiller, particulars_plan
@@ -294,18 +294,24 @@ class HubRelistUI:
 
     def tab(self, name):
         self.guard()
-        controls = [e for e in self.driver.find_elements('css selector','main button[role="tab"]')
-                    if e.get_attribute('textContent').strip() == name]
+        key = {'Listing particulars':'details','Deal Particulars':'deal_particulars','Media':'media','Portals':'portals'}[name]
+        selector = f'//main//button[@role="tab" and normalize-space(.)="{name}"]'
+        def selected():
+            controls = self.driver.find_elements('xpath', selector)
+            if len(controls) > 1:
+                raise CopyStopped('The expected ' + name + ' page is ambiguous.')
+            return (len(controls) == 1 and controls[0].get_attribute('aria-selected') == 'true' and
+                    parse_editor_url(self.driver.current_url)['page_key'] == key)
+        controls = self.driver.find_elements('xpath', selector)
         if len(controls) != 1:
             raise CopyStopped('The expected ' + name + ' page is unavailable.')
         if controls[0].get_attribute('aria-selected') != 'true':
             from selenium.webdriver.common.keys import Keys
             controls[0].send_keys(Keys.ENTER)
-        key = {'Listing particulars':'details','Deal Particulars':'deal_particulars','Media':'media','Portals':'portals'}[name]
-        self.wait(lambda: parse_editor_url(self.driver.current_url)['page_key'] == key and
-                  any(e.get_attribute('textContent').strip()==name and e.get_attribute('aria-selected')=='true'
-                      for e in self.driver.find_elements('css selector','main button[role="tab"]')),
-                  'Hub did not finish opening the selected page.')
+        elif parse_editor_url(self.driver.current_url)['page_key'] == key:
+            self.guard()
+            return
+        self.wait(selected, 'Hub did not finish opening the selected page.')
         self.guard()
 
     def captured_editor(self, reference, *, include_media_captions=True, include_suburb_selection=False,
@@ -597,6 +603,8 @@ class HubRelistUI:
             limit = field.get_attribute('maxlength')
             if limit and int(limit) >= 0 and len(value) > int(limit):
                 raise CopyStopped('Hub shortened a description field limit. Review its wording before continuing.')
+            if field.get_property('value') == value:
+                continue
             field.send_keys(Keys.CONTROL,'a',Keys.NULL,Keys.BACKSPACE,value,Keys.TAB)
             if self.one(selector).get_property('value') != value:
                 raise CopyStopped('Hub did not retain a copied description or media link.')
@@ -641,20 +649,20 @@ class HubRelistUI:
         self.current = {'reference':reference, **self.hub.editor_bindings[reference]}
         self.guard()
         target = deepcopy(self.current)
+        wanted_estate = self.planned_estate_name(plan)
+        estate_matches = bool(wanted_estate and self.saved_estate_name() == wanted_estate)
         self.tab('Portals')
         state = read_portals(self.driver, guard=self.guard)
         if state['published'] or any(state['portals'][d]['state'] != 'unpublished' for d in plan['destinations']):
             raise CopyStopped('The unfinished replacement is already published or pending. Review it before copying.')
         estate = actions.get('save_estate_name', {})
         if estate.get('state') in ('started', 'uncertain'):
-            wanted = self.planned_estate_name(plan)
-            if not wanted or self.saved_estate_name() != wanted:
+            if not estate_matches:
                 raise CopyStopped('The estate name on the existing copy still differs. Review Listing Particulars before continuing.')
             runs.reconcile_estate_name(previous['id'], target)
         commission = actions.get('copy_commission', {})
         if commission.get('state') in ('started', 'uncertain'):
             self.tab('Deal Particulars')
-            self.driver.refresh()
             self.wait(lambda:self.driver.find_elements('css selector', 'input[name="total_commission_value"]'),
                       'The existing sale commission did not load.')
             self.guard()
@@ -667,7 +675,6 @@ class HubRelistUI:
             runs.reconcile_commission(previous['id'], {'reference':reference, 'listing_id':ident,
                 'commission_copied':True, 'reconciled_by':'fresh_unpublished_commission_read'})
         self.tab('Media')
-        self.driver.refresh()
         self.wait(lambda:self.driver.find_elements('css selector','textarea[name="marketing_header"]'),
                   'The existing replacement media did not finish loading.')
         self.guard()
@@ -675,12 +682,6 @@ class HubRelistUI:
         count = len(self.driver.find_elements('css selector', 'main img[id^="image-"]'))
         if count > len(plan['photos']):
             raise CopyStopped('The existing copy has extra photos.')
-        comparison = None
-        if count:
-            downloaded = download_originals(page['media'], ident, self.media_root, cancelled=self.cancelled)
-            comparison = compare_uploaded_images(plan['photos'][:count], downloaded['media_manifest'])
-            if not comparison['order_matches']:
-                raise CopyStopped('The received photos differ from the saved originals or their order.')
         positions = set()
         unresolved = []
         for name, action in actions.items():
@@ -697,11 +698,29 @@ class HubRelistUI:
                 unresolved.append(name)
         if positions != set(range(count)):
             raise CopyStopped('The existing photos include an unrecorded upload. Review them before continuing.')
+        media_action = actions.get('copy_media_text')
+        gallery_finished = count == len(plan['photos']) and not unresolved
+        captions_finished = all(actions.get(f'caption_{i}', {}).get('state') == 'done'
+                                for i, photo in enumerate(plan['photos']) if photo['caption'])
+        if (gallery_finished and captions_finished and media_action and media_action['state'] == 'done'
+                and (not wanted_estate or estate_matches)
+                and (plan['deal'] is None or actions.get('copy_commission', {}).get('state') == 'done')
+                and same_saved_media(plan['media'], media_plan(page))):
+            # All copy writes already have receipts. Go straight to the independent
+            # saved listing check. It verifies all bytes, captions and particulars
+            # before publishing, including when a prior verification was interrupted.
+            target['content_already_submitted'] = True
+            return target
+        comparison = None
+        if count:
+            downloaded = download_originals(page['media'], ident, self.media_root, cancelled=self.cancelled)
+            comparison = compare_uploaded_images(plan['photos'][:count], downloaded['media_manifest'])
+            if not comparison['order_matches']:
+                raise CopyStopped('The received photos differ from the saved originals or their order.')
         for name in unresolved:
             runs.reconcile_uploaded_photo(previous['id'], name, {
                 'reconciled_by':'fresh_replacement_photo_comparison', 'reference': reference,
                 'listing_id': ident, 'received_count': count, 'photo_comparison': comparison})
-        media_action = actions.get('copy_media_text')
         submitted = (media_action or {}).get('receipt') or {}
         if media_action and (media_action['state'] != 'done' or submitted.get('descriptions_submitted') is True):
             saved_media = media_plan(page)
@@ -714,6 +733,7 @@ class HubRelistUI:
             if media_action['state'] != 'done' or outcome != 'matching':
                 runs.reconcile_media_text(previous['id'], {'reference':reference,'listing_id':ident,
                     'reconciled_by':'fresh_unpublished_media_read','outcome':outcome})
+        target['estate_checked'] = estate_matches
         target['verified_photo_prefix_count'] = count
         target['verified_photo_inventory'] = observed_originals(page['media'], ident) if count else []
         return target
@@ -727,15 +747,10 @@ class HubRelistUI:
         # original backup and completed removal action remain the source of
         # content/removal evidence; freshly verify the exact archived row/link.
         self._check_source_archive(plan, archived=True, restore=False)
-        self.current = None
-        self.hub.search_reference(reference, all_listing_types=True)
-        _wait_search(self.hub, reference, self.cancelled)
-        self.hub.open_listing_editor(reference, timeout=30)
-        if self.hub.editor_bindings[reference]['listing_id'] != listing_id:
-            raise CopyStopped('The replacement reference and Hub edit URL do not identify the same listing.')
-        # Caption inventory intentionally requires photos for source capture.
-        # This recovery accepts only an empty copy and rejects any media below.
-        actual = self.captured_editor(reference, include_media_captions=False)
+        # Open one fresh editor from the exact result. Captions require a
+        # populated gallery, while this recovery specifically verifies an empty copy.
+        actual = self.captured_editor(reference, include_media_captions=False, include_suburb_selection=True,
+                                      expected_listing_id=listing_id, open_from_results=True)
         self._verify_particulars(actual, plan)
         pages = {p['page_key']: p for p in actual['pages']}
         media = media_plan(pages['media'])
@@ -756,7 +771,7 @@ class HubRelistUI:
     @diagnosed
     def copy_content(self, target, plan, runs, run_id):
         wanted = self.planned_estate_name(plan)
-        if wanted:
+        if wanted and not target.get('estate_checked'):
             self.bind(target)
             saved = self.saved_estate_name()
             if saved != wanted:
@@ -959,8 +974,8 @@ class HubRelistUI:
                 outcome=self.wait(received,'Hub has not confirmed this photo. No duplicate or later photo was sent.',timeout=90)
                 if outcome=='failed':
                     return {'upload_failed':True,'missing_position':index,'explicit_hub_error':True}
-                page = PartialHubCapture(self.driver).capture_current_page(target['listing_id'])['pages'][-1]
-                card, downloaded = download_appended_photo(page['media'], target['listing_id'], inventory,
+                media = read_gallery_media(self.driver, target['listing_id'], guard=self.guard)
+                card, downloaded = download_appended_photo(media, target['listing_id'], inventory,
                                                           self.media_root, cancelled=self.cancelled)
                 if card['position'] != index:
                     raise CopyStopped('The uploaded photo appeared in an unexpected position.')
@@ -1033,13 +1048,15 @@ class HubRelistUI:
         if plan['deal'] is not None:
             if not same_commission(plan['deal'], pages['deal_particulars'], plan.get('commission_review')):
                 raise CopyStopped('Saved commission details differ. The replacement remains unpublished.')
-        self.target_for_publication = deepcopy(self.current)
+        # The final independent read opened the verified editor. Pass its
+        # handle forward only for this replacement, including in mixed batches.
+        target['handle'] = self.current['handle']
         return {'particulars':True,'descriptions':True,'photos':len(plan['photos']),'photo_order':True,'captions':True,
                 **({'saved_suburb_selection':suburb_label} if suburb_label else {})}
 
     @diagnosed
     def publish(self, target, destination):
-        self.bind(getattr(self,'target_for_publication',target))
+        self.bind(target)
         self.tab('Portals')
         state = read_portals(self.driver,guard=self.guard)
         portal = state['portals'][destination]
@@ -1055,7 +1072,7 @@ class HubRelistUI:
         return self.wait(sent,'Hub has not confirmed the publication request. It was not submitted twice.',timeout=90)
 
     def publication(self, target, destinations):
-        self.bind(getattr(self,'target_for_publication',target))
+        self.bind(target)
         self.tab('Portals')
         deadline=time.monotonic()+120
         refresh_at=time.monotonic()+10

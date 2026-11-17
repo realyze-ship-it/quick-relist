@@ -6,8 +6,10 @@ This module performs no uploads, deletions, browser actions or publication.
 """
 import hashlib
 from pathlib import Path
+from collections import OrderedDict, defaultdict
+from threading import Lock
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PySide6.QtGui import QImage, QImageReader
 
 
@@ -15,14 +17,33 @@ class PhotoReviewNeeded(ValueError):
     pass
 
 
+# Key by freshly hashed content, never a path or modification time. Reuse
+# only derived comparisons, bounded to about 6 MiB of thumbnail data.
+_fingerprints = OrderedDict()
+_fingerprint_lock = Lock()
+
+
 def _fingerprint(item):
     path = Path(item['local_path'])
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
         raise PhotoReviewNeeded('A photo file is unavailable or exceeds the supported size.')
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    data = path.read_bytes()
+    if not 0 < len(data) <= 32 * 1024 * 1024:
+        raise PhotoReviewNeeded('A photo file is empty or exceeds the supported size.')
+    digest = hashlib.sha256(data).hexdigest()
     if item.get('sha256') and digest != item['sha256']:
         raise PhotoReviewNeeded('A saved photo changed after collection.')
-    reader = QImageReader(str(path))
+    with _fingerprint_lock:
+        cached = _fingerprints.get(digest)
+        if cached is not None:
+            _fingerprints.move_to_end(digest)
+            return cached
+    # Decode the same bytes that were hashed, including when a file is
+    # changed on disk during comparison.
+    buffer = QBuffer()
+    buffer.setData(QByteArray(data))
+    buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+    reader = QImageReader(buffer)
     size = reader.size()
     if size.width() <= 0 or size.height() <= 0 or size.width() * size.height() > 50_000_000:
         raise PhotoReviewNeeded('A photo has unsupported dimensions.')
@@ -31,8 +52,22 @@ def _fingerprint(item):
         raise PhotoReviewNeeded('A photo could not be decoded for comparison.')
     thumbnail = image.scaled(64, 64, Qt.AspectRatioMode.IgnoreAspectRatio,
                              Qt.TransformationMode.SmoothTransformation).convertToFormat(QImage.Format.Format_RGB888)
-    return {'sha256': digest, 'size': (image.width(), image.height()),
-            'pixels': bytes(thumbnail.constBits())}
+    pixels = bytes(thumbnail.constBits())
+    stride = thumbnail.bytesPerLine()
+    row_sums = tuple(sum(pixels[i:i+stride]) for i in range(0, len(pixels), stride))
+    result = {'sha256': digest, 'size': (image.width(), image.height()), 'pixels': pixels, 'row_sums': row_sums}
+    with _fingerprint_lock:
+        _fingerprints[digest] = result
+        if len(_fingerprints) > 512:
+            _fingerprints.popitem(last=False)
+    return result
+
+
+def validate_saved_photos(photos):
+    if not 1 <= len(photos) <= 500 or [photo['position'] for photo in photos] != list(range(len(photos))):
+        raise PhotoReviewNeeded('The saved gallery has missing, repeated or out-of-order photos.')
+    for photo in photos:
+        _fingerprint(photo)
 
 
 def compare_uploaded_images(source, received, *, maximum_difference=0.5):
@@ -44,21 +79,29 @@ def compare_uploaded_images(source, received, *, maximum_difference=0.5):
             raise PhotoReviewNeeded('Photo positions are missing, repeated or out of order.')
     originals = [_fingerprint(x) for x in source]
     uploads = [_fingerprint(x) for x in received]
+    exact_positions = defaultdict(list)
+    for index, original in enumerate(originals):
+        exact_positions[original['sha256']].append(index)
     candidates = []
     for upload in uploads:
-        possible = []
-        for index, original in enumerate(originals):
-            if upload['size'] != original['size']:
-                continue
-            exact = upload['sha256'] == original['sha256']
-            difference = 0.0 if exact else sum(abs(a - b) for a, b in zip(upload['pixels'], original['pixels'])) / len(upload['pixels'])
-            if difference <= maximum_difference:
-                possible.append((index, exact, difference))
-        # Multiple *different* source images can be too similar for this
-        # comparison. Do not guess which one is missing and upload duplicates.
-        exact_matches = [p for p in possible if p[1]]
-        if exact_matches:
-            possible = exact_matches
+        possible = [(index, True, 0.0) for index in exact_positions.get(upload['sha256'], ())
+                    if maximum_difference >= 0 and upload['size'] == originals[index]['size']]
+        if not possible:
+            # Only re-encoded images need visual matching. Still examine every
+            # same-sized candidate for an ambiguous visual match.
+            for index, original in enumerate(originals):
+                if upload['size'] != original['size']:
+                    continue
+                # A row's change in total intensity cannot exceed its sum of
+                # absolute pixel differences. Rule out impossible candidates
+                # cheaply, then use the original comparison for every survivor.
+                length = len(upload['pixels'])
+                lower = sum(abs(a-b) for a,b in zip(upload['row_sums'], original['row_sums'])) / length
+                if lower > maximum_difference:
+                    continue
+                difference = sum(abs(a - b) for a, b in zip(upload['pixels'], original['pixels'])) / length
+                if difference <= maximum_difference:
+                    possible.append((index, False, difference))
         distinct = {originals[i]['sha256'] for i, _, _ in possible}
         if len(distinct) > 1:
             raise PhotoReviewNeeded('Two source photos are too similar to match reliably. Review this upload before retrying.')

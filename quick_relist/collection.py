@@ -21,7 +21,7 @@ class ListingNotFound(CollectionStopped):
 
 
 def latest_collection(drafts, job_id):
-    for row in drafts.list_captures(job_id):
+    for row in getattr(drafts, 'iter_captures', drafts.list_captures)(job_id):
         if row['capture'].get('schema_version') == 'hub-collected-listing/v1':
             return row
     return None
@@ -128,7 +128,7 @@ def collect_listing(hub, drafts, job, media_root, *, cancelled=lambda: False, pr
 
 
 def _backup_media(hub, drafts, job_id, page, media_root, *, guard, cancelled, progress):
-    from .capture import PartialHubCapture
+    from .capture import read_gallery_media
     reference = page['matched_source']['rxcu']
     listing_id = page['matched_source']['listing_id']
     inventory = observed_originals(page['media'], listing_id)
@@ -153,9 +153,8 @@ def _backup_media(hub, drafts, job_id, page, media_root, *, guard, cancelled, pr
     if attributed:
         from .downloads import finish_verified_download
         finish_verified_download(root, downloaded, verified)
-    guard()
-    current = PartialHubCapture(hub.driver).capture_current_page(listing_id)['pages'][-1]
-    if observed_originals(current['media'], listing_id) != inventory:
+    current = read_gallery_media(hub.driver, listing_id, guard=guard)
+    if observed_originals(current, listing_id) != inventory:
         raise CollectionStopped('The photos changed during collection. Review Hub before trying again.')
     return originals_id, media_id, verified, attributed
 

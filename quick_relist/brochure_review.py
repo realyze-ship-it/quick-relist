@@ -9,7 +9,7 @@ def source_brochure(collection):
 
 
 def latest_review(drafts, job_id, collection):
-    for saved in drafts.list_captures(job_id):
+    for saved in getattr(drafts, 'iter_captures', drafts.list_captures)(job_id):
         value = saved['capture']
         if (value.get('schema_version') == 'hub-brochure-review/v1'
                 and value.get('source_capture_id') == collection['source_capture_id']):

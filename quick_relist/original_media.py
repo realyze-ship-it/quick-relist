@@ -6,7 +6,9 @@ and displayed order; it does not assert that unknown media metadata is empty.
 """
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -106,6 +108,40 @@ def download_appended_photo(media, listing_id, verified_prefix, destination_root
     return last, result['media_manifest'][0]
 
 
+def _ordered_downloads(records, fetch, cancelled):
+    def check_stop():
+        if cancelled():
+            raise OriginalMediaError('Image collection was stopped. Already downloaded files were retained.')
+
+    check_stop()
+    if len(records) < 3:
+        for record in records:
+            check_stop()
+            yield record, fetch(record['url'])
+        return
+    # Overlap only independent CDN reads. The caller decodes, checks limits
+    # and commits the manifest on one thread in the observed gallery order.
+    remaining = iter(records)
+    pending = deque()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        def enqueue(record):
+            check_stop()
+            pending.append((record, pool.submit(fetch, record['url'])))
+        try:
+            for _ in range(3):
+                enqueue(next(remaining))
+            while pending:
+                check_stop()
+                record, future = pending.popleft()
+                yield record, future.result()
+                following = next(remaining, None)
+                if following is not None:
+                    enqueue(following)
+        finally:
+            for _, future in pending:
+                future.cancel()
+
+
 def _download_records(records, listing_id, destination_root, fetch, cancelled):
     root = Path(destination_root)
     _prepare_root(root)
@@ -117,23 +153,21 @@ def _download_records(records, listing_id, destination_root, fetch, cancelled):
     get_bytes = fetch or _fetch_original
     try:
         total = 0
-        for record in records:
-            if cancelled():
-                raise OriginalMediaError('Image collection was stopped. Already downloaded files were retained.')
-            data = get_bytes(record['url'])
-            if not isinstance(data, bytes) or not 0 < len(data) <= 32 * 1024 * 1024:
-                raise OriginalMediaError('An original image is empty or exceeds the size limit.')
-            total += len(data)
-            if total > 512 * 1024 * 1024:
-                raise OriginalMediaError('The original images exceed the collection size limit.')
-            width, height = _dimensions(data)
-            suffix = Path(urlsplit(record['url']).path).suffix.lower()
-            path = directory / f"{record['position'] + 1:04d}{suffix}"
-            with _private_file(path) as stream:
-                stream.write(data)
-            result['media_manifest'].append({**record, 'local_path': str(path), 'size': len(data),
-                                            'sha256': hashlib.sha256(data).hexdigest(),
-                                            'width': width, 'height': height})
+        with closing(_ordered_downloads(records, get_bytes, cancelled)) as downloads:
+            for record, data in downloads:
+                if not isinstance(data, bytes) or not 0 < len(data) <= 32 * 1024 * 1024:
+                    raise OriginalMediaError('An original image is empty or exceeds the size limit.')
+                total += len(data)
+                if total > 512 * 1024 * 1024:
+                    raise OriginalMediaError('The original images exceed the collection size limit.')
+                width, height = _dimensions(data)
+                suffix = Path(urlsplit(record['url']).path).suffix.lower()
+                path = directory / f"{record['position'] + 1:04d}{suffix}"
+                with _private_file(path) as stream:
+                    stream.write(data)
+                result['media_manifest'].append({**record, 'local_path': str(path), 'size': len(data),
+                                                'sha256': hashlib.sha256(data).hexdigest(),
+                                                'width': width, 'height': height})
         result.update(status='downloaded', media_count=len(records))
         return result
     finally:

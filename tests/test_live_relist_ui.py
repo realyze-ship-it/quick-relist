@@ -641,3 +641,35 @@ def test_final_read_opens_exact_replacement_once_without_another_refresh(tmp_pat
     else:
         assert read() == {'stop_reason':None}
         assert calls == ['search','open','capture']
+
+
+@pytest.mark.parametrize('rental', [False, True])
+def test_completed_copy_recovery_goes_straight_to_independent_verification(tmp_path, monkeypatch, rental):
+    from unittest.mock import Mock
+    target = {'reference':'RXCU2000','listing_id':'123','handle':'new'}
+    binding = {'listing_id':'123','handle':'new'}
+    driver = Mock()
+    driver.find_elements.side_effect = lambda by, css: [object()] * (2 if 'main img' in css else 1)
+    hub = SimpleNamespace(driver=driver, editor_bindings={'RXCU2000':binding},
+                          search_reference=Mock(), open_listing_editor=Mock())
+    ui = module.HubRelistUI(hub, tmp_path, clipboard=None)
+    ui.guard, ui.tab = Mock(), Mock()
+    monkeypatch.setattr(module, '_wait_search', lambda *args:None)
+    monkeypatch.setattr(module, 'read_portals', lambda *a, **kw:{'published':False,'portals':{'pp':{'state':'unpublished'}}})
+    monkeypatch.setattr(module, 'PartialHubCapture', lambda d:SimpleNamespace(
+        capture_current_page=lambda:{'pages':[{'media':['gallery']}]}))
+    media = {'description_html':'<p>Fixture</p>', 'description_text':'Fixture'}
+    monkeypatch.setattr(module, 'media_plan', lambda page:media)
+    monkeypatch.setattr(module, 'download_originals', lambda *a, **kw:pytest.fail('Final verification will read the gallery'))
+    plan = {'source_reference':'RXCU1000','source_listing_id':'122', 'destinations':['pp'],
+            'particulars':{'controls':[]},'media':media,'photos':[{'caption':''},{'caption':'Fixture'}],
+            'deal':None if rental else {'fields':[]}}
+    steps = {'create':target,'upload_photo_0_attempt_1':{},'upload_photo_1_attempt_1':{},
+             'copy_media_text':{'descriptions_submitted':True}, 'caption_1':{}}
+    if not rental:
+        steps['copy_commission'] = {'commission_copied':True}
+    previous = {'actions':[{'action':name,'state':'done','receipt':receipt} for name,receipt in steps.items()]}
+    result = ui.recover_copy(plan, previous, None)
+    assert result == dict(target, content_already_submitted=True)
+    assert [call.args[0] for call in ui.tab.call_args_list] == ['Portals','Media']
+    driver.refresh.assert_not_called()

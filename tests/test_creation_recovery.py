@@ -121,7 +121,10 @@ def test_live_existing_copy_check_requires_each_read_before_accepting(tmp_path, 
     ui.check_removed_source = removed
     ui._check_source_archive = archived
     def captured(*args, **kwargs):
-        assert kwargs == {'include_media_captions':False}
+        assert kwargs == {'include_media_captions':False,'include_suburb_selection':True,
+                          'expected_listing_id':'654321','open_from_results':True}
+        if binding['listing_id'] != kwargs['expected_listing_id']:
+            raise CopyStopped('Different replacement')
         calls.append('capture')
         ui.current = {'reference':'RXCU2000',**binding}
         return {'pages':[{'page_key':'media','media':[interface_artwork()] + (['synthetic-photo'] if blocker=='photos' else []),'photo_captions':[]}]}
@@ -142,7 +145,7 @@ def test_live_existing_copy_check_requires_each_read_before_accepting(tmp_path, 
     else:
         proof = ui.check_created_copy({},plan,'RXCU2000','654321')
         assert proof == receipt() | {'handle':'copy'}
-        assert calls == ['archive','search','open','capture','particulars','tab_Portals']
+        assert calls == ['archive','capture','particulars','tab_Portals']
 
 
 @pytest.mark.parametrize('change', ['missing_archive', 'uncertain_removal', 'active_save', 'later_action', 'manual_recovery'])

@@ -56,3 +56,51 @@ def test_reencoded_jpeg_is_distinguished_from_a_missing_image(tmp_path):
 def test_retries_are_bounded(tmp_path):
     source = photos(tmp_path)
     assert next_upload_step(source, [], upload_finished=True, attempts=3)['action'] == 'review'
+
+
+def test_repeated_validation_reuses_decode_but_checks_current_bytes(tmp_path, monkeypatch):
+    import hashlib
+    from pathlib import Path
+    import pytest
+    from quick_relist import upload_review as review
+    source = photos(tmp_path)
+    for photo in source:
+        photo['sha256'] = hashlib.sha256(Path(photo['local_path']).read_bytes()).hexdigest()
+    review._fingerprints.clear()
+    original_reader = review.QImageReader
+    decoded = []
+    def reader(*args):
+        decoded.append(True)
+        return original_reader(*args)
+    monkeypatch.setattr(review, 'QImageReader', reader)
+    review.validate_saved_photos(source)
+    assert review.compare_uploaded_images(source, source)['order_matches']
+    assert len(decoded) == len(source)
+    Path(source[0]['local_path']).write_bytes(Path(source[1]['local_path']).read_bytes())
+    with pytest.raises(review.PhotoReviewNeeded, match='changed'):
+        review.validate_saved_photos(source)
+
+
+def test_visually_ambiguous_nonexact_match_still_requires_review(tmp_path):
+    import pytest
+    from quick_relist import upload_review as review
+    source = photos(tmp_path)
+    # Different PNG representations of the same pixels have different digests.
+    for pos in (1,2):
+        image = QImage(source[0]['local_path'])
+        image.setText('fixture', str(pos))
+        assert image.save(source[pos]['local_path'])
+    with pytest.raises(review.PhotoReviewNeeded, match='too similar'):
+        review.compare_uploaded_images(source[:2], [{**source[2], 'position':0}])
+    assert review.compare_uploaded_images(source, source)['order_matches']
+
+
+def test_equal_row_totals_still_require_the_full_pixel_comparison(tmp_path):
+    # Red/green have the same sum of channel intensities but very different pixels.
+    source = photos(tmp_path)
+    received = QImage(120, 80, QImage.Format.Format_RGB32)
+    received.fill(QColor(0,255,0))
+    path = tmp_path / 'other.png'
+    assert received.save(str(path))
+    report = compare_uploaded_images(source[:1], [{'position':0, 'local_path':str(path)}])
+    assert report['unexpected_positions'] == [0] and not report['order_matches']

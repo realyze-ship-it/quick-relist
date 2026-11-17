@@ -5,7 +5,7 @@ from pathlib import Path
 from .collection import required_pages
 from .form_copy import CopyStopped, particulars_plan, _text
 from .portal_ui import active_destinations
-from .upload_review import compare_uploaded_images
+from .upload_review import validate_saved_photos
 
 RELATED = {
     ('Name','Value','Action'): 'No custom features added',
@@ -109,7 +109,7 @@ def build_relist_plan(collection, review):
     photos = media.get('media_manifest', [])
     if len(photos) < 3 or any(p.get('kind') != 'photo' or not isinstance(p.get('caption'),str) for p in photos):
         raise CopyStopped('At least three verified photos are required. Floor plans need their separate upload handler.')
-    compare_uploaded_images(photos, photos)  # Validates files and recorded hashes now.
+    validate_saved_photos(photos)
     destinations = active_destinations(collection['portal_observation'])
     return {'particulars':particulars, 'media':media_plan(pages['media']),
             'photos':deepcopy(photos), 'destinations':destinations,

@@ -26,7 +26,7 @@ def tab_attributes(elements):
     return [dict(label=e.get_attribute('textContent'), tag=e.tag_name, type=e.get_attribute('type'),
                  role=e.get_attribute('role'), active=e.get_attribute('aria-selected'),
                  index=e.get_attribute('tabindex'),
-                 enabled=e.is_enabled() and e.get_attribute('aria-disabled') != 'true') for e in elements]
+                 enabled=e.is_enabled() and e.get_attribute('aria-disabled') != 'true') if e.is_displayed() else None for e in elements]
 
 
 class Driver:
@@ -48,7 +48,7 @@ class Driver:
 
     def execute_script(self, script, *args):
         from quick_relist.tab_positioning import TAB_POSITION_SCRIPT
-        if script == module.TAB_ATTRIBUTES:
+        if script == module.with_displayed(module.TAB_ATTRIBUTES):
             return tab_attributes(args[0])
         if script == TAB_POSITION_SCRIPT:
             self.calls.append(('tab_position', args[-1]))

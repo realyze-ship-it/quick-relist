@@ -106,3 +106,31 @@ def test_interruption_preserves_already_downloaded_files(tmp_path):
                            cancelled=lambda: len(calls) == 1)
     assert len(list((tmp_path / 'originals').glob('*/0001.png'))) == 1
     assert len(list((tmp_path / 'originals').glob('*/manifest.json'))) == 1
+
+
+def test_concurrent_gallery_reads_keep_order_and_do_not_repeat_a_request(tmp_path):
+    from threading import Barrier, Lock
+    from quick_relist.original_media import download_originals
+    first_group = Barrier(3, timeout=5)
+    lock = Lock()
+    active = peak = 0
+    calls = []
+    cards = inventory(8)
+    images = [picture(0xff000000 + index) for index in range(len(cards))]
+    def fetch(url):
+        nonlocal active, peak
+        index = int(url.split('image-')[1].split('.')[0])
+        with lock:
+            calls.append(index)
+            active += 1
+            peak = max(peak, active)
+        try:
+            if index < 3:
+                first_group.wait()
+            return images[index]
+        finally:
+            with lock:
+                active -= 1
+    saved = download_originals(cards, '123', tmp_path / 'media', fetch=fetch)
+    assert peak == 3 and sorted(calls) == list(range(8))
+    assert [p['sha256'] for p in saved['media_manifest']] == [hashlib.sha256(data).hexdigest() for data in images]

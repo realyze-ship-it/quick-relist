@@ -555,6 +555,33 @@ return (() => {
   const root = mains.length === 1 ? mains[0] : document.body;
   if (root === document.body) limitations.add('main_content_scope_unverified');
   if (!root) return {href, ready_state: document.readyState, unavailable: true};
+  const referenceFor = value => {
+    if (!value) return null;
+    try {
+      const u = new URL(value, location.href);
+      if (!['https:', 'http:'].includes(u.protocol) || u.username || u.password) {
+        limitations.add('media_source_omitted'); return null;
+      }
+      if (u.search || u.hash) limitations.add('url_credentials_and_queries_omitted');
+      return {url: u.origin + u.pathname, query_omitted: !!u.search, fragment_omitted: !!u.hash};
+    } catch (_) { limitations.add('media_source_omitted'); return null; }
+  };
+  const cardMetadata = el => {
+    const position = el.getAttribute('pos');
+    const card = el.tagName === 'IMG' && el.alt === 'preview' && /^image-[0-9]+$/.test(el.id)
+      && /^[0-9]+$/.test(position || '') && Number.isSafeInteger(Number(position));
+    return {
+      observed_asset_id: card ? el.id.slice(6) : null,
+      observed_position: card ? Number(position) : null,
+      original_source_ref: card ? referenceFor(el.getAttribute('data-full-src')) : null};
+  };
+  if (typeof arguments !== 'undefined' && arguments[0] === 'gallery') {
+    if (mains.length !== 1 || document.readyState !== 'complete' ||
+        Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"],dialog[open]')).some(visible)) return null;
+    const cards = Array.from(root.querySelectorAll('img[id^="image-"]')).filter(e => visible(e) && !sensitiveContext(e));
+    if (!cards.length || cards.length > 500) return null;
+    return {href, media: cards.map(cardMetadata)};
+  }
   const dialogs = limited(document.querySelectorAll('[role="dialog"],[aria-modal="true"],dialog[open]'), 100)
     .filter(el => visible(el) && !sensitiveContext(el)).map((el, index) => {
       const title = labelFor(el) || textOf(el.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'));
@@ -724,17 +751,6 @@ return (() => {
           captions: captions.map(node => textWithin(node, ownTable)), status, mapping_verified: false,
           complete: false, rows: observations, limitations: Array.from(notes)}};
     });
-  const referenceFor = value => {
-    if (!value) return null;
-    try {
-      const u = new URL(value, location.href);
-      if (!['https:', 'http:'].includes(u.protocol) || u.username || u.password) {
-        limitations.add('media_source_omitted'); return null;
-      }
-      if (u.search || u.hash) limitations.add('url_credentials_and_queries_omitted');
-      return {url: u.origin + u.pathname, query_omitted: !!u.search, fragment_omitted: !!u.hash};
-    } catch (_) { limitations.add('media_source_omitted'); return null; }
-  };
   const media = limited(root.querySelectorAll('img,video,audio,iframe'), 2000).filter(el => visible(el) && !sensitiveContext(el)).map((el, index) => {
     const figure = el.closest('figure');
     const section = scopeFor(el);
@@ -742,14 +758,9 @@ return (() => {
     const hint = /floor\s*plan/i.test(section + ' ' + caption + ' ' + (el.alt || '')) ? 'floorplan' : el.tagName.toLowerCase();
     // Observed Hub image-card metadata. The combined grid includes photos and
     // floorplans; nearby upload-widget headings cannot classify these cards.
-    const position = el.getAttribute('pos');
-    const card = el.tagName === 'IMG' && el.alt === 'preview' && /^image-[0-9]+$/.test(el.id)
-      && /^[0-9]+$/.test(position || '') && Number.isSafeInteger(Number(position));
     return {dom_order: index, tag: el.tagName.toLowerCase(), kind_hint: hint,
       section, alt: cut(el.alt), title: cut(el.title), caption,
-      observed_asset_id: card ? el.id.slice(6) : null,
-      observed_position: card ? Number(position) : null,
-      original_source_ref: card ? referenceFor(el.getAttribute('data-full-src')) : null,
+      ...cardMetadata(el),
       source_ref: referenceFor(el.currentSrc || el.getAttribute('src')),
       width: Number(el.naturalWidth || el.videoWidth || 0), height: Number(el.naturalHeight || el.videoHeight || 0),
       cover_verified: false, original_bytes_verified: false, order_verified: false};
@@ -773,6 +784,22 @@ return (() => {
 })();
 """.replace("/* __SEGMENTED_DATE_CAPTURE_HELPERS__ */", DATE_CAPTURE_HELPERS).replace(
     "__LIFESTYLE_FIELDS__", json.dumps({**LIFESTYLE_FIELDS, **GENERAL_FIELDS}))
+
+def read_gallery_media(driver, listing_id, *, guard):
+    """Read only image card identities on the previously matched Media page."""
+    guard()
+    url = driver.current_url
+    route = parse_editor_url(url)
+    if route['listing_id'] != listing_id or route['page_key'] != 'media':
+        raise CaptureSafetyError('The photo gallery is not on the intended Media page.')
+    result = driver.execute_script(READ_PAGE_SCRIPT, 'gallery')
+    guard()
+    if (driver.current_url != url or not isinstance(result, dict) or result.get('href') != url
+            or not isinstance(result.get('media'), list)
+            or any(not isinstance(card, dict) or not card.get('observed_asset_id') for card in result['media'])):
+        raise CaptureReadError('The photo gallery changed or could not be verified.')
+    return result['media']
+
 
 _BASE_BLINDSPOTS = (
     ("partial_not_backup", "Visible DOM observations are not a complete listing backup and cannot authorize relisting."),

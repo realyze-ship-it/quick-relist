@@ -75,6 +75,8 @@ class DraftStore:
             saved_at TEXT NOT NULL, original_json TEXT NOT NULL, edited_json TEXT NOT NULL,
             original_sha256 TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS captures_for_job ON captures(job_id);
+        CREATE INDEX IF NOT EXISTS addresses_for_capture ON addresses(capture_id);
         CREATE TRIGGER IF NOT EXISTS captures_no_replace BEFORE INSERT ON captures
         WHEN EXISTS (SELECT 1 FROM captures WHERE id=NEW.id) BEGIN
           SELECT RAISE(ABORT, 'Observations are immutable'); END;
@@ -117,10 +119,18 @@ class DraftStore:
         return {"id": row["id"], "job_id": row["job_id"], "captured_at": row["captured_at"],
                 "capture": json.loads(row["observation_json"]), "sha256": row["observation_sha256"]}
 
-    def list_captures(self, job_id):
+    def iter_captures(self, job_id):
         with self._lock:
             ids = [row[0] for row in self.conn.execute("SELECT id FROM captures WHERE job_id=? ORDER BY rowid DESC", (job_id,))]
-        return [self.get_capture(ident) for ident in ids]
+        for ident in ids:
+            yield self.get_capture(ident)
+
+    def count_captures(self, job_id):
+        with self._lock:
+            return self.conn.execute("SELECT COUNT(*) FROM captures WHERE job_id=?", (job_id,)).fetchone()[0]
+
+    def list_captures(self, job_id):
+        return list(self.iter_captures(job_id))
 
     def save_address(self, capture_id, original, edited):
         capture = self.get_capture(capture_id)["capture"]

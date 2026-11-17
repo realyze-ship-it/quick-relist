@@ -143,7 +143,7 @@ def matched_failure(monkeypatch, error, navigation='native'):
                     if navigation == 'native' else [])
 
         def execute_script(self, script, *args):
-            if script == matched_module.TAB_ATTRIBUTES:
+            if script == matched_module.with_displayed(matched_module.TAB_ATTRIBUTES):
                 return tab_attributes(args[0])
             result = super().execute_script(script, *args)
             if navigation == 'links' and script == READ_PAGE_SCRIPT:

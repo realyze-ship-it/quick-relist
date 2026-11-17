@@ -791,6 +791,7 @@ def test_confirmed_cancel_uses_core_and_preserves_record(window, application, mo
     assert not window.review_button.isEnabled()
     assert not window.advance_button.isEnabled()
     assert window.audit_button.isEnabled()
+    window._show_page(1)
     assert window.saved_table.item(0, 3).text() == "Cancelled locally"
     assert "history is preserved" in window.statusBar().currentMessage()
 
@@ -1859,3 +1860,22 @@ def test_source_review_surfaces_interruption_pending_dialogs_and_capture_limits(
     finally:
         dialog.close()
         dialog.deleteLater()
+
+
+def test_batch_address_review_advances_only_after_save_and_resumes_at_cancel(window, monkeypatch):
+    _add_batch(window, "RXCU000001 RXCU000002 RXCU000003")
+    calls = []
+    window._review_rows = [0,1,2]
+    decisions = iter([True, False, True, True])
+    def review():
+        row = window.queue_table.currentRow()
+        calls.append(row)
+        if not next(decisions):
+            return False
+        window._review_rows.remove(row)
+        return True
+    monkeypatch.setattr(window, '_verify_captured_address', review)
+    window._review_batch_addresses()
+    assert calls == [0,1] and window._review_rows == [1,2]
+    window._review_batch_addresses()
+    assert calls == [0,1,1,2] and window._review_rows == []

@@ -17,6 +17,7 @@ import time
 
 from .capture import CaptureError, CaptureReadError, CaptureSafetyError, PartialHubCapture, _digest, parse_editor_url
 from .core import normalize_rxcu
+from .visibility import with_displayed
 from .hub_readonly import IDENTITY_SCRIPT
 
 # Generic DOM semantics, not invented Hub loading selectors. No text/values
@@ -48,15 +49,13 @@ TAB_PAGES = {'Listing particulars': 'details', 'Deal Particulars': 'deal_particu
              'Media': 'media', 'Portals': 'portals'}
 
 
-# Read attributes together so checking every tile does not need a separate
-# browser trip per attribute. Selenium still decides which buttons are visible.
 TAB_ATTRIBUTES = """
-return arguments[0].map(e => ({
-  label: e.textContent, tag: e.tagName.toLowerCase(), type: e.getAttribute('type'),
-  role: e.getAttribute('role'), active: e.getAttribute('aria-selected'),
-  index: e.getAttribute('tabindex'), enabled: !e.matches(':disabled') &&
-    e.getAttribute('aria-disabled') !== 'true'
-}));
+        return arguments[0].map(e => displayed(e) ? ({
+            label:e.textContent, tag:e.tagName.toLowerCase(), type:e.getAttribute('type'),
+            role:e.getAttribute('role'), active:e.getAttribute('aria-selected'),
+            index:e.getAttribute('tabindex'), enabled:!e.matches(':disabled') &&
+                e.getAttribute('aria-disabled') !== 'true'
+        }) : null);
 """
 
 
@@ -221,9 +220,11 @@ class MatchedHubCapture(PartialHubCapture):
         tabs = {}
         selected = []
         ready = True
-        elements = [e for e in self.driver.find_elements('css selector', TAB_SELECTOR) if e.is_displayed()]
-        attributes = self.driver.execute_script(TAB_ATTRIBUTES, elements) if elements else []
+        elements = self.driver.find_elements('css selector', TAB_SELECTOR)
+        attributes = self.driver.execute_script(with_displayed(TAB_ATTRIBUTES), elements) if elements else []
         for element, attrs in zip(elements, attributes, strict=True):
+            if attrs is None:
+                continue
             key = TAB_PAGES.get(' '.join(attrs['label'].split()))
             active = attrs['active']
             if active == 'true':
@@ -243,7 +244,7 @@ class MatchedHubCapture(PartialHubCapture):
         self._guard(url)
         return tabs, ready
 
-    def _readiness(self, url):
+    def _document_ready(self, url):
         self._guard(url)
         state = self.driver.execute_script(READINESS_SCRIPT)
         self._guard(url)
@@ -251,7 +252,10 @@ class MatchedHubCapture(PartialHubCapture):
             raise CaptureReadError("The editor readiness could not be read.")
         if state['dialog']:
             raise CaptureSafetyError("Close the open dialog or menu manually before starting a new matched capture.")
-        return state['ready'] and not state['busy'] and self._tabs(url)[1]
+        return state['ready'] and not state['busy']
+
+    def _readiness(self, url):
+        return self._document_ready(url) and self._tabs(url)[1]
 
     def _settled_page(self, url):
         deadline = time.monotonic() + self.timeout
@@ -348,7 +352,7 @@ class MatchedHubCapture(PartialHubCapture):
         with self._navigation_timeout():
             self._failure_phase = 'tab_precheck'
             self._identity(source_url)
-            if not self._readiness(source_url):
+            if not self._document_ready(source_url):
                 raise CaptureSafetyError("The source page became busy before tab navigation.")
             self._identity(source_url)
             # Reacquire and validate the actual native element after the final
@@ -360,7 +364,7 @@ class MatchedHubCapture(PartialHubCapture):
 
             def recheck():
                 self._identity(source_url)
-                if not self._readiness(source_url):
+                if not self._document_ready(source_url):
                     raise CaptureSafetyError("The source page became busy during tab positioning. No tab was clicked.")
                 self._identity(source_url)
                 current, current_ready = self._tabs(source_url)
@@ -492,8 +496,11 @@ class MatchedHubCapture(PartialHubCapture):
                 sample = self._settled_page(url)
                 if self.include_general_features and sample['page_key'] == 'details':
                     from .general_features import expand_general_features
-                    expand_general_features(self.driver, guard=lambda: self._identity(url), timeout=self.timeout)
-                    sample = self._settled_page(url)
+                    from .business_fields import GENERAL_FIELDS
+                    expanded = expand_general_features(self.driver, guard=lambda: self._identity(url), timeout=self.timeout)
+                    names = {field.get('name') for field in sample['fields'] if field.get('type') == 'checkbox'}
+                    if expanded or not GENERAL_FIELDS.keys() <= names:
+                        sample = self._settled_page(url)
                     sample['general_features_expanded'] = True
                     sample.pop('integrity')
                     sample['integrity'] = {'algorithm': 'sha256', 'sha256': _digest(sample)}

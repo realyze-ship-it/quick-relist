@@ -139,8 +139,7 @@ def test_media_backup_matches_pack_and_rechecks_order_before_leaving_media(monke
                 z.writestr(f'{index}.png', item)
         return {'candidate_path':str(archive), 'attribution_verified':False}
     hub = SimpleNamespace(driver=object(), download_photo_pack=pack)
-    monkeypatch.setattr(capture, 'PartialHubCapture', lambda driver: SimpleNamespace(
-        capture_current_page=lambda ident: {'pages':[{'media':records[:1] if changed else records}]}))
+    monkeypatch.setattr(capture, 'read_gallery_media', lambda driver, ident, **kw: records[:1] if changed else records)
     store = DraftStore(':memory:')
     def backup():
         return collection._backup_media(hub, store, 'job', page, tmp_path/'media', guard=lambda:True,

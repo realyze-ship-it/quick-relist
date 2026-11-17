@@ -1,5 +1,6 @@
 """Sequential relisting with durable intent and no retry of uncertain writes."""
 import re
+import time
 from .collection import latest_collection
 from .form_copy import CopyStopped
 from .relist_plan import build_relist_plan
@@ -150,6 +151,7 @@ class RelistRunner:
             raise
 
     def one(self, job):
+        started = time.monotonic()
         self.runs.assert_source_available(job['id'], job['rxcu'])
         previous = self.runs.get(job['id'])
         status = run_status(previous)
@@ -238,8 +240,9 @@ class RelistRunner:
             if not resuming_copy:
                 target = step('create', lambda: self.provider.create(prepared, plan), 'saving the reviewed replacement')
             record('created', target_reference=target['reference'], target_listing_id=target['listing_id'])
-            self.progress(job['rxcu'] + ': copying descriptions and checking every photo')
-            self.provider.copy_content(target, plan, self.runs, run_id)
+            if not target.get('content_already_submitted'):
+                self.progress(job['rxcu'] + ': copying descriptions and checking every photo')
+                self.provider.copy_content(target, plan, self.runs, run_id)
             verified = step('verify_content', lambda: self.provider.verify_content(target, plan), 'checking the saved replacement against the original')
             record('verified', verification=verified)
             for destination in plan['destinations']:
@@ -247,7 +250,8 @@ class RelistRunner:
                      lambda destination=destination: self.provider.publish(target, destination),
                      'sending the replacement to ' + destination)
             outcome = self.provider.publication(target, plan['destinations'])
-            record('published' if outcome['complete'] else 'publication_pending', publication=outcome)
+            record('published' if outcome['complete'] else 'publication_pending', publication=outcome,
+                   relist_session_seconds=round(time.monotonic() - started, 2))
             return dict(status)
         except Exception:
             self.runs.note(run_id, 'stopped', {'after_state': status.get('state','prepared'),

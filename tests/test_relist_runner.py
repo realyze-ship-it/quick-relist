@@ -278,3 +278,21 @@ def test_unrecognized_or_later_uncertain_action_cannot_resume_photos(setup, extr
     def unknown():raise TimeoutError()
     with pytest.raises(TimeoutError):runs.perform_once(run,extra,unknown)
     assert not module.copy_can_be_checked(runs.get(job['id']))
+
+
+def test_recovered_completed_copy_still_verifies_before_every_publication(setup):
+    drafts,runs,job = setup
+    provider = Provider(fail='verify')
+    provider.copy_content = lambda target, plan, store, run_id: store.perform_once(
+        run_id, 'copy_media_text', lambda:{'descriptions_submitted':True})
+    runner = module.RelistRunner(drafts,runs,provider)
+    with pytest.raises(RuntimeError):
+        runner.one(job)
+    provider.fail = None
+    provider.calls.clear()
+    def completed(*args):
+        provider.calls.append('recover_copy')
+        return {'reference':'RXCU2000','listing_id':'222222','content_already_submitted':True}
+    provider.recover_copy = completed
+    assert runner.one(job)['state'] == 'published'
+    assert provider.calls == ['recover_copy','verify','publish_website','publish_p24','publication']

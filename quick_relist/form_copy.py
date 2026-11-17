@@ -221,7 +221,7 @@ class ParticularsFiller:
         self.guard()
         if not element.is_enabled():
             raise CopyStopped('Hub has disabled a required input.')
-        element.send_keys(Keys.CONTROL, 'a', Keys.NULL, value, Keys.TAB)
+        element.send_keys(Keys.CONTROL, 'a', Keys.NULL, value or Keys.BACKSPACE, Keys.TAB)
         self.guard()
 
     def combo(self, key, code, text):
@@ -281,33 +281,40 @@ class ParticularsFiller:
             selector += f'[value="{control["code"]}"]'
         element = self.one(selector)
         if kind in ('checkbox', 'radio'):
-            if element.is_selected() != value:
-                if kind == 'radio' and not value:
-                    return  # The selected member is set after other controls.
-                from selenium.webdriver.common.keys import Keys
-                element.send_keys(Keys.SPACE)
+            if element.is_selected() == value:
+                return
+            if kind == 'radio' and not value:
+                return
+            from selenium.webdriver.common.keys import Keys
+            element.send_keys(Keys.SPACE)
             if element.is_selected() != value:
                 raise CopyStopped('Hub did not retain a copied checkbox or status.')
         elif kind == 'date':
             from selenium.webdriver.common.keys import Keys
             parsed = date.fromisoformat(value)
             wrapper = element.find_element('xpath', 'ancestor::div[contains(@class,"MuiFormControl-root")][1]')
+            last_edited = None
             for label, part in (('Year', parsed.year), ('Month', parsed.month), ('Day', parsed.day)):
                 segment = self.one(f'[role="spinbutton"][aria-label="{label}"]', wrapper)
+                if segment.get_attribute('aria-valuenow') == str(part):
+                    continue
                 self.driver.execute_script('arguments[0].scrollIntoView({block:"center"})', segment)
                 self.guard()
                 # Ctrl+A selects the whole MUI date, not this section. Clicking
                 # the section selects just its digits for ordinary replacement.
                 segment.click()
+                last_edited = segment
                 segment.send_keys(str(part).zfill(4 if label == 'Year' else 2))
                 if segment.get_attribute('aria-valuenow') != str(part):
                     raise CopyStopped('Hub did not retain the original ' + label.lower() + ' in ' + key.replace('_', ' ') + '.')
-            segment.send_keys(Keys.TAB)
+            if last_edited is not None:
+                last_edited.send_keys(Keys.TAB)
             if self.one(selector).get_property('value') != value:
                 raise CopyStopped('Hub did not retain the planned listing date.')
         else:
-            if element.get_property('value') != value:
-                self.enter(element, value)
+            if element.get_property('value') == value:
+                return
+            self.enter(element, value)
             if self.one(selector).get_property('value') != value:
                 raise CopyStopped('Hub changed a copied field value. Review the unsaved form.')
 
@@ -334,8 +341,12 @@ class ParticularsFiller:
         names = [a['name'] for a in wanted]
         if len(set(names)) != len(names):
             raise CopyStopped('The source agent names are ambiguous.')
+        rows = self.agent_rows()
+        expected = sorted((a['name'], a['primary']) for a in wanted)
+        if sorted((name, checkbox.is_selected()) for name, _, checkbox in rows) == expected:
+            return
         for name in names:
-            if name not in [r[0] for r in self.agent_rows()]:
+            if name not in [r[0] for r in rows]:
                 self.one('#mui-component-select-listing').send_keys(Keys.SPACE)
                 choices = self.wait(lambda: [e for e in self.driver.find_elements('css selector', '[role="option"]')
                                             if e.is_displayed() and e.get_attribute('textContent').strip() == name],
@@ -343,22 +354,29 @@ class ParticularsFiller:
                 if len(choices) != 1:
                     raise CopyStopped('The agent selector has more than one name match.')
                 choices[0].send_keys(Keys.ENTER)
-                self.wait(lambda: name in [r[0] for r in self.agent_rows()], 'The agent was not added to the unsaved form.')
+                def added():
+                    current = self.agent_rows()
+                    return current if any(row[0] == name for row in current) else None
+                rows = self.wait(added, 'The agent was not added to the unsaved form.')
         # Add desired agents before removing defaults so the table never has
         # to pass through an empty, potentially different row structure.
-        for name, row, _ in self.agent_rows():
-            if name not in names:
+        for name in [r[0] for r in rows if r[0] not in names]:
+            row = next((r[1] for r in rows if r[0] == name), None)
+            if row is not None:
                 buttons = row.find_elements('css selector', 'button')
                 if len(buttons) != 1:
                     raise CopyStopped('The default-agent removal control is ambiguous.')
                 buttons[0].send_keys(Keys.ENTER)
-                self.wait(lambda: name not in [r[0] for r in self.agent_rows()], 'The default agent was not removed from the unsaved form.')
+                def removed():
+                    current = self.agent_rows()
+                    return current if all(r[0] != name for r in current) else None
+                rows = self.wait(removed, 'The default agent was not removed from the unsaved form.')
         primary = next(a['name'] for a in wanted if a['primary'])
-        name, row, checkbox = next(r for r in self.agent_rows() if r[0] == primary)
+        name, row, checkbox = next(r for r in rows if r[0] == primary)
         if not checkbox.is_selected():
             checkbox.send_keys(Keys.SPACE)
         actual = sorted((n, c.is_selected()) for n, _, c in self.agent_rows())
-        if actual != sorted((a['name'], a['primary']) for a in wanted):
+        if actual != expected:
             raise CopyStopped('The primary and secondary agents do not match the source.')
 
     def fill_room(self, room):
@@ -380,28 +398,41 @@ class ParticularsFiller:
         fields = dialog.find_elements('css selector', 'input[type="checkbox"],textarea[name="description"]')
         if len(fields) != len(room['fields']):
             raise CopyStopped('The number of room controls differs from the original.')
-        # Validate the entire ordering before changing any of this room's fields.
-        for target, source in zip(fields, room['fields']):
-            if target.get_attribute('name') != source['name'] or target.get_attribute('type') != source['type']:
-                raise CopyStopped('The room control order differs from the source.')
-            if source['type'] == 'checkbox':
-                label = target.find_element('xpath', 'ancestor::label[1]').get_attribute('textContent').strip()
-                if label != source['label']:
-                    raise CopyStopped('A room checkbox label differs from the source.')
+        def read_room(*, before_edit):
+            self.guard()
+            # Read public form values in one browser call. Include the same
+            # input nodes so a React replacement cannot redirect later writes.
+            observed = self.driver.execute_script("""
+                return Array.from(arguments[0].querySelectorAll('input[type="checkbox"],textarea[name="description"]'),
+                    e => ({element:e, name:e.name, type:e.type, label:e.closest('label')?.textContent.trim(),
+                           value:e.type === 'checkbox' ? e.checked : e.value}));
+            """, dialog)
+            self.guard()
+            if len(observed) != len(fields):
+                raise CopyStopped('The number of room controls differs from the original.')
+            for target, actual, source in zip(fields, observed, room['fields'], strict=True):
+                if ((before_edit and actual['element'] != target) or actual['name'] != source['name'] or actual['type'] != source['type']
+                        or source['type'] == 'checkbox' and actual.get('label') != source['label']):
+                    raise CopyStopped('A room control or label differs from the original.')
+            return [item['value'] for item in observed]
+
+        before = read_room(before_edit=True)
         headings = [e.get_attribute('textContent').strip() for e in dialog.find_elements('css selector', 'h6')]
         if [h for h in headings if re.fullmatch(r'(Bedroom|Bathroom|Kitchen|Parking|Lounge|Dining room|Garage|Braai|Study|Entrance hall) [0-9]+', h)] != room['groups']:
             raise CopyStopped('The room groups differ from the original.')
-        for target, source in zip(fields, room['fields']):
+        wanted = [f['checked'] if f['type'] == 'checkbox' else f['value'] for f in room['fields']]
+        for target, source, actual, value in zip(fields, room['fields'], before, wanted, strict=True):
+            if actual == value:
+                continue
             self.guard()
             if source['type'] == 'checkbox':
-                if target.is_selected() != source['checked']:
+                if target.is_selected() != value:
                     target.send_keys(Keys.SPACE)
-                if target.is_selected() != source['checked']:
-                    raise CopyStopped('A room option was not retained.')
             else:
-                self.enter(target, source['value'])
-                if target.get_property('value') != source['value']:
-                    raise CopyStopped('A room description was not retained.')
+                self.enter(target, value)
+        if read_room(before_edit=False) != wanted:
+            raise CopyStopped('Hub did not retain the copied room options.')
+        self.guard()
         done = [e for e in dialog.find_elements('css selector', 'button')
                 if e.get_attribute('textContent').strip() == 'Done']
         if len(done) != 1:
@@ -431,7 +462,25 @@ class ParticularsFiller:
                 'remaining': ['related records']}
 
     def verify_controls(self, controls):
-        for control in controls:
+        self.guard()
+        ordinary = [c for c in controls if c['kind'] != 'suburb' and c['key'] != 'bank_mandate']
+        # A single DOM read observes the entire ordinary form at the same
+        # instant after dependent controls and room dialogs have settled.
+        values = self.driver.execute_script("""
+            return arguments[0].map(({key, kind, code}) => {
+                const selector = kind === 'count' ? '#' + CSS.escape(key) :
+                    'input[name="' + CSS.escape(key) + '"]' +
+                    (kind === 'radio' ? '[value="' + CSS.escape(code) + '"]' : '');
+                const matches = document.querySelectorAll(selector);
+                if (matches.length !== 1) return null;
+                const e = matches[0];
+                return ['checkbox','radio'].includes(kind) ? e.checked : e.value;
+            });""", [{k:c[k] for k in ('key','kind','code') if k in c} for c in ordinary])
+        self.guard()
+        for control, value in zip(ordinary, values, strict=True):
+            if value is None or value != control['value']:
+                raise CopyStopped('A copied field is missing, ambiguous or changed: ' + control['key'].replace('_',' ') + '.')
+        for control in (c for c in controls if c['kind'] == 'suburb' or c['key'] == 'bank_mandate'):
             self.guard()
             key, kind = control['key'], control['kind']
             if kind == 'suburb':
@@ -441,17 +490,10 @@ class ParticularsFiller:
                 if len(matches)!=1 or not suburb_matches(control['value'], matches[0].get_property('value')):
                     raise CopyStopped('The final suburb differs from the reviewed address.')
                 continue
-            if key == 'bank_mandate':
-                groups = [e for e in self.driver.find_elements('css selector','main div.MuiFormControl-root')
-                          if any(l.get_attribute('textContent').strip()=='Bank mandate' for l in e.find_elements('xpath','./label'))]
-                if len(groups)!=1:
-                    raise CopyStopped('The final Bank mandate control is ambiguous.')
-                element = self.one('input.MuiSelect-nativeInput', groups[0])
-            else:
-                selector = f'#{key}' if kind=='count' else f'input[name="{key}"]'
-                if kind=='radio':
-                    selector += f'[value="{control["code"]}"]'
-                element = self.one(selector)
-            value = element.is_selected() if kind in ('checkbox','radio') else element.get_property('value')
+            groups = [e for e in self.driver.find_elements('css selector','main div.MuiFormControl-root')
+                      if any(l.get_attribute('textContent').strip()=='Bank mandate' for l in e.find_elements('xpath','./label'))]
+            if len(groups)!=1:
+                raise CopyStopped('The final Bank mandate control is ambiguous.')
+            value = self.one('input.MuiSelect-nativeInput', groups[0]).get_property('value')
             if value != control['value']:
                 raise CopyStopped('A copied field changed while the form was being prepared: ' + key.replace('_',' ') + '.')
