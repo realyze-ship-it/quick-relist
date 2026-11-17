@@ -1,0 +1,38 @@
+<!doctype html><meta charset="utf-8"><title>Synthetic metadata fixture, not Hub</title>
+<style>body{font:16px sans-serif}pre{white-space:pre-wrap}section{border:1px solid;padding:15px}textarea{width:500px;height:120px}label{display:block;margin:8px}[data-sortable]{border:1px solid;padding:8px;margin:4px}[data-saved-grid]{display:flex;gap:10px}article{border:1px solid;padding:10px}</style>
+<main id="synthetic-metadata" data-synthetic="true" data-ready="false" data-nonce="@@NONCE@@" data-epoch="@@NONCE@@" data-context="@@CONTEXT@@" data-request="@@REQUEST@@" data-revision="@@REVISION@@">
+<h1>Synthetic metadata fixture only</h1><div data-saved-grid>@@CARDS@@</div>@@RECEIPTS@@@@EDITOR@@</main>
+<script>
+'use strict';
+const config=@@CONFIG@@,root=document.getElementById('synthetic-metadata'),editor=root.querySelector('[data-editor]');
+const events=[];
+for(const type of ['input','change','click','keydown'])document.addEventListener(type,e=>events.push({type,trusted:e.isTrusted}),true);
+if(editor){
+ const command=config.command,stage=command.payload,save=editor.querySelector('[data-commit]');
+ if(stage.kind==='caption')editor.querySelector('textarea').value=config.cards.find(c=>c.media_id===stage.media_id).caption;
+ if(stage.kind==='order'){
+  let original=null;
+  for(const item of editor.querySelectorAll('[data-sortable]'))item.addEventListener('keydown',e=>{
+   if(e.key===' '){e.preventDefault();if(!editor.dataset.picked){editor.dataset.picked=item.dataset.mediaId;original=[...item.parentNode.children];}
+     else if(editor.dataset.picked===item.dataset.mediaId){delete editor.dataset.picked;original=null;}}
+   else if(e.key==='Escape'&&editor.dataset.picked){e.preventDefault();for(const row of original)item.parentNode.append(row);delete editor.dataset.picked;original=null;}
+   else if(editor.dataset.picked===item.dataset.mediaId&&['ArrowUp','ArrowDown'].includes(e.key)){
+    e.preventDefault();const peer=e.key==='ArrowUp'?item.previousElementSibling:item.nextElementSibling;
+    if(peer){if(e.key==='ArrowUp')item.parentNode.insertBefore(item,peer);else item.parentNode.insertBefore(peer,item);item.focus();}}
+  });
+ }
+ save.addEventListener('click',async()=>{
+  if(save.dataset.sent)return;save.dataset.sent='true';
+  let payload;
+  if(stage.kind==='caption')payload={kind:'caption',media_id:stage.media_id,caption:editor.querySelector('textarea').value};
+  else if(stage.kind==='cover'){const selected=editor.querySelector('input:checked');payload={kind:'cover',media_id:selected&&selected.value!==''?selected.value:null};}
+  else payload={kind:'order',media_ids:[...editor.querySelectorAll('[data-sortable]')].map(e=>e.dataset.mediaId)};
+  try{const response=await fetch(location.pathname+'/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command,payload,events})});
+   if(response.ok&&config.scenario!=='no-reload')location.reload();}catch(_){}
+ });
+ if(config.scenario==='disabled')save.disabled=true;
+ if(config.scenario==='unknown-control'){const input=document.createElement('input');root.append(input);}
+}
+if(config.scenario==='wrong-context')root.dataset.context='{}';
+root.dataset.ready='true';
+</script>

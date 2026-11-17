@@ -1,0 +1,675 @@
+"""Synthetic form-readiness checks; no browser, network or real listing data."""
+from types import SimpleNamespace
+import pytest
+
+from quick_relist import live_relist_ui as module
+from quick_relist.form_copy import CopyStopped
+
+
+@pytest.mark.parametrize('scenario', ['rerender', 'page_change', 'ambiguous', 'uncertain_keypress'])
+def test_button_rereads_only_before_dispatch(tmp_path, monkeypatch, scenario):
+    from selenium.common.exceptions import StaleElementReferenceException
+    from selenium.webdriver.common.keys import Keys
+    from unittest.mock import Mock
+
+    driver = Mock(current_window_handle='editor', current_url='https://example.test/media')
+    ui = module.HubRelistUI(SimpleNamespace(driver=driver), tmp_path, clipboard=None)
+    monkeypatch.setattr(module.time, 'sleep', lambda seconds: None)
+    stale = Mock()
+    def rerender(_):
+        if scenario == 'page_change':
+            driver.current_url = 'https://example.test/portals'
+        raise StaleElementReferenceException()
+    stale.get_attribute.side_effect = rerender
+    button = Mock()
+    button.get_attribute.return_value = 'Next'
+    if scenario == 'uncertain_keypress':
+        button.send_keys.side_effect = StaleElementReferenceException()
+    driver.find_elements.side_effect = [[stale], [button, button] if scenario == 'ambiguous' else [button]]
+
+    if scenario in ('page_change', 'ambiguous'):
+        with pytest.raises(CopyStopped):
+            ui.button('Next')
+        button.send_keys.assert_not_called()
+    else:
+        if scenario == 'uncertain_keypress':
+            with pytest.raises(StaleElementReferenceException):
+                ui.button('Next')
+        else:
+            ui.button('Next')
+        button.send_keys.assert_called_once_with(Keys.ENTER)
+    stale.send_keys.assert_not_called()
+
+
+def test_saved_description_allows_only_observed_punctuation_substitutions():
+    source = {'description_html':'<p><strong>Owner’s</strong> flat – sunny — quiet.</p>',
+              'description_text':'Owner’s flat – sunny — quiet.', 'marketing_header':'Flat – sunny'}
+    plain = {**source, 'description_html':"<p><strong>Owner's</strong> flat - sunny - quiet.</p>",
+             'description_text':"Owner's flat - sunny - quiet."}
+    assert module.same_saved_media(source, plain)
+    for key, change in [('description_html', plain['description_html'].replace('strong','em')),
+                        ('description_text', plain['description_text'].replace('sunny','small')),
+                        ('marketing_header','Flat - sunny')]:
+        assert not module.same_saved_media(source, {**plain, key:change})
+    assert not module.same_saved_media(plain, source)
+
+
+def test_recovered_photo_count_is_scoped_to_one_copy():
+    from unittest.mock import Mock
+    ui = object.__new__(module.HubRelistUI)
+    ui.driver = Mock()
+    ui.bind, ui.tab, ui.guard = Mock(), Mock(), Mock()
+    ui.wait = lambda read, message: read() or pytest.fail(message)
+    def check(target, count):
+        ui.driver.find_elements.side_effect = lambda by, css: [object()] if 'file' in css else [object()] * count
+        ui.copy_photos(target, {'photos':[]}, None, None)
+    check({'reference':'A', 'verified_photo_prefix_count':3}, 3)
+    check({'reference':'B'}, 0)
+    with pytest.raises(CopyStopped, match='already contains images'):
+        check({'reference':'B'}, 3)
+
+
+@pytest.mark.parametrize('mode,page',[('sale','deal_particulars'),('rent','media')])
+def test_blank_estate_repair_verifies_saved_value_on_the_same_copy(monkeypatch, mode, page):
+    from unittest.mock import Mock
+    ui = object.__new__(module.HubRelistUI)
+    ui.bind, ui.tab, ui.guard = Mock(), Mock(), Mock()
+    ui.driver = Mock(current_url='https://hub.remax.co.za/app/listings/edit/42/particulars')
+    ui.saved_estate_name = Mock(side_effect=['','Sample Estate'])
+    field = Mock()
+    field.get_property.return_value = 'Sample Estate'
+    ui.one = Mock(return_value=field)
+    ui.button = lambda name: setattr(ui.driver,'current_url','https://hub.remax.co.za/app/listings/edit/42/'+page)
+    ui.wait = lambda read, message: read() or pytest.fail(message)
+    monkeypatch.setattr(module,'read_portals',lambda *args,**kwargs:{'published':False,'portals':{'website':{'state':'unpublished'}}})
+    target = {'reference':'RXCU1000','listing_id':'42'}
+    plan = {'particulars':{'mode':mode}, 'destinations':['website']}
+    assert ui.restore_estate_name(target,'Sample Estate',plan) == {**target, 'estate_name_verified':True}
+    assert field.send_keys.call_count == 1 and ui.saved_estate_name.call_count == 2
+    ui.saved_estate_name = Mock(return_value='Different')
+    with pytest.raises(CopyStopped, match='changed'):
+        ui.restore_estate_name(target,'Sample Estate',plan)
+    assert field.send_keys.call_count == 1
+
+
+def commission_page():
+    return {'page_key':'deal_particulars', 'fields':[{'name':'total_commission_percentage','value':'3.0'}],
+        'rich_text':[], 'dialogs':[], 'media':[], 'tables':[{'rows':[
+            ['Agent','Brand','Agent Type','Deal Commission Split %','Commission Sub Total','Office Service Fee',
+             'RE/MAX SA Service Fee','Commission Total Minus Fees','Action'],
+            ['Example A','RE/MAX','Listing Agent','50','100','0','2','98',''],
+            ['Example B','RE/MAX','Listing Agent','50','100','0','2','98',''],
+            ['Totals:','100%','200','0','4','196','']]}]}
+
+
+def test_commission_row_order_does_not_change_agent_values_or_source():
+    from copy import deepcopy
+    source=commission_page(); original=deepcopy(source); copy=deepcopy(source)
+    copy['tables'][0]['rows'][1:3]=reversed(copy['tables'][0]['rows'][1:3])
+    assert module.same_commission(source,copy)
+    assert source==original
+
+
+def test_corrected_rate_preserves_agent_splits_and_fee_rates():
+    from copy import deepcopy
+    source = commission_page()
+    source['fields'].append({'name':'total_commission_value', 'value':'200'})
+    actual = deepcopy(source)
+    actual['fields'][0]['value'] = '6.00'
+    actual['fields'][1]['value'] = '400'
+    rows = actual['tables'][0]['rows']
+    for row in rows[1:-1]:
+        row[4:8] = ['200', '0', '4', '196']
+    rows[-1][2:6] = ['400', '0', '8', '392']
+    review = {'rate':'6', 'amount':'400'}
+    assert not module.same_commission(source, actual)
+    assert module.same_commission(source, actual, review)
+    assert not module.same_commission(source, actual, {'rate':'5', 'amount':'400'})
+    for i in range(8):
+        edited = deepcopy(actual)
+        edited['tables'][0]['rows'][1][i] = '1'
+        assert not module.same_commission(source, edited, review)
+    rows[-1][5] = '391.99'
+    assert not module.same_commission(source, actual, review)
+
+
+@pytest.mark.parametrize('rate, heading, target_id, confirms', [
+    ('17.50', 'Confirm commission rate', '42', True),
+    ('7.50', 'Confirm commission rate', '42', False),
+    ('17.5', 'Confirm publication', '42', False),
+    ('17.5', 'Confirm commission rate', '41', False)])
+def test_warning_confirms_only_original_rate_and_target(rate, heading, target_id, confirms):
+    from unittest.mock import Mock
+    from selenium.webdriver.remote.webelement import WebElement
+    dialog = Mock(spec=WebElement)
+    dialog.text = heading + "\nYou've entered a total commission rate of 17.5%, which is unusually high. Please confirm this is correct before continuing.\nLET ME FIX IT\nYES, THIS IS CORRECT"
+    button = Mock()
+    button.get_attribute.return_value = 'YES, THIS IS CORRECT'
+    dialog.find_elements.return_value = [button]
+    dialog.is_displayed.return_value = True
+    button.send_keys.side_effect = lambda key: setattr(dialog.is_displayed, 'return_value', False)
+    driver = Mock(current_window_handle='sale', current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars')
+    driver.find_elements.return_value = [dialog]
+    ui = module.HubRelistUI(SimpleNamespace(driver=driver), '.', clipboard=None)
+    ui.guard = Mock(side_effect=AssertionError('Hub hides the headings behind the modal'))
+    target = {'listing_id':target_id, 'handle':'sale', 'reference':'RXCU1000'}
+    ui.current = target.copy()
+    if confirms:
+        ui.confirm_commission_warning(target, rate)
+        button.send_keys.assert_called_once()
+    else:
+        with pytest.raises(CopyStopped):
+            ui.confirm_commission_warning(target, rate)
+        button.send_keys.assert_not_called()
+
+
+@pytest.mark.parametrize('change', ['none','agent','role','route','handle','title','split','extra dialog','cancelled'])
+def test_agent_editor_saves_only_the_verified_split_on_the_bound_copy(change):
+    from unittest.mock import Mock
+    from selenium.webdriver.remote.webelement import WebElement
+    driver = Mock(current_window_handle='sale', current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars')
+    ui = module.HubRelistUI(SimpleNamespace(driver=driver), '.', clipboard=None)
+    target = {'handle':'sale','reference':'RXCU1000','listing_id':'42'}
+    ui.current = target.copy()
+    dialog = Mock(spec=WebElement)
+    dialog.text = 'Edit Agent Listing Commission\nAgent'
+    dialog.is_displayed.return_value = False
+    ui.guard = lambda: None if not dialog.is_displayed() else pytest.fail('Headings are hidden')
+    agent, role, field, save = Mock(), Mock(), Mock(), Mock()
+    agent.text, role.text = 'Example A', 'Listing Agent'
+    save.get_attribute.return_value = 'SAVE'
+    field.get_property.return_value = '20.00'
+    controls = {'#mui-component-select-agent_id[role="combobox"]':agent,
+                '#mui-component-select-agent_type[role="combobox"]':role,
+                'input[name="commission_sales_percentage"]':field, 'button':save}
+    dialog.find_elements.side_effect = lambda by, selector: [controls[selector]]
+    driver.find_elements.return_value = [dialog]
+    row, edit = Mock(), Mock()
+    row.find_elements.return_value = [Mock(), edit]
+    def open_dialog(key):
+        dialog.is_displayed.return_value = True
+        if change == 'agent': agent.text = 'Example B'
+        if change == 'role': role.text = 'Other Role'
+        if change == 'route': driver.current_url = driver.current_url.replace('/42/', '/43/')
+        if change == 'handle': driver.current_window_handle = 'other'
+        if change == 'title': dialog.text = 'Another dialog'
+        if change == 'split': field.get_property.return_value = '50.00'
+        if change == 'extra dialog': driver.find_elements.return_value = [dialog, Mock()]
+        if change == 'cancelled': ui.cancelled = lambda: True
+    edit.send_keys.side_effect = open_dialog
+    save.send_keys.side_effect = lambda key: setattr(dialog.is_displayed, 'return_value', False)
+    saved = ['Example A','RE/MAX','listing agent','20.00']
+    if change == 'none':
+        ui.edit_commission_split(target, row, saved)
+        save.send_keys.assert_called_once()
+    else:
+        with pytest.raises(CopyStopped):
+            ui.edit_commission_split(target, row, saved)
+        save.send_keys.assert_not_called()
+
+
+def test_commission_save_waits_through_progress_dialog_without_confirming_it():
+    from unittest.mock import Mock
+    driver = Mock(current_window_handle='sale', current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars')
+    ui = module.HubRelistUI(SimpleNamespace(driver=driver), '.', clipboard=None)
+    ui.confirm_commission_warning = Mock()
+    target = {'listing_id':'42', 'handle':'sale'}
+    dialog = Mock()
+    driver.find_elements.return_value = [dialog]
+    for text in ('', 'Saving', 'Review something else'):
+        dialog.text = text
+        assert not ui.commission_saved_to_media(target, '5.0')
+    ui.confirm_commission_warning.assert_not_called()
+    dialog.text = 'Confirm commission rate\nYou have entered a rate'
+    assert not ui.commission_saved_to_media(target, '5.0')
+    ui.confirm_commission_warning.assert_called_once_with(target, '5.0')
+    driver.current_url = driver.current_url.replace('deal_particulars', 'media')
+    assert ui.commission_saved_to_media(target, '5.0')
+    driver.current_url = driver.current_url.replace('/42/', '/43/')
+    with pytest.raises(CopyStopped):
+        ui.commission_saved_to_media(target, '5.0')
+
+
+@pytest.mark.parametrize('column',range(8))
+def test_commission_comparison_rejects_changed_agent_money_or_identity(column):
+    source=commission_page(); copy=commission_page()
+    copy['tables'][0]['rows'][1][column]='changed'
+    assert not module.same_commission(source,copy)
+
+
+@pytest.mark.parametrize('change',['duplicate','missing','totals','percentage','header'])
+def test_commission_comparison_rejects_incomplete_or_changed_totals(change):
+    source=commission_page(); copy=commission_page(); rows=copy['tables'][0]['rows']
+    if change=='duplicate':rows[2]=rows[1][:]
+    elif change=='missing':rows.pop(1)
+    elif change=='totals':rows[-1][1]='99%'
+    elif change=='percentage':copy['fields'][0]['value']='4.0'
+    else:rows[0][3]='Other share'
+    assert not module.same_commission(source,copy)
+
+
+@pytest.mark.parametrize('changed_saved_amount', [False, True])
+def test_commission_writer_preserves_amount_when_displayed_percentage_is_rounded(monkeypatch, changed_saved_amount):
+    from copy import deepcopy
+    from decimal import Decimal
+    source = commission_page()
+    source['fields'] = [
+        {'name':'total_commission_value','value':'200'},
+        {'name':'total_commission_percentage','value':'1.35'}]
+    values = {'total_commission_value':'0','total_commission_percentage':'0'}
+    writes, tabs, saved_pages = [], [], []
+    class Input:
+        def __init__(self, name): self.name = name
+        def send_keys(self, *keys):
+            value = keys[3]
+            writes.append((self.name, value))
+            values[self.name] = value
+            if self.name == 'total_commission_percentage':
+                values['total_commission_value'] = str(Decimal(value) * Decimal('14800') / 100)
+            else:
+                values['total_commission_percentage'] = str(Decimal(value) * 100 / Decimal('14800'))
+    class Cell:
+        def __init__(self, value): self.value = value
+        def get_attribute(self, name): return self.value
+    class Row:
+        def __init__(self, row): self.cells = [Cell(value) for value in row]
+        def find_elements(self, by, selector):
+            assert selector == 'td'
+            return self.cells
+    def find(by, selector):
+        if selector == '[role="dialog"]':
+            return []
+        if selector == 'main tbody tr':
+            return [Row(row) for row in source['tables'][0]['rows'][1:-1]]
+        for name in values:
+            if selector == f'input[name="{name}"]': return [Input(name)]
+        raise AssertionError(selector)
+    driver = SimpleNamespace(current_window_handle='sale', current_url='https://hub.remax.co.za/app/listings/edit/42/deal_particulars',find_elements=find)
+    ui = object.__new__(module.HubRelistUI)
+    ui.driver = driver
+    ui.bind = lambda target: None
+    ui.guard = lambda: None
+    ui.wait = lambda read, message: read() or pytest.fail(message)
+    def tab(name):
+        tabs.append(name)
+        driver.current_url = 'https://hub.remax.co.za/app/listings/edit/42/' + ('media' if name == 'Media' else 'deal_particulars')
+    ui.tab = tab
+    def save(name):
+        assert name == 'Next'
+        page = deepcopy(source)
+        page['fields'][0]['value'] = '201' if changed_saved_amount else values['total_commission_value']
+        page['fields'][1]['value'] = str(Decimal(values['total_commission_percentage']).quantize(Decimal('.01')))
+        saved_pages.append(page)
+        driver.current_url = 'https://hub.remax.co.za/app/listings/edit/42/media'
+    ui.button = save
+    class Reader:
+        def __init__(self, observed_driver): assert observed_driver is driver
+        def capture_current_page(self, listing_id):
+            assert listing_id == '42' and driver.current_url.endswith('/deal_particulars')
+            return {'pages':saved_pages}
+    monkeypatch.setattr(module, 'PartialHubCapture', Reader)
+    if changed_saved_amount:
+        with pytest.raises(CopyStopped, match='No photos were uploaded'):
+            ui.copy_commission({'listing_id':'42','handle':'sale'}, source)
+        assert tabs[-1] == 'Deal Particulars'
+    else:
+        assert ui.copy_commission({'listing_id':'42','handle':'sale'}, source) == {'commission_copied':True}
+        assert module.same_commission(source, saved_pages[0])
+        assert tabs[-1] == 'Media'
+    assert writes == [('total_commission_percentage','1.35'),('total_commission_value','200')]
+
+
+@pytest.mark.parametrize('outcome', ['already_published','published_after_reload','still_pending','wrong_page'])
+def test_publication_refreshes_stale_status_without_sending_another_request(monkeypatch, outcome):
+    clock, reloads, bindings = [0], [], []
+    driver = SimpleNamespace(current_url='https://hub.remax.co.za/app/listings/edit/42/portals')
+    driver.refresh = lambda: reloads.append(clock[0])
+    ui = object.__new__(module.HubRelistUI)
+    ui.driver = driver
+    ui.bind = lambda target: bindings.append(target)
+    ui.tab = lambda name: None
+    ui.guard = lambda: None
+    def read(observed_driver, *, guard, timeout):
+        assert observed_driver is driver
+        guard()
+        if outcome == 'wrong_page' and clock[0] >= 10:
+            driver.current_url = 'https://hub.remax.co.za/app/listings/edit/42/media'
+        published = outcome == 'already_published' or (outcome == 'published_after_reload' and bool(reloads))
+        return {'portals':{'website':{'state':'published' if published else 'pending'}}}
+    monkeypatch.setattr(module, 'read_portals', read)
+    monkeypatch.setattr(module.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(module.time, 'sleep', lambda seconds: clock.__setitem__(0,clock[0]+seconds))
+    target = {'listing_id':'42'}
+    if outcome == 'wrong_page':
+        with pytest.raises(CopyStopped, match='status page changed'):
+            ui.publication(target, ['website'])
+        assert not reloads
+    else:
+        result = ui.publication(target, ['website'])
+        assert result['complete'] == (outcome != 'still_pending')
+        if outcome == 'already_published': assert not reloads
+        elif outcome == 'published_after_reload': assert reloads == [10]
+        else: assert clock[0] == 120 and reloads == list(range(10,120,10))
+    assert bindings == [target]
+
+
+@pytest.mark.parametrize('saved_selection,accepted', [
+    ('Example Park, First City, Province', True),
+    ('Example Park, Other City, Province', False), ('Example Park', False)])
+def test_saved_short_suburb_requires_exact_selected_city(saved_selection, accepted):
+    from copy import deepcopy
+    expected={'controls':[{'key':'suburb','kind':'suburb','value':'Example Park, First City, Province'}]}
+    actual={'controls':[{'key':'suburb','kind':'suburb','value':'Example Park'}]}
+    original=deepcopy(actual)
+    calls=[]
+    def read(short):
+        calls.append(short)
+        return saved_selection
+    if accepted:
+        result, proof=module.resolve_saved_suburb(expected,actual,read)
+        assert result==expected and proof==saved_selection
+    else:
+        with pytest.raises(CopyStopped,match='city or province'):
+            module.resolve_saved_suburb(expected,actual,read)
+    assert calls==['Example Park'] and actual==original
+
+
+@pytest.mark.parametrize('actual_value', ['Different Park','Example Park, Other City, Province',''])
+def test_other_saved_suburbs_cannot_be_rewritten_by_matching_prefix(actual_value):
+    expected={'controls':[{'key':'suburb','kind':'suburb','value':'Example Park, First City, Province'}]}
+    actual={'controls':[{'key':'suburb','kind':'suburb','value':actual_value}]}
+    def prohibited(short):
+        raise AssertionError('Do not resolve an unrelated value')
+    result,proof=module.resolve_saved_suburb(expected,actual,prohibited)
+    assert result is actual and proof is None
+
+
+@pytest.mark.parametrize('selected_count,own_menu',[(1,True),(0,True),(2,True),(1,False)])
+def test_saved_suburb_reads_owned_selected_option_without_selecting(tmp_path,selected_count,own_menu):
+    from selenium.webdriver.common.keys import Keys
+    events=[]
+    field=SimpleNamespace(is_displayed=lambda:True,get_property=lambda name:'Example Park',
+        get_attribute=lambda name:'suburb-options' if name=='aria-controls' else None,
+        send_keys=lambda *keys:events.append(keys))
+    choice=SimpleNamespace(is_displayed=lambda:True,
+        get_attribute=lambda name:{'aria-selected':'true','textContent':'Example Park, First City, Province'}.get(name))
+    # Focus alone is not selection, and an unrelated list cannot supply proof.
+    unselected=SimpleNamespace(is_displayed=lambda:True,
+        get_attribute=lambda name:{'aria-selected':'false','textContent':'Example Park, Other City, Province'}.get(name))
+    menu=SimpleNamespace(is_displayed=lambda:True,
+        get_attribute=lambda name:'suburb-options' if own_menu else 'other-options',
+        find_elements=lambda *args:[choice]*selected_count+[unselected])
+    driver=SimpleNamespace(find_elements=lambda by,selector:[field] if selector.startswith('main input') else [menu],
+        execute_script=lambda *args:True)
+    provider=module.HubRelistUI(SimpleNamespace(driver=driver),tmp_path,clipboard=lambda *args:None)
+    provider.tab=lambda name:events.append(name)
+    provider.guard=lambda:None
+    def wait_once(read,message,**kwargs):
+        result=read()
+        if not result:raise CopyStopped(message)
+        return result
+    provider.wait=wait_once
+    if selected_count==1 and own_menu:
+        assert provider.selected_suburb_label('Example Park')=='Example Park, First City, Province'
+    else:
+        with pytest.raises(CopyStopped):provider.selected_suburb_label('Example Park')
+    assert events==['Listing particulars',(Keys.CONTROL,'a',Keys.NULL,'Example Park'),(Keys.ESCAPE,Keys.TAB)]
+
+
+def test_source_recheck_detects_a_move_between_two_identically_named_suburbs(tmp_path):
+    from copy import deepcopy
+    field = {'type': 'text', 'label': 'Suburb', 'value': 'Example Park'}
+    page = {'page_key': 'details', 'fields': [field], 'rich_text': [], 'tables': [], 'dialogs': [], 'media': []}
+    fresh = {'complete': False, 'pages': [page]}
+    source = deepcopy(fresh)
+    full = 'Example Park, First City, Province'
+    source['pages'][0]['fields'][0]['selected_suburb_label'] = full
+    provider = module.HubRelistUI(SimpleNamespace(driver=None), tmp_path, clipboard=None)
+    selections = iter((full, 'Example Park, Other City, Province'))
+    def read(short):
+        assert short == 'Example Park'
+        return next(selections)
+    provider.selected_suburb_label = read
+    assert provider._source_matches({'source': source}, fresh)
+    assert not provider._source_matches({'source': source}, fresh)
+    assert provider._source_matches({'source': fresh}, fresh)
+
+
+@pytest.mark.parametrize('button_count,enabled', [(0, True), (2, True), (1, False), (1, True)])
+def test_preparation_requires_one_enabled_save_without_clicking_it(monkeypatch, tmp_path, button_count, enabled):
+    events = []
+    button = SimpleNamespace(is_displayed=lambda: True, is_enabled=lambda: enabled,
+                             get_attribute=lambda name: 'Save')
+    driver = SimpleNamespace(current_window_handle='unsaved', current_url='', window_handles=['source'])
+    driver.switch_to = SimpleNamespace(new_window=lambda kind: events.append('new_unsaved_tab'),
+                                      window=lambda handle: events.append('select_' + handle))
+    driver.get = lambda url: setattr(driver, 'current_url', url)
+    driver.find_elements = lambda by, selector: ([button] * button_count
+                                                if selector == 'main button' else [object()])
+    monkeypatch.setattr(module, 'ParticularsFiller', lambda *args, **kwargs:
+                        SimpleNamespace(fill=lambda plan: events.append('fill'), guard=lambda: None))
+    hub = SimpleNamespace(driver=driver, editor_bindings={'RXCU12345': {'handle':'source'}},
+                          verify_editor_reference=lambda *args: events.append('verify_source'))
+    provider = module.HubRelistUI(hub, tmp_path, clipboard=lambda *args: None)
+    plan = {'source_reference':'RXCU12345', 'source_listing_id':'123456', 'particulars': {'mode': 'rent'}}
+    def wait_once(read, message, **kwargs):
+        result = read()
+        if not result:
+            raise CopyStopped(message)
+        return result
+    provider.wait = wait_once
+    if button_count == 1 and enabled:
+        assert provider.prepare(plan)['handle'] == 'unsaved'
+    else:
+        with pytest.raises(CopyStopped, match='original remains active'):
+            provider.prepare(plan)
+    assert events == ['select_source', 'verify_source', 'new_unsaved_tab', 'fill']
+
+
+@pytest.mark.parametrize('conflict', [False, True])
+@pytest.mark.parametrize('captions', [False, True])
+def test_reload_waits_for_missing_headings_but_never_accepts_a_conflict(monkeypatch, tmp_path, conflict, captions):
+    ready = {'outer_count': 1, 'inner_count': 1, 'outer_matches': True, 'inner_matches': True}
+    first = dict(ready, inner_matches=False) if conflict else dict(ready, inner_count=0, inner_matches=False)
+    observations = iter([first, ready])
+    driver = SimpleNamespace(current_window_handle='editor', window_handles=['editor'],
+                             current_url='https://hub.remax.co.za/app/listings/edit/123456/particulars',
+                             refresh=lambda: None, find_elements=lambda *args: [object()],
+                             switch_to=SimpleNamespace(window=lambda handle: None))
+    hub = SimpleNamespace(driver=driver, editor_bindings={'RXCU12345': {'handle':'editor','listing_id':'123456'}},
+        _read_editor_identity=lambda *args: next(observations), _verified_editor_identity=lambda value: value)
+    accepted = []
+    def capture_reader(*args, **kwargs):
+        assert kwargs['include_media_captions'] is captions
+        assert kwargs['include_room_options'] and kwargs['include_general_features']
+        return SimpleNamespace(capture=lambda: accepted.append(True) or {'stop_reason': None})
+    monkeypatch.setattr(module, 'MatchedHubCapture', capture_reader)
+    monkeypatch.setattr(module.time, 'sleep', lambda value: None)
+    provider = module.HubRelistUI(hub, tmp_path, clipboard=lambda *args: None)
+    if conflict:
+        with pytest.raises(CopyStopped, match='does not match'):
+            provider.captured_editor('RXCU12345', include_media_captions=captions)
+        assert accepted == []
+    else:
+        assert provider.captured_editor('RXCU12345', include_media_captions=captions) == {'stop_reason': None}
+        assert accepted == [True]
+
+
+def test_error_diagnostic_excludes_exception_message_and_values(tmp_path):
+    import json
+    class Subject:
+        media_root = tmp_path / 'media'
+        @module.diagnosed
+        def prepare(self, value):
+            raise ValueError('SYNTHETIC_PRIVATE_MESSAGE ' + value)
+    with pytest.raises(ValueError):
+        Subject().prepare('SYNTHETIC_PRIVATE_VALUE')
+    paths = list((tmp_path / 'diagnostics').glob('error-*.json'))
+    assert len(paths) == 1
+    encoded = paths[0].read_text()
+    assert 'SYNTHETIC_PRIVATE' not in encoded
+    record = json.loads(encoded)
+    assert record['stage'] == 'prepare' and record['exception_type'] == 'ValueError'
+    assert record['frames'][-1]['function'] == 'prepare'
+
+
+def test_browser_message_stops_once_without_exposing_private_alert_text(tmp_path):
+    from selenium.common.exceptions import UnexpectedAlertPresentException
+    calls = []
+    class Subject:
+        media_root = tmp_path / 'media'
+        @module.diagnosed
+        def create(self):
+            calls.append('save')
+            raise UnexpectedAlertPresentException('SYNTHETIC_PRIVATE_MESSAGE',
+                                                   alert_text='SYNTHETIC_PRIVATE_ALERT')
+    with pytest.raises(CopyStopped, match='Read it in Chrome') as caught:
+        Subject().create()
+    assert calls == ['save']
+    assert 'SYNTHETIC_PRIVATE' not in str(caught.value)
+    records = list((tmp_path / 'diagnostics').glob('error-*.json'))
+    assert len(records) == 1 and 'SYNTHETIC_PRIVATE' not in records[0].read_text()
+
+
+@pytest.mark.parametrize('conflict',[False,True])
+def test_upload_identity_waits_for_absent_headings_but_rejects_conflicts(tmp_path,monkeypatch,conflict):
+    ready={'outer_count':1,'inner_count':1,'outer_matches':True,'inner_matches':True}
+    first=dict(ready,inner_matches=False) if conflict else dict(ready,inner_count=0,inner_matches=False)
+    observations=iter([first,ready])
+    def temporarily_missing(*args):raise ValueError('headings refreshing')
+    hub=SimpleNamespace(driver=SimpleNamespace(current_window_handle='target'),
+        verify_editor_reference=temporarily_missing,_read_editor_identity=lambda *args:next(observations),
+        _verified_editor_identity=lambda state:True)
+    provider=module.HubRelistUI(hub,tmp_path,clipboard=lambda *args:None)
+    provider.current={'handle':'target','reference':'RXCU2000','listing_id':'654321'}
+    monkeypatch.setattr(module.time,'sleep',lambda *args:None)
+    if conflict:
+        with pytest.raises(CopyStopped,match='identity changed'):provider.guard()
+    else:provider.guard()
+
+
+def test_description_formatting_repair_rejects_word_or_other_field_changes():
+    expected={'brochure_description':'Reviewed summary','description_text':'**Room** with balcony.',
+              'description_html':'<p>**Room**<br>with balcony.</p>'}
+    actual={**expected,'description_text':'Room with balcony.','description_html':'<p><strong>Room</strong> with balcony.</p>'}
+    assert module.only_description_formatting_changed(expected, actual)
+    assert not module.only_description_formatting_changed(expected, {**actual,'description_text':'Room without balcony.'})
+    assert not module.only_description_formatting_changed(expected, {**actual,'brochure_description':'Different wording'})
+
+
+def test_literal_heading_paste_preserves_closing_marks_and_all_line_breaks():
+    source='<p>**Synthetic heading**<br><br>Original body.</p>'
+    html,prefix=module.description_clipboard_html(source)
+    assert html=='<p>Synthetic heading**<br><br>Original body.</p>' and prefix=='**'
+    assert module.description_clipboard_html('<p><strong>Heading</strong><br>Body</p>') == ('<p><strong>Heading</strong><br>Body</p>','')
+
+
+@pytest.mark.parametrize('html,text,matching', [
+    ('<p><strong>Heading</strong></p><p>Original<br>body.</p>', 'Heading Original body.', True),
+    ('<p>Heading</p><p>Original<br>body.</p>', 'Heading Original body.', False),
+    ('<p><strong>Heading</strong></p><p>Original body.</p>', 'Heading Original body.', False),
+    ('<p><strong>Heading</strong><br>Original<br>body.</p>', 'Heading Original body.', False),
+    ('<p><strong>Heading</strong></p><p>Changed<br>body.</p>', 'Heading Changed body.', False),
+])
+def test_media_comparison_accepts_only_inert_span_removal(html, text, matching):
+    from copy import deepcopy
+    from quick_relist.relist_plan import media_plan
+    fields = [{'name': key, 'value': ''} for key in ('virtualtour_url','videotour_url',
+        'p24_youtube_video_id','matterport_video_id','eyespy360_url','marketing_header')]
+    fields.append({'label':'Brochure Description','value':'Original summary'})
+    source = {'fields':fields, 'rich_text':[{'observed_description_label':True,
+        'sanitized_html':'<p><span><strong>Heading</strong></span></p><p><span>Original<br>body.</span></p>',
+        'text':'Heading Original body.'}]}
+    before = deepcopy(source)
+    actual = deepcopy(source)
+    actual['rich_text'][0].update(sanitized_html=html, text=text)
+    assert (media_plan(source) == media_plan(actual)) is matching
+    assert source == before  # Original captured markup stays immutable.
+    actual['fields'][-1]['value'] = 'Different summary'
+    assert media_plan(source) != media_plan(actual)
+
+
+@pytest.mark.parametrize('mode,reason', [('rent','Listing has been withdrawn'),('sale','Listing has been cancelled')])
+def test_archive_uses_type_specific_reason_and_accepts_success_redirect(tmp_path, mode, reason):
+    events=[]
+    radio=SimpleNamespace(send_keys=lambda *keys:events.append('selected'),is_selected=lambda:True)
+    label=SimpleNamespace(get_attribute=lambda name:reason,find_elements=lambda *args:[radio])
+    toast=SimpleNamespace(get_attribute=lambda name:'Listing archived successfully!')
+    driver=SimpleNamespace(current_window_handle='source',current_url='')
+    driver.get=lambda url:setattr(driver,'current_url',url)
+    def find(by,selector):
+        return {'main input[type="radio"]':[radio], 'main label':[label],
+                'main [role="combobox"]':[], '[role="status"],[role="alert"],[data-sonner-toast]':[toast]}[selector]
+    driver.find_elements=find
+    provider=module.HubRelistUI(SimpleNamespace(driver=driver),tmp_path,clipboard=lambda *args:None)
+    provider.select_expired_reason=lambda guard:events.append('mandate expired')
+    def submit(text):
+        events.append(text)
+        driver.current_url='https://hub.remax.co.za/app/listings'
+    provider.button=submit
+    result=provider.archive({'source_listing_id':'123456','particulars':{'mode':mode}})
+    assert result['archived'] is True and result['reason']==reason
+    assert events==(['selected','Archive Listing'] if mode=='rent' else ['selected','mandate expired','Archive Listing'])
+
+
+@pytest.mark.parametrize('wrong_id', [False, True])
+def test_final_read_opens_exact_replacement_once_without_another_refresh(tmp_path, monkeypatch, wrong_id):
+    calls = []
+    reference = 'RXCU12345'
+    identity = {'outer_count':1, 'inner_count':1, 'outer_matches':True, 'inner_matches':True}
+    binding = {'listing_id':'654321' if wrong_id else '123456', 'handle':'new'}
+    driver = SimpleNamespace(find_elements=lambda *args: [object()],
+                             refresh=lambda: pytest.fail('Fresh result was already opened'))
+    hub = SimpleNamespace(driver=driver, editor_bindings={reference:{'listing_id':'123456', 'handle':'old'}},
+                          search_reference=lambda *a, **kw: calls.append('search'),
+                          _read_editor_identity=lambda *a:identity, _verified_editor_identity=lambda value:value)
+    def opened(ref, *, timeout):
+        assert ref == reference
+        calls.append('open')
+        hub.editor_bindings[ref] = binding
+    hub.open_listing_editor = opened
+    monkeypatch.setattr(module, '_wait_search', lambda *a: None)
+    monkeypatch.setattr(module, 'MatchedHubCapture', lambda *a, **kw:
+        SimpleNamespace(capture=lambda: calls.append('capture') or {'stop_reason':None}))
+    ui = module.HubRelistUI(hub, tmp_path, clipboard=None)
+    def read():
+        return ui.captured_editor(reference, open_from_results=True, expected_listing_id='123456')
+    if wrong_id:
+        with pytest.raises(CopyStopped, match='different Hub listing'):
+            read()
+        assert calls == ['search','open']
+    else:
+        assert read() == {'stop_reason':None}
+        assert calls == ['search','open','capture']
+
+
+@pytest.mark.parametrize('rental', [False, True])
+def test_completed_copy_recovery_goes_straight_to_independent_verification(tmp_path, monkeypatch, rental):
+    from unittest.mock import Mock
+    target = {'reference':'RXCU2000','listing_id':'123','handle':'new'}
+    binding = {'listing_id':'123','handle':'new'}
+    driver = Mock()
+    driver.find_elements.side_effect = lambda by, css: [object()] * (2 if 'main img' in css else 1)
+    hub = SimpleNamespace(driver=driver, editor_bindings={'RXCU2000':binding},
+                          search_reference=Mock(), open_listing_editor=Mock())
+    ui = module.HubRelistUI(hub, tmp_path, clipboard=None)
+    ui.guard, ui.tab = Mock(), Mock()
+    monkeypatch.setattr(module, '_wait_search', lambda *args:None)
+    monkeypatch.setattr(module, 'read_portals', lambda *a, **kw:{'published':False,'portals':{'pp':{'state':'unpublished'}}})
+    monkeypatch.setattr(module, 'PartialHubCapture', lambda d:SimpleNamespace(
+        capture_current_page=lambda:{'pages':[{'media':['gallery']}]}))
+    media = {'description_html':'<p>Fixture</p>', 'description_text':'Fixture'}
+    monkeypatch.setattr(module, 'media_plan', lambda page:media)
+    monkeypatch.setattr(module, 'download_originals', lambda *a, **kw:pytest.fail('Final verification will read the gallery'))
+    plan = {'source_reference':'RXCU1000','source_listing_id':'122', 'destinations':['pp'],
+            'particulars':{'controls':[]},'media':media,'photos':[{'caption':''},{'caption':'Fixture'}],
+            'deal':None if rental else {'fields':[]}}
+    steps = {'create':target,'upload_photo_0_attempt_1':{},'upload_photo_1_attempt_1':{},
+             'copy_media_text':{'descriptions_submitted':True}, 'caption_1':{}}
+    if not rental:
+        steps['copy_commission'] = {'commission_copied':True}
+    previous = {'actions':[{'action':name,'state':'done','receipt':receipt} for name,receipt in steps.items()]}
+    result = ui.recover_copy(plan, previous, None)
+    assert result == dict(target, content_already_submitted=True)
+    assert [call.args[0] for call in ui.tab.call_args_list] == ['Portals','Media']
+    driver.refresh.assert_not_called()

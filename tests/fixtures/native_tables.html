@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Synthetic native table observations only</title>
+<main>
+  <section>
+    <h1>Portals, synthetic layout only</h1>
+    <table>
+      <caption>Synthetic irregular portal layout, no verified outcomes</caption>
+      <thead><tr>
+        <th scope="col">Listing Detail</th><th scope="col">Publish to website</th>
+        <th scope="col">Property 24</th><th scope="col">Private Property</th>
+        <th scope="col">RE/MAX Global</th><th scope="col">IOL Property</th>
+        <th scope="col">ImmoAfrica</th><th scope="col">Flow Living</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>Property Type</td><td>Synthetic A</td><td>Synthetic B</td><td>Synthetic C</td><td>Synthetic D</td><td>Synthetic E</td><td>Synthetic F</td><td>Synthetic G</td></tr>
+        <tr><td>Expiry date</td><td>Synthetic date A</td><td>Synthetic date B</td><td>Synthetic date C</td><td>Synthetic date D</td></tr>
+        <tr><td><div>Is published? <div class="MuiChip-root"><span class="MuiChip-label">Synthetic chip text</span></div></div></td></tr>
+        <tr><td><button type="button">Publish to all portals</button><button type="button">Remove from all portals</button></td>
+          <td><button type="button">Publish to website</button></td><td><button type="button">Republish to Property 24</button></td>
+          <td><button type="button">Unpublish from Private Property</button></td><td><button type="button">Publish to RE/MAX Global</button></td>
+          <td><button type="button">Publish to IOL Property</button></td><td><button type="button">Publish to ImmoAfrica</button></td><td><button type="button">Publish to Flow Living</button></td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h2>Synthetic commission</h2>
+    <table>
+      <thead><tr><th id="agent" scope="col">Agent</th><th id="split" scope="col">Deal Commission Split %</th><th id="action" scope="col">Action</th></tr></thead>
+      <tbody><tr><td headers="agent">Synthetic agent A</td><td headers="split">Synthetic split</td><td headers="action"><button type="button" disabled>Edit synthetic agent</button></td></tr></tbody>
+    </table>
+  </section>
+  <section>
+    <h2>Synthetic spans and nested tables</h2>
+    <table>
+      <thead><tr><th id="group" colspan="2" scope="colgroup">Synthetic group</th><th id="tail" scope="col">Synthetic end</th></tr></thead>
+      <tbody>
+        <tr><th id="row-label" rowspan="0" scope="row">Synthetic row group</th><td headers="group row-label" colspan="2">Outer cell text
+          <table><caption>Nested synthetic table</caption><thead><tr><th id="nested-header" scope="col">Nested column</th></tr></thead>
+            <tbody><tr><td headers="nested-header">Nested cell text <button type="button">Nested action</button><div class="MuiChip-root"><span class="MuiChip-label">Nested chip</span></div></td></tr></tbody>
+          </table>
+        </td></tr>
+        <tr><td headers="missing-header nested-header hidden-header">Unresolved relationship
+          <input type="hidden" name="unrelated_hidden" value="SYNTHETIC_DO_NOT_CAPTURE_HIDDEN">
+          <input type="password" value="SYNTHETIC_DO_NOT_CAPTURE_PASSWORD">
+          <div aria-label="Access token"><button>SYNTHETIC_DO_NOT_CAPTURE_ACTION</button><div class="MuiChip-root">SYNTHETIC_DO_NOT_CAPTURE_CHIP</div></div>
+          <span hidden>SYNTHETIC_DO_NOT_CAPTURE_TEXT</span>
+          <button type="button">Open https://example.invalid/path?token=SYNTHETIC_DO_NOT_CAPTURE_QUERY</button>
+        </td><td rowspan="-2" colspan="bogus">Invalid synthetic span attributes</td></tr>
+        <tr hidden><th id="hidden-header">SYNTHETIC_DO_NOT_CAPTURE_HEADER</th><td>SYNTHETIC_DO_NOT_CAPTURE_ROW</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
