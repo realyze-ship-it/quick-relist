@@ -1,5 +1,14 @@
 import pytest
-from quick_relist.hub_readonly import ReadOnlyHub
+from quick_relist.hub_readonly import IDENTITY_SCRIPT, PHOTO_PACK_POSITION, ReadOnlyHub
+
+
+def photo_pack_script(driver, script, *args):
+    if script == PHOTO_PACK_POSITION:
+        button, url, center = args
+        assert button is driver.button and url == driver.current_url and type(center) is bool
+        return 'clear'
+    assert script == IDENTITY_SCRIPT
+    return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
 
 
 class Driver:
@@ -158,8 +167,7 @@ def test_photo_pack_download_is_single_click_private_and_partial(tmp_path, butto
         def __init__(self):
             super().__init__("https://hub.remax.co.za/app/listings/edit/123/media")
             self.button = Button(self)
-        def execute_script(self, script, ref):
-            return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
+        execute_script = photo_pack_script
         def find_elements(self, by, name): return [self.button]
         def execute_cdp_cmd(self, method, settings):
             if method == "Target.getTargetInfo":
@@ -178,9 +186,18 @@ def test_photo_pack_download_is_single_click_private_and_partial(tmp_path, butto
         assert __import__("pathlib").Path(result["directory"]).stat().st_mode & 0o077 == 0
 
 
-def test_photo_pack_uncertain_click_is_never_retried(tmp_path):
+@pytest.mark.parametrize('mode', ['covered', 'intercepted', 'intercepted_with_file',
+                                  'intercepted_with_event', 'timeout'])
+def test_photo_pack_stops_without_duplicate_request(tmp_path, monkeypatch, mode):
     pytest.importorskip("selenium")
-    from quick_relist.hub_readonly import DownloadOutcomeUnknown
+    from pathlib import Path
+    from selenium.common.exceptions import ElementClickInterceptedException
+    from quick_relist.downloads import MARKER_NAME
+    from quick_relist.hub_readonly import DownloadOutcomeUnknown, PhotoPackButtonBlocked
+    from quick_relist.photo_downloads import PhotoDownloadEvents
+    root = tmp_path / 'downloads'
+    if mode == 'intercepted_with_event':
+        monkeypatch.setattr(PhotoDownloadEvents, 'saw_no_download', property(lambda self: False))
     class Button:
         text = "Download photo pack"
         clicks = 0
@@ -189,23 +206,33 @@ def test_photo_pack_uncertain_click_is_never_retried(tmp_path):
         def get_attribute(self, key): return "button" if key == "type" else None
         def click(self):
             self.clicks += 1
+            if mode == 'intercepted_with_file':
+                (driver.folder / 'pending.crdownload').write_bytes(b'partial')
+            if mode.startswith('intercepted'):
+                raise ElementClickInterceptedException()
             raise RuntimeError("synthetic timeout after click")
     class DownloadDriver(Driver):
         def __init__(self):
             super().__init__("https://hub.remax.co.za/app/listings/edit/123/media")
             self.button = Button()
-        def execute_script(self, script, ref): return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
+        def execute_script(self, script, *args):
+            if script == PHOTO_PACK_POSITION and mode == 'covered':
+                return 'covered'
+            return photo_pack_script(self, script, *args)
         def find_elements(self, by, name): return [self.button]
         def execute_cdp_cmd(self, method, settings):
             if method == "Target.getTargetInfo":
                 return {"targetInfo": {"targetId": self.current_window_handle, "type": "page", "browserContextId": "synthetic-context"}}
+            self.folder = Path(settings['downloadPath'])
     driver = DownloadDriver()
     hub = ReadOnlyHub(driver)
     hub.editor_bindings["RXCU12345"] = {"listing_id": "123", "handle": "one"}
-    with pytest.raises(DownloadOutcomeUnknown) as caught:
-        hub.download_photo_pack("RXCU12345", "123", tmp_path / "downloads", timeout=.1, poll_interval=.01)
-    assert driver.button.clicks == 1
-    assert __import__("pathlib").Path(caught.value.directory).is_dir()
+    blocked = mode in {'covered', 'intercepted'}
+    with pytest.raises(PhotoPackButtonBlocked if blocked else DownloadOutcomeUnknown):
+        hub.download_photo_pack("RXCU12345", "123", root, timeout=.1, poll_interval=.01)
+    assert driver.button.clicks == (0 if mode == 'covered' else 1)
+    assert (root / MARKER_NAME).exists() is (not blocked)
+    assert (driver.folder / 'click-not-sent.json').exists() is (mode == 'intercepted')
 
 
 def test_opens_only_the_exact_result_editor_and_verifies_reference():
@@ -323,7 +350,7 @@ def test_incomplete_download_is_preserved_and_not_retried(tmp_path):
         def __init__(self):
             super().__init__("https://hub.remax.co.za/app/listings/edit/123/media")
             self.button = Button(self)
-        def execute_script(self, script, ref): return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
+        execute_script = photo_pack_script
         def find_elements(self, by, name): return [self.button]
         def execute_cdp_cmd(self, method, settings):
             if method == "Target.getTargetInfo":
@@ -447,7 +474,7 @@ def test_completed_guid_download_is_assigned_only_with_matching_event_evidence(t
         def __init__(self):
             super().__init__("https://hub.remax.co.za/app/listings/edit/123/media")
             self.button = Button(self)
-        def execute_script(self, *args): return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
+        execute_script = photo_pack_script
         def find_elements(self, *args): return [self.button]
     class Events:
         supported = True

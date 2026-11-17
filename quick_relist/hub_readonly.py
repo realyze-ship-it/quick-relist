@@ -53,6 +53,49 @@ class EditorNavigationInProgress(ValueError):
     """The same listing changed editor sections during an identity read."""
 
 
+PHOTO_PACK_POSITION = """
+const [button, url, center] = arguments;
+if (location.href !== url || !button.isConnected || button.type !== 'button' ||
+    button.disabled || button.getAttribute('aria-disabled') === 'true' ||
+    button.innerText.trim().replace(/\\s+/g, ' ').toLowerCase() !== 'download photo pack')
+    return 'changed';
+if (center) button.scrollIntoView({behavior:'instant', block:'center', inline:'center'});
+const rect = button.getClientRects()[0];
+if (!rect) return 'covered';
+const left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
+const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
+if (left >= right || top >= bottom) return 'covered';
+const hit = document.elementFromPoint(Math.floor((left+right)/2), Math.floor((top+bottom)/2));
+return hit && button.contains(hit) && hit.closest('button,a,input,select,textarea') === button
+    ? 'clear' : 'covered';
+"""
+
+
+class PhotoPackButtonBlocked(RuntimeError):
+    def __init__(self, message="Chrome could not reach Download photo pack on Hub's Media page. "
+                               "Close any panel covering that button, then resume the saved batch."):
+        super().__init__(message)
+
+
+def _position_photo_pack_button(driver, button, url, timeout, interval):
+    from selenium.common.exceptions import StaleElementReferenceException
+    deadline = time.monotonic() + min(timeout, 4.0)
+    center = True
+    while True:
+        try:
+            state = driver.execute_script(PHOTO_PACK_POSITION, button, url, center)
+        except StaleElementReferenceException:
+            state = 'changed'
+        if state == 'clear':
+            return
+        if state == 'changed':
+            raise PhotoPackButtonBlocked("Hub's Media page changed before the photo-pack request. "
+                                         "Return to the selected listing and resume the saved batch.")
+        if state != 'covered' or time.monotonic() >= deadline:
+            raise PhotoPackButtonBlocked()
+        center = False
+        time.sleep(min(interval, .2))
+
 
 IDENTITY_SCRIPT = r"""
 const wanted = arguments[0].toUpperCase();
@@ -817,6 +860,7 @@ class ReadOnlyHub:
                         self.driver.execute_cdp_cmd("Browser.setDownloadBehavior", settings)
                     except Exception:
                         raise RuntimeError("The browser could not prepare a private download folder; no click was made") from None
+                _position_photo_pack_button(self.driver, buttons[0], url, timeout, poll_interval)
                 self.verify_editor_reference(reference, expected_listing_id)
                 if (self.driver.current_window_handle != handle or tuple(sorted(self.driver.window_handles)) != handles
                         or self.driver.current_url != url):
@@ -835,8 +879,16 @@ class ReadOnlyHub:
                     raise RuntimeError("The download could not be recorded safely; no click was made") from None
                 if events.supported and not events.arm():
                     raise RuntimeError("The browser download state changed before the request. No click was made; review the download folder.")
+                from selenium.common.exceptions import ElementClickInterceptedException
                 try:
                     buttons[0].click()  # Exactly once; never retry an uncertain click.
+                except ElementClickInterceptedException:
+                    # WebDriver rejected the click before dispatch. Preserve the intent
+                    # separately only if this is still the same empty, quiet attempt.
+                    from .downloads import retire_blocked_photo_click
+                    if events.saw_no_download and retire_blocked_photo_click(root, directory):
+                        raise PhotoPackButtonBlocked() from None
+                    raise DownloadOutcomeUnknown(directory) from None
                 except Exception:
                     raise DownloadOutcomeUnknown(directory) from None
                 result = self._wait_photo_pack(directory, reference, expected_listing_id, handle, handles, url,

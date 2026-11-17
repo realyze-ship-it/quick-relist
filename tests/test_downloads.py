@@ -276,7 +276,12 @@ def test_new_attempt_after_review_uses_new_folder_and_keeps_previous_files(tmp_p
         current_window_handle = "synthetic"
         window_handles = ["synthetic"]
         def __init__(self): self.button = Button(self)
-        def execute_script(self, *args): return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
+        def execute_script(self, script, *args):
+            from quick_relist.hub_readonly import PHOTO_PACK_POSITION
+            if script == PHOTO_PACK_POSITION:
+                assert args[0] is self.button
+                return 'clear'
+            return {"outer_count": 1, "inner_count": 1, "outer_matches": True, "inner_matches": True}
         def find_elements(self, *args): return [self.button]
         def execute_cdp_cmd(self, method, params):
             if method == "Target.getTargetInfo":

@@ -187,6 +187,12 @@ class PhotoDownloadEvents:
             except Exception:
                 self.failed = True
 
+    @property
+    def saw_no_download(self):
+        """No begin, completion or ambiguous event observed for this attempt."""
+        with self._lock:
+            return self._guid is None and not self.failed
+
     def poll(self):
         """Return completion only while all observed evidence remains consistent."""
         with self._lock:

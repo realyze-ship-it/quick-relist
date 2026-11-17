@@ -232,6 +232,18 @@ def _sync_directory(root):
             os.close(descriptor)
 
 
+def retire_blocked_photo_click(root, directory):
+    """Caller holds the download lock and has proved the native click was rejected."""
+    from .media import _publish_no_replace
+    current = _read_review(root)
+    if Path(current['directory']) != directory or current['files']:
+        return False
+    _publish_no_replace(root / MARKER_NAME, directory / 'click-not-sent.json')
+    _sync_directory(directory)
+    _sync_directory(root)
+    return True
+
+
 def finish_verified_download(download_root, download, verified_media):
     """Retire one completed, event-matched and byte-checked download attempt.
 

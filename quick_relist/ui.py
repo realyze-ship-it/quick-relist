@@ -2123,6 +2123,7 @@ class MainWindow(QMainWindow):
         from .original_media import OriginalMediaError
         from .downloads import DownloadReviewError
         from .hub_login import LoginStopped
+        from .hub_readonly import DownloadOutcomeUnknown, PhotoPackButtonBlocked, PreviousDownloadExists
         from .run_store import RunNeedsReview
         stop = threading.Event()
         jobs = [deepcopy(self.jobs[i]) for i in self._collection_rows]
@@ -2142,7 +2143,11 @@ class MainWindow(QMainWindow):
                         return collect_batch(self.hub, self.drafts, queued, self.media_root, after_collection=runner.archive_collected,
                                              cancelled=stop.is_set, progress=self.collection_progress.emit)
                 return collect_batch(self.hub, self.drafts, jobs, self.media_root, cancelled=stop.is_set, progress=self.collection_progress.emit)
-            except (CollectionStopped, CopyStopped, CaptureError, OriginalMediaError, DownloadReviewError, LoginStopped, RunNeedsReview):
+            except (PreviousDownloadExists, DownloadOutcomeUnknown):
+                raise CollectionStopped("A photo-pack download needs review. In Connection & safety, choose "
+                                        "Review previous photo-pack attempt, then resume this saved batch.") from None
+            except (CollectionStopped, CopyStopped, CaptureError, OriginalMediaError, DownloadReviewError,
+                    PhotoPackButtonBlocked, LoginStopped, RunNeedsReview):
                 raise
             except Exception as exc:
                 from .diagnostics import record_error
@@ -2305,7 +2310,7 @@ class MainWindow(QMainWindow):
             return
 
         def request_download():
-            from .hub_readonly import DownloadOutcomeUnknown, PreviousDownloadExists
+            from .hub_readonly import DownloadOutcomeUnknown, PhotoPackButtonBlocked, PreviousDownloadExists
             try:
                 result = self.hub.download_photo_pack(reference, binding["listing_id"], self.media_root.parent / "downloads")
                 evidence = result.get("download_evidence", {})
@@ -2327,6 +2332,8 @@ class MainWindow(QMainWindow):
                 raise RuntimeError(f"A previous download needs review before another attempt. Check this local folder: {exc.directory}") from None
             except DownloadOutcomeUnknown as exc:
                 raise RuntimeError(f"The download outcome is uncertain. Check this local folder before retrying: {exc.directory}") from None
+            except PhotoPackButtonBlocked:
+                raise
             except Exception:
                 raise RuntimeError("The photo-pack download could not be confirmed. Check the editor and browser before retrying. No listing was changed.") from None
 
