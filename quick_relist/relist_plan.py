@@ -13,6 +13,39 @@ RELATED = {
     ('Document type','Description','File name','Date added','Uploaded by','Action'): 'No documents saved.',
     ('Note','User','Type','Date','Action'): 'No listing notes saved',
 }
+RELATED_NAMES = dict(zip(RELATED, ('custom features', 'listing parties', 'documents', 'notes')))
+
+
+def _empty_viewing_arrangements(table):
+    """Recognize only the observed, action-free Hub notes empty state.
+
+    Do not interpret arbitrary 'No ...' text as absence of business records.
+    Older captures without structural evidence must still stop for review.
+    """
+    expected = [['Note', 'User', 'Type', 'Date', 'Action'],
+                ['No viewing arrangements', '', '', '', '']]
+    if table.get('rows') != expected:
+        return False
+    structure = table.get('structure', {})
+    if (structure.get('schema_version') != 'table-dom/v1'
+            or structure.get('status') != 'observed_native'
+            or structure.get('tag') != 'table'):
+        return False
+    rows = structure.get('rows', [])
+    if len(rows) != 2:
+        return False
+    for index, row in enumerate(rows):
+        cells = row.get('cells', [])
+        if (row.get('row_group_tag') != ('thead' if index == 0 else 'tbody')
+                or len(cells) != 5
+                or [c.get('text') for c in cells] != expected[index]):
+            return False
+        if any(c.get('tag') != ('th' if index == 0 else 'td')
+               or c.get('actions') != [] or c.get('chips') != []
+               or c.get('colspan_property') != 1 or c.get('rowspan_property') != 1
+               for c in cells):
+            return False
+    return True
 
 
 def commission_plan_check(page, agents):
@@ -38,7 +71,10 @@ def require_empty_related(details):
             raise CopyStopped('Refresh the listing to check custom features, parties, documents and notes.')
         body = matches[0]['rows'][1:]
         if len(body) != 1 or [v.strip() for v in body[0] if v.strip()] != [empty]:
-            raise CopyStopped('This listing has related records that need a copy handler. The original will stay active.')
+            if header == ('Note','User','Type','Date','Action') and _empty_viewing_arrangements(matches[0]):
+                continue
+            raise CopyStopped('The ' + RELATED_NAMES[header] + ' table contains records or an unrecognized empty state. '
+                              'A verified copy handler or empty-state check is required. The original will stay active.')
 
 
 def media_plan(page):

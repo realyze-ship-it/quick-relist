@@ -80,9 +80,9 @@ def test_operator_review_resumes_only_exact_saved_original_bytes(tmp_path, monke
     import hashlib, json
     from quick_relist.downloads import MARKER_NAME, inspect_download, finish_download_review
     root = tmp_path / 'downloads'
-    root.mkdir()
+    root.mkdir(mode=0o700)
     directory = root / ('download-' + '1' * 32)
-    directory.mkdir()
+    directory.mkdir(mode=0o700)
     archive = b'synthetic original archive'
     (directory / 'photos.zip').write_bytes(archive)
     marker = {'version': 1, 'state': 'attempted', 'directory': directory.name}
