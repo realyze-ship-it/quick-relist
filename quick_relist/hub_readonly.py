@@ -610,6 +610,10 @@ class ReadOnlyHub:
             time.sleep(poll_interval)
         raise RuntimeError("The editor is still unverified. Leave its tabs and results unchanged, then use Recheck opened editor (read only) for this selected job.")
 
+    def has_unresolved_editor_opening(self):
+        """Session-wide in-memory check; never inspect tabs or resolve an intent."""
+        return self._pending_editor is not None
+
     def editor_open_state(self, rxcu=None):
         """In-memory UI eligibility only; browser checks run in the worker.
 

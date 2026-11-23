@@ -45,7 +45,7 @@ def test_user_stop_does_not_begin_another_listing(monkeypatch):
     assert calls == ['0']
 
 
-def test_archive_follows_each_completed_photo_backup_in_order(monkeypatch):
+def test_incomplete_later_backup_prevents_every_archive(monkeypatch):
     drafts = DraftStore(':memory:')
     drafts.save_capture('0', {'schema_version':'hub-collected-listing/v1','complete':False})
     events = []
@@ -57,7 +57,7 @@ def test_archive_follows_each_completed_photo_backup_in_order(monkeypatch):
     monkeypatch.setattr(collection,'collect_listing',collect)
     with pytest.raises(collection.CollectionStopped, match='Review the completed download'):
         collection.collect_batch(None,drafts,jobs(),None,after_collection=archive)
-    assert events == [('archive','0',False),('collect','1'),('archive','1',True),('collect','2')]
+    assert events == [('collect','1'),('collect','2')]
 
 
 def test_resuming_does_not_skip_an_unresolved_download(monkeypatch):
@@ -152,3 +152,64 @@ def test_media_backup_matches_pack_and_rechecks_order_before_leaving_media(monke
         assert [m['caption'] for m in verified['media_manifest']] == ['caption 0','caption 1']
         assert store.get_capture(media_id)['capture']['source_bytes_verified'] is True
         assert attributed is False
+
+
+@pytest.mark.parametrize('failure', ['none', 'collect', 'preflight', 'cancel'])
+def test_batch_barrier_finishes_all_read_only_work_before_archive(monkeypatch, failure):
+    drafts = DraftStore(':memory:')
+    events = []
+    def collect(hub, store, job, root, **kwargs):
+        events.append(('collect', job['id']))
+        if failure == 'collect' and job['id'] == '2':
+            raise collection.CollectionStopped('Synthetic tab identity conflict')
+        return {'capture': {'id': job['id']}}
+    def preflight(job, data, **kwargs):
+        events.append(('preflight', job['id']))
+        if failure == 'preflight' and job['id'] == '2':
+            raise collection.CollectionStopped('Synthetic unsupported related record')
+    def archive(job, data, *, freshly_collected):
+        assert freshly_collected is False
+        events.append(('archive', job['id']))
+    monkeypatch.setattr(collection, 'collect_listing', collect)
+    def run():
+        return collection.collect_batch(None, drafts, jobs(), None,
+            preflight_collection=preflight, after_collection=archive,
+            cancelled=lambda: failure == 'cancel' and ('preflight', '1') in events)
+    if failure in ('collect', 'preflight'):
+        with pytest.raises(collection.CollectionStopped): run()
+    else:
+        run()
+    if failure == 'none':
+        assert events == [(phase, str(i)) for phase in ('collect','preflight','archive') for i in range(3)]
+    else:
+        assert not any(phase == 'archive' for phase, _ in events)
+
+
+def test_saved_and_skipped_rows_preserve_barrier_order(monkeypatch):
+    drafts = DraftStore(':memory:')
+    drafts.save_capture('0', {'schema_version':'hub-collected-listing/v1','complete':False})
+    events = []
+    rows = jobs()
+    rows[1]['state'] = 'complete'
+    monkeypatch.setattr(collection, 'collect_listing', lambda h,d,j,r,**kw:
+        events.append(('collect',j['id'])) or {'capture':{}})
+    collection.collect_batch(None,drafts,rows,None,
+        preflight_collection=lambda j,c,**kw:events.append(('check',j['id'],kw['freshly_collected'])),
+        after_collection=lambda j,c,**kw:events.append(('archive',j['id'],kw['freshly_collected'])))
+    assert events == [('collect','2'),('check','0',False),('check','2',True),('archive','0',False),('archive','2',False)]
+
+
+@pytest.mark.parametrize('cancel_at', ['all_captured','first_archive'])
+def test_stop_between_phases_or_archive_rows_never_advances(monkeypatch,cancel_at):
+    drafts=DraftStore(':memory:')
+    events=[]
+    def collect(h,d,j,r,**kw):
+        events.append(('collect',j['id']))
+        return {'capture':{}}
+    def archive(j,c,**kw): events.append(('archive',j['id']))
+    def cancelled():
+        return (('collect','2') in events if cancel_at=='all_captured' else ('archive','0') in events)
+    monkeypatch.setattr(collection,'collect_listing',collect)
+    collection.collect_batch(None,drafts,jobs(),None,cancelled=cancelled,
+        preflight_collection=lambda j,c,**kw:events.append(('check',j['id'])),after_collection=archive)
+    assert [event for event in events if event[0]=='archive'] == ([] if cancel_at=='all_captured' else [('archive','0')])

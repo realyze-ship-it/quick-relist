@@ -63,9 +63,25 @@ def test_placeholder_id_does_not_count_as_published():
 def test_missing_final_cell_does_not_hide_confirmed_removal_or_invent_a_flow_status():
     data=raw()
     data.update(published='Is published? No', ids=['Portals IDs','','','','','','',None])
-    data['columns'][1]={'text':'Publish to RE/MAX website','buttons':[{'text':'Publish to RE/MAX website','enabled':True}]}
+    for i, (_, publish, _) in enumerate(PORTALS.values(), 1):
+        data['columns'][i]={'text':publish,'buttons':[{'text':publish,'enabled':True}]}
     state=normalize_portals(data)
     assert not state['published']
     assert all(state['portals'][d]['state']=='unpublished' for d in ('website','p24','pp','global'))
     assert state['portals']['flow']['state']=='unknown'
     assert state['portals']['website']['can_publish']
+
+
+def test_offline_website_omits_its_id_cell_while_external_portals_remain_live():
+    data = raw()
+    data['published'] = 'Is published? No'
+    del data['ids'][1]
+    data['idHosts'] = ['', 'www.property24.com', 'www.privateproperty.co.za', 'global.remax.com', '', '', '']
+    data['columns'][1] = {'text':'Publish to RE/MAX website', 'buttons':[{'text':'Publish to RE/MAX website','enabled':True}]}
+    state = normalize_portals(data)
+    assert not state['published'] and state['portals']['website']['state'] == 'unpublished'
+    assert [state['portals'][k]['id'] for k in ('p24','pp','global')] == ['7654321','T123456','12345-6']
+    assert all(state['portals'][k]['state'] == 'published' for k in ('p24','pp','global'))
+    data['idHosts'][1] = 'global.remax.com'
+    with pytest.raises(CopyStopped, match='ID link'):
+        normalize_portals(data)

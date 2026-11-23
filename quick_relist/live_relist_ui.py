@@ -17,9 +17,18 @@ from .core import normalize_rxcu
 from .form_copy import CopyStopped, ParticularsFiller, particulars_plan
 from .matched_capture import MatchedHubCapture
 from .original_media import download_originals, download_appended_photo, observed_originals
-from .portal_ui import PORTALS, read_portals, active_destinations, only_moderation_pending
+from .portal_ui import (PORTALS, TWO_STEP_UNPUBLISH, active_destinations, matches_unpublish_dialog, only_moderation_pending,
+                        portal_snapshot, read_portals, remaining_destinations)
 from .relist_plan import media_plan, require_empty_related
 from .upload_review import compare_uploaded_images
+
+
+UNRESOLVED_EDITOR_RELIST_STOP = (
+    "An earlier Hub editor opening is unresolved. Quick Relist stopped before the next write. "
+    "Do not retry the opening in this session. Close only Quick Relist's dedicated Hub browser, "
+    "then reopen Quick Relist and check the same saved job. If a replacement already exists, "
+    "check that copy rather than start another one."
+)
 
 
 def diagnosed(method):
@@ -207,6 +216,12 @@ class HubRelistUI:
         self.cancelled, self.progress = cancelled, progress
         self.current = None
 
+    def require_resolved_editor_session(self):
+        # Session-wide; selecting a different job does not resolve an opening.
+        # This in-memory check never searches, resets intent, or closes a tab.
+        if self.hub.has_unresolved_editor_opening():
+            raise CopyStopped(UNRESOLVED_EDITOR_RELIST_STOP)
+
     def guard(self):
         if self.cancelled():
             raise CopyStopped('Stopped between Hub actions. Saved progress has been kept.')
@@ -252,7 +267,7 @@ class HubRelistUI:
             raise CopyStopped('A required Hub control is missing or ambiguous.')
         return found[0]
 
-    def button(self, text, root=None, *, guard=None):
+    def button(self, text, root=None, *, guard=None, before_send=None):
         from selenium.common.exceptions import StaleElementReferenceException
         from selenium.webdriver.common.keys import Keys
         validate = guard or self.guard
@@ -282,6 +297,8 @@ class HubRelistUI:
 
         button = self.wait(find_button, unavailable)
         check_page()
+        if before_send is not None:
+            before_send()
         # A keypress can reach Hub even if the browser loses its response.
         # Only the lookup above may repeat.
         button.send_keys(Keys.ENTER)
@@ -379,7 +396,8 @@ class HubRelistUI:
 
     @diagnosed
     def check_source(self, collection, plan):
-        fresh = self.captured_editor(plan['source_reference'], include_suburb_selection=True)
+        fresh = self.captured_editor(plan['source_reference'], include_suburb_selection=True,
+                                     expected_listing_id=collection['listing_id'])
         if not self._source_matches(collection, fresh):
             raise CopyStopped('The original changed after collection. Collect it again and review its address before relisting.')
         self.source = deepcopy(self.current)
@@ -389,19 +407,24 @@ class HubRelistUI:
             raise CopyStopped('The original portal destinations changed. Review the collection first.')
 
     @diagnosed
-    def check_removed_source(self, collection, plan):
-        fresh = self.captured_editor(plan['source_reference'], include_suburb_selection=True)
+    def check_removed_source(self, collection, plan, allow_partial=False):
+        fresh = self.captured_editor(plan['source_reference'], include_suburb_selection=True,
+                                     expected_listing_id=collection['listing_id'])
         if not self._source_matches(collection, fresh):
             raise CopyStopped('The original content changed after removal. Review it before continuing.')
         self.source = deepcopy(self.current)
         self.tab('Portals')
         state = read_portals(self.driver, guard=self.guard, timeout=45)
-        if state['published'] or any(state['portals'][d]['state'] != 'unpublished' for d in plan['destinations']):
+        remaining = remaining_destinations(state, plan)
+        if remaining and allow_partial:
+            return {'observed':state, 'remaining':remaining}
+        if state['published'] or remaining:
             raise CopyStopped('Hub has not confirmed removal from every original destination. No removal was repeated.')
         return {'observed':state, 'reconciled_by':'fresh_source_and_portal_read'}
 
     @diagnosed
     def prepare(self, plan):
+        self.require_resolved_editor_session()
         self.current = None
         if not plan.get('source_already_archived'):
             self.anchor_source(plan)
@@ -418,6 +441,18 @@ class HubRelistUI:
             raise CopyStopped('The collected editor changed before portal removal. Resume to recheck the saved source.')
         self.bind({'reference':reference, **binding})
         self.source = deepcopy(self.current)
+
+    def check_collected_portals(self, collection, plan):
+        """Revisit the editor for this invocation's verified capture without rereading all fields."""
+        binding = self.hub.editor_bindings.get(collection['rxcu'])
+        if not binding or binding['handle'] not in self.driver.window_handles:
+            return self.check_source(collection, plan)
+        self.driver.switch_to.window(binding['handle'])
+        self.use_collected_source(collection)
+        self.tab('Portals')
+        state = read_portals(self.driver, guard=self.guard, timeout=45)
+        if active_destinations(state) != plan['destinations'] or set(remaining_destinations(state, plan)) != set(plan['destinations']):
+            raise CopyStopped('The original portal destinations changed after collection.')
 
     def anchor_source(self, plan):
         # A discarded unsaved tab may still be WebDriver's selected context.
@@ -458,18 +493,117 @@ class HubRelistUI:
                   'Hub has not enabled Save for the reviewed form. Check its required fields.' + original_status, timeout=15)
         return {'handle':self.driver.current_window_handle,'url':self.driver.current_url}
 
+    def wait_for_portal_withdrawal(self, target, key, portal_id, record_intent):
+        selector = '[role="dialog"],[role="alertdialog"]'
+        confirmed_dialog = None
+        refresh_at = time.monotonic() + 30
+
+        def dialogs_on_source():
+            self.require_resolved_editor_session()
+            route = parse_editor_url(self.driver.current_url)
+            if (self.cancelled() or self.current != target or self.driver.current_window_handle != target['handle']
+                    or route['listing_id'] != target['listing_id'] or route['page_key'] != 'portals'):
+                raise CopyStopped('The listing or Portals tab changed during withdrawal.')
+            return [dialog for dialog in self.driver.find_elements('css selector', selector) if dialog.is_displayed()]
+
+        def poll():
+            nonlocal confirmed_dialog, refresh_at
+            dialogs = dialogs_on_source()
+            if dialogs:
+                dialog = dialogs[0]
+                if confirmed_dialog is not None:
+                    if dialogs != [confirmed_dialog]:
+                        raise CopyStopped(f'Hub opened another dialog after confirming {key}.')
+                    return False
+                def validate():
+                    if dialogs_on_source() != [dialog] or not matches_unpublish_dialog(dialog.text, key):
+                        raise CopyStopped(f'Hub is showing a different confirmation for {key}. Check the open dialog.')
+                    buttons = [b.text.strip().casefold() for b in dialog.find_elements('css selector','button') if b.is_displayed()]
+                    if sorted(buttons) != ['no', 'yes']:
+                        raise CopyStopped(f'The confirmation controls for {key} changed.')
+                validate()
+                record_intent(key, portal_id, 'prompt')
+                self.button('Yes', root=dialog, guard=validate,
+                            before_send=lambda:record_intent(key, portal_id, 'yes'))
+                confirmed_dialog = dialog
+                refresh_at = time.monotonic() + 10
+                return False
+            # A modal can mount asynchronously and hide the editor headings. Sample the table once
+            # per poll so a long status read cannot hide a newly opened confirmation.
+            state = portal_snapshot(self.driver)
+            if state and state['portals'][key]['state'] == 'unpublished':
+                self.guard()
+                return state
+            if time.monotonic() >= refresh_at and (confirmed_dialog is not None or key not in TWO_STEP_UNPUBLISH):
+                if not dialogs_on_source():
+                    self.guard()
+                    self.driver.refresh()
+                refresh_at = time.monotonic() + 10
+            return False
+
+        self.wait(poll, f'Hub has not confirmed removal from {key}. Check this portal before resuming.', timeout=120)
+
     @diagnosed
-    def unpublish(self, plan):
+    def unpublish(self, plan, record_intent=None, resuming=False):
+        self.require_resolved_editor_session()
+        if record_intent is None:
+            raise CopyStopped('A saved removal record is required before withdrawing a portal.')
+        if (self.source['reference'], self.source['listing_id']) != (plan['source_reference'], plan['source_listing_id']):
+            raise CopyStopped('The open source does not match the saved removal record.')
         self.bind(self.source)
         self.tab('Portals')
-        state = read_portals(self.driver, guard=self.guard)
-        if active_destinations(state) != plan['destinations']:
-            raise CopyStopped('The source publication status changed after preparation.')
-        self.button('Remove from all portals')
-        def removed():
+
+        def observe():
             state = read_portals(self.driver, guard=self.guard)
-            return state if not state['published'] and all(state['portals'][d]['state']=='unpublished' for d in plan['destinations']) else None
-        return {'observed':self.wait(removed, 'Hub has not confirmed removal. The source was not archived.', timeout=120)}
+            return state, remaining_destinations(state, plan)
+
+        state, remaining = observe()
+        if not resuming and (not state['published'] or set(remaining) != set(plan['destinations'])):
+            raise CopyStopped('The source publication status changed after preparation.')
+
+        # Keep the website online until the external feeds have been withdrawn.
+        for header, (key, publish, _) in sorted(PORTALS.items(), key=lambda item: item[1][0] == 'website'):
+            if key not in plan['destinations']:
+                continue
+            state, remaining = observe()
+            if key not in remaining:
+                continue
+            name = publish.removeprefix('Publish to ')
+            self.progress(f"{plan['source_reference']}: unpublishing from {name}")
+            # Scope the write to the action cell under this specific portal's heading.
+            column = list(PORTALS).index(header) + 2
+            cells = self.driver.find_elements('xpath',
+                f'//main//table[thead//th[{column}][normalize-space(.)="{header}"]]'
+                f'//tbody/tr[td[1]//button[normalize-space(.)="Remove from all portals"]]/td[{column}]')
+            if len(cells) != 1:
+                raise CopyStopped(f'Could not identify the {name} portal column.')
+            def guard_write():
+                self.require_resolved_editor_session()
+                self.guard()
+            def before_send():
+                current, still_live = observe()
+                if key not in still_live:
+                    raise CopyStopped(f'The {name} status changed before withdrawal. Resume to recheck it.')
+                guard_write()
+                record_intent(key, current['portals'][key]['id'])
+            self.button('Unpublish from ' + name, root=cells[0], guard=guard_write,
+                        before_send=before_send)
+            self.wait_for_portal_withdrawal(self.source, key, plan['source_portal_ids'][key], record_intent)
+
+        refresh_at = time.monotonic() + 10
+        def all_removed():
+            nonlocal refresh_at
+            current, remaining = observe()
+            if not current['published'] and not remaining:
+                return current
+            if time.monotonic() >= refresh_at:
+                self.guard()
+                if parse_editor_url(self.driver.current_url)['page_key'] != 'portals':
+                    raise CopyStopped('The source portal page changed while waiting for confirmation.')
+                self.driver.refresh()
+                refresh_at = time.monotonic() + 10
+            return None
+        return {'observed':self.wait(all_removed, 'Hub has not confirmed removal from all original destinations.', timeout=120)}
 
     @diagnosed
     def check_unarchived_source(self, plan):
@@ -519,6 +653,7 @@ class HubRelistUI:
     @diagnosed
     def archive(self, plan):
         from selenium.webdriver.common.keys import Keys
+        self.require_resolved_editor_session()
         self.guard()
         ident = plan['source_listing_id']
         kind = '1' if plan['particulars']['mode']=='sale' else '2'
@@ -526,6 +661,7 @@ class HubRelistUI:
         self.driver.get(f'https://hub.remax.co.za/app/listings/archive/{ident}?unarchive=false&type={kind}')
         url, handle = self.driver.current_url, self.driver.current_window_handle
         def archive_guard():
+            self.require_resolved_editor_session()
             if self.cancelled() or self.driver.current_url != url or self.driver.current_window_handle != handle:
                 raise CopyStopped('The archive page changed. No further action was sent.')
         self.wait(lambda:self.driver.find_elements('css selector','main input[type="radio"]'), 'The archive form did not load.')
@@ -543,6 +679,7 @@ class HubRelistUI:
         archive_guard()
         if not self.one('input[type="radio"]',choices[0]).is_selected():
             raise CopyStopped('Hub did not retain the archive choice.')
+        self.require_resolved_editor_session()
         self.button('Archive Listing')
         self.wait(lambda:any('Listing archived successfully!' in e.get_attribute('textContent')
                              for e in self.driver.find_elements('css selector','[role="status"],[role="alert"],[data-sonner-toast]')),
@@ -569,10 +706,12 @@ class HubRelistUI:
 
     @diagnosed
     def create(self, prepared, plan):
+        self.require_resolved_editor_session()
         self.current = None
         self.driver.switch_to.window(prepared['handle'])
         if self.driver.current_url != prepared['url']:
             raise CopyStopped('The unsaved replacement form changed. No Save click was sent.')
+        self.require_resolved_editor_session()
         self.button('Save')
         def created():
             match = re.fullmatch(r'https://hub\.remax\.co\.za/app/listings/edit/([0-9]+)(?:/(?:particulars|deal_particulars|media|portals))?',self.driver.current_url)
@@ -1065,6 +1204,7 @@ class HubRelistUI:
         if not portal['can_publish']:
             raise CopyStopped('A source portal is unavailable for the replacement.')
         name = next(values[1] for values in PORTALS.values() if values[0]==destination)
+        self.require_resolved_editor_session()
         self.button(name)
         def sent():
             current = read_portals(self.driver,guard=self.guard)['portals'][destination]

@@ -449,6 +449,7 @@ def test_preparation_requires_one_enabled_save_without_clicking_it(monkeypatch, 
     monkeypatch.setattr(module, 'ParticularsFiller', lambda *args, **kwargs:
                         SimpleNamespace(fill=lambda plan: events.append('fill'), guard=lambda: None))
     hub = SimpleNamespace(driver=driver, editor_bindings={'RXCU12345': {'handle':'source'}},
+                          has_unresolved_editor_opening=lambda: False,
                           verify_editor_reference=lambda *args: events.append('verify_source'))
     provider = module.HubRelistUI(hub, tmp_path, clipboard=lambda *args: None)
     plan = {'source_reference':'RXCU12345', 'source_listing_id':'123456', 'particulars': {'mode': 'rent'}}
@@ -601,7 +602,7 @@ def test_archive_uses_type_specific_reason_and_accepts_success_redirect(tmp_path
         return {'main input[type="radio"]':[radio], 'main label':[label],
                 'main [role="combobox"]':[], '[role="status"],[role="alert"],[data-sonner-toast]':[toast]}[selector]
     driver.find_elements=find
-    provider=module.HubRelistUI(SimpleNamespace(driver=driver),tmp_path,clipboard=lambda *args:None)
+    provider=module.HubRelistUI(SimpleNamespace(driver=driver,has_unresolved_editor_opening=lambda:False),tmp_path,clipboard=lambda *args:None)
     provider.select_expired_reason=lambda guard:events.append('mandate expired')
     def submit(text):
         events.append(text)
@@ -673,3 +674,64 @@ def test_completed_copy_recovery_goes_straight_to_independent_verification(tmp_p
     assert result == dict(target, content_already_submitted=True)
     assert [call.args[0] for call in ui.tab.call_args_list] == ['Portals','Media']
     driver.refresh.assert_not_called()
+
+
+@pytest.mark.parametrize('method', ['check_source','check_removed_source'])
+def test_source_reread_requires_saved_numeric_identity(tmp_path, method):
+    from unittest.mock import Mock
+    provider = module.HubRelistUI(SimpleNamespace(driver=Mock()), tmp_path, clipboard=None)
+    def capture(reference, **kwargs):
+        assert reference == 'RXCU1000'
+        assert kwargs['expected_listing_id'] == '111111'
+        assert kwargs['include_suburb_selection'] is True
+        raise CopyStopped('Synthetic same reference, different listing ID')
+    provider.captured_editor = capture
+    provider.unpublish = Mock()
+    provider.archive = Mock()
+    with pytest.raises(CopyStopped, match='different listing ID'):
+        getattr(provider,method)({'listing_id':'111111'}, {'source_reference':'RXCU1000'})
+    provider.unpublish.assert_not_called()
+    provider.archive.assert_not_called()
+
+
+@pytest.mark.parametrize('change', ['none','material','photo_ref','photo_order','caption','portals'])
+def test_fresh_source_checks_material_assets_and_destinations(tmp_path,monkeypatch,change):
+    from copy import deepcopy
+    from unittest.mock import Mock
+    page={'page_key':'details','fields':[{'name':'selling_price','value':'100'}],
+          'rich_text':[],'tables':[],'dialogs':[],
+          'media':[{'observed_asset_id':'1','observed_position':0,'original_source_ref':'synthetic'}],
+          'photo_captions':[{'id':'1','caption':'synthetic caption'}]}
+    source={'pages':[page]}
+    fresh=deepcopy(source)
+    if change=='material': fresh['pages'][0]['fields'][0]['value']='200'
+    if change=='photo_ref': fresh['pages'][0]['media'][0]['original_source_ref']='changed'
+    if change=='photo_order': fresh['pages'][0]['media'][0]['observed_position']=1
+    if change=='caption': fresh['pages'][0]['photo_captions'][0]['caption']='changed'
+    driver=SimpleNamespace(current_window_handle='B')
+    provider=module.HubRelistUI(SimpleNamespace(driver=driver),tmp_path,clipboard=None)
+    def capture(reference,**kwargs):
+        assert kwargs['expected_listing_id']=='111111'
+        driver.current_window_handle='A'
+        provider.current={'handle':'A'}
+        return fresh
+    provider.captured_editor=capture
+    provider.tab=Mock()
+    monkeypatch.setattr(module,'propose_address_fields',lambda source:{'fields':{}})
+    monkeypatch.setattr(module,'read_portals',lambda *a,**kw:{'destinations':['p24'] if change=='portals' else ['website']})
+    monkeypatch.setattr(module,'active_destinations',lambda state:state['destinations'])
+    call=lambda:provider.check_source({'source':source,'listing_id':'111111'},
+                                     {'source_reference':'RXCU1000','destinations':['website']})
+    if change=='none': call()
+    else:
+        with pytest.raises(CopyStopped): call()
+    assert driver.current_window_handle=='A'
+
+
+@pytest.mark.parametrize('method',['unpublish','archive','create'])
+def test_pending_editor_stops_direct_write_entry_before_browser_access(tmp_path,method):
+    hub=SimpleNamespace(driver=object(),has_unresolved_editor_opening=lambda:True)
+    provider=module.HubRelistUI(hub,tmp_path/'media',clipboard=None)
+    with pytest.raises(CopyStopped,match='unresolved'):
+        if method=='create':provider.create({}, {})
+        else:getattr(provider,method)({})

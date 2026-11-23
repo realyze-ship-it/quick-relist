@@ -11,9 +11,22 @@ import sqlite3
 import threading
 from uuid import uuid4
 
+from .portal_ui import TWO_STEP_UNPUBLISH
+
 
 class RunNeedsReview(RuntimeError):
     pass
+
+
+def can_open_portal_prompt(events, destination, portal_id):
+    history = [e for e in events if e['kind'] in ('portal_unpublish_intent', 'portal_unpublish_prompt',
+               'portal_unpublish_yes_intent') and e['data']['destination'] == destination]
+    if not history:
+        return True
+    if any(e['data']['portal_id'] != portal_id or e['kind'] == 'portal_unpublish_yes_intent' for e in history):
+        return False
+    # These controls open a confirmed two-step dialog. The website control acts immediately.
+    return destination in TWO_STEP_UNPUBLISH or history[-1]['kind'] == 'portal_unpublish_prompt'
 
 
 def _json(value):
@@ -180,6 +193,34 @@ class RunStore:
                               (_now(), _json(receipt), run_id))
             self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
                               (run_id, _now(), 'removal_reconciled', _json(receipt)))
+
+    def record_portal_intent(self, run_id, destination, portal_id, stage='open'):
+        """Distinguish the portal control, its observed question and the committing Yes."""
+        kind = {'open':'portal_unpublish_intent', 'prompt':'portal_unpublish_prompt',
+                'yes':'portal_unpublish_yes_intent'}[stage]
+        with self._lock, self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            actions = self.conn.execute('SELECT action,state FROM relist_actions WHERE run_id=?', (run_id,)).fetchall()
+            if len(actions) != 1 or tuple(actions[0]) not in (
+                    ('remove_portals','started'), ('remove_portals','uncertain')):
+                raise RunNeedsReview('This run is no longer waiting for portal removal.')
+            events = [{'kind':r[0], 'data':json.loads(r[1])} for r in self.conn.execute(
+                'SELECT kind,data_json FROM relist_events WHERE run_id=? ORDER BY id', (run_id,))]
+            if any(e['kind'] == 'manual_recovery' for e in events):
+                raise RunNeedsReview('This run was already recovered in Hub.')
+            if stage == 'open':
+                permitted = can_open_portal_prompt(events, destination, portal_id)
+            else:
+                previous = next((e for e in reversed(events) if e['kind'] in (
+                    'portal_unpublish_intent', 'portal_unpublish_prompt', 'portal_unpublish_yes_intent')
+                    and e['data']['destination'] == destination), None)
+                expected = 'portal_unpublish_intent' if stage == 'prompt' else 'portal_unpublish_prompt'
+                permitted = previous and previous['kind'] == expected and previous['data']['portal_id'] == portal_id
+            if not permitted:
+                raise RunNeedsReview(f'A withdrawal was already recorded or its portal ID changed. Check {destination} in Hub.')
+            data = {'destination':destination, 'portal_id':portal_id}
+            self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
+                              (run_id, _now(), kind, _json(data)))
 
     def perform_once(self, run_id, action, operation):
         """Commit intent before a UI action; never repeat an uncertain attempt."""

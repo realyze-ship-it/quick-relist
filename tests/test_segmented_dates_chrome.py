@@ -80,7 +80,7 @@ class SegmentedDateChromeTests(unittest.TestCase):
 
     def first_diagnostic(self, result):
         dates = [field for field in result['fields'] if field.get('type') == DATE_TYPE]
-        self.assertEqual([field['name'] for field in dates], list(DATE_NAMES[1:]))
+        self.assertEqual([field['name'] for field in dates], list(DATE_NAMES[1:5]))
         records = [item for item in result['discovery'] if item.get('kind') == DATE_DIAGNOSTIC_KIND]
         self.assertEqual(len(records), 1)
         item = records[0]
