@@ -650,3 +650,17 @@ def test_reviewed_path_rechecks_session_before_each_new_write(setup,pending_afte
     elif pending_after=='create':assert provider.calls==['prepare','check','remove','archive','create']
     else:assert provider.calls==['prepare','check','remove','archive','create','copy','verify']
     assert not any(c.startswith('publish') for c in provider.calls)
+
+
+def test_new_backup_preflights_only_portals_then_checks_content_at_withdrawal(setup):
+    drafts, runs, job = setup
+    job = {**job, 'archive_before_review':True}
+    data = {**module.latest_collection(drafts, job['id'])['capture'], 'source':{}}
+    provider = Provider()
+    provider.check_collected_portals = lambda *args:provider.operation('check collected portals')
+    runner = module.RelistRunner(drafts, runs, provider)
+    runner.preflight_archive_collection(job, data, freshly_collected=True)
+    assert provider.calls == ['check collected portals']
+    assert runs.get(job['id']) is None
+    runner.archive_collected(job, data, freshly_collected=False)
+    assert provider.calls == ['check collected portals','check','remove','archive']
