@@ -181,6 +181,24 @@ class RunStore:
             self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
                               (run_id, _now(), 'removal_reconciled', _json(receipt)))
 
+    def record_portal_intent(self, run_id, destination, portal_id):
+        """Commit the individual click before sending it, including during legacy bulk recovery."""
+        with self._lock, self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            actions = self.conn.execute('SELECT action,state FROM relist_actions WHERE run_id=?', (run_id,)).fetchall()
+            if len(actions) != 1 or tuple(actions[0]) not in (
+                    ('remove_portals','started'), ('remove_portals','uncertain')):
+                raise RunNeedsReview('This run is no longer waiting for portal removal.')
+            events = self.conn.execute(
+                "SELECT kind,data_json FROM relist_events WHERE run_id=? AND kind IN ('portal_unpublish_intent','manual_recovery')",
+                (run_id,))
+            for kind, data in events:
+                if kind == 'manual_recovery' or json.loads(data)['destination'] == destination:
+                    raise RunNeedsReview(f'A withdrawal was already recorded for this run. Check {destination} in Hub.')
+            self.conn.execute('INSERT INTO relist_events(run_id,recorded_at,kind,data_json) VALUES(?,?,?,?)',
+                              (run_id, _now(), 'portal_unpublish_intent',
+                               _json({'destination':destination, 'portal_id':portal_id})))
+
     def perform_once(self, run_id, action, operation):
         """Commit intent before a UI action; never repeat an uncertain attempt."""
         with self._lock, self.conn:

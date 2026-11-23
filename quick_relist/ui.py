@@ -254,7 +254,8 @@ def _collected_job_view(drafts, job):
         field = edited.get(proposed['path'], proposed['field'])
         address['unit_number' if key == 'ss_unit_number' else key] = field.get('value')
     return {'address': address, 'reviewed': bool(revisions),
-            'state': 'Address review saved' if revisions else 'Ready for address review',
+            'state': ('Address review saved' if revisions else 'Backup saved · awaiting archive'
+                      if job.get('archive_before_review') else 'Ready for address review'),
             'media_count': capture['media_count'], 'collection_seconds': capture.get('collection_seconds'),
             'download_needs_review': capture.get('download_needs_review', False)}
 
@@ -1868,6 +1869,8 @@ class MainWindow(QMainWindow):
                                                else 'Original archived. Review the saved address to prepare its replacement.')
         elif job.get('archive_before_review'):
             self.verify_captured_address_button.setEnabled(False)
+            if collected_view and not collected_view.get('download_needs_review'):
+                self.collection_summary.setText('Listing and photos backed up. Resume this batch to finish portal removal and archiving.')
 
     @Slot(object)
     def _set_description_clipboard(self, request):
@@ -1967,11 +1970,14 @@ class MainWindow(QMainWindow):
     def _relist_reviewed_batch(self):
         if self._is_busy or self.runs is None or self.hub is None or not self.relist_batch_button.isEnabled():
             return
+        from .live_relist_ui import HubRelistUI, UNRESOLVED_EDITOR_RELIST_STOP
+        if self.hub.has_unresolved_editor_opening():
+            self._show_error('Hub browser session needs attention', UNRESOLVED_EDITOR_RELIST_STOP)
+            return
         jobs = deepcopy(self._relist_jobs)
         from .collection import latest_collection
         from .relist_plan import build_relist_plan
         from .relist_runner import RelistRunner, removal_can_be_checked, copy_can_be_checked, batch_can_advance, display_status
-        from .live_relist_ui import HubRelistUI
         from .form_copy import CopyStopped
         from .run_store import RunNeedsReview
         from .collection_refresh import needs_house_refresh, refresh_house_collection
@@ -2073,6 +2079,7 @@ class MainWindow(QMainWindow):
                 runner=RelistRunner(self.drafts,self.runs,provider,cancelled=stop.is_set,progress=self.collection_progress.emit)
                 try:
                     with self.store.operation_lock():
+                        provider.require_resolved_editor_session()
                         return runner.batch(prepared)
                 except (CopyStopped,RunNeedsReview):
                     raise
@@ -2141,6 +2148,7 @@ class MainWindow(QMainWindow):
                     with self.store.operation_lock():
                         queued = [self.store.get_job(j['id']) for j in jobs]
                         return collect_batch(self.hub, self.drafts, queued, self.media_root, after_collection=runner.archive_collected,
+                                             preflight_collection=runner.preflight_archive_collection,
                                              cancelled=stop.is_set, progress=self.collection_progress.emit)
                 return collect_batch(self.hub, self.drafts, jobs, self.media_root, cancelled=stop.is_set, progress=self.collection_progress.emit)
             except (PreviousDownloadExists, DownloadOutcomeUnknown):

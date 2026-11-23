@@ -149,5 +149,6 @@ def build_relist_plan(collection, review):
     destinations = active_destinations(collection['portal_observation'])
     return {'particulars':particulars, 'media':media_plan(pages['media']),
             'photos':deepcopy(photos), 'destinations':destinations,
+            'source_portal_ids':{key:collection['portal_observation']['portals'][key]['id'] for key in destinations},
             'source_reference':collection['rxcu'], 'source_listing_id':collection['listing_id'],
             'deal':deepcopy(pages.get('deal_particulars'))}

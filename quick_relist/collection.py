@@ -160,7 +160,7 @@ def _backup_media(hub, drafts, job_id, page, media_root, *, guard, cancelled, pr
 
 
 def collect_batch(hub, drafts, jobs, media_root, *, cancelled=lambda: False, progress=lambda message: None,
-                  after_collection=None):
+                  after_collection=None, preflight_collection=None):
     # Development builds refresh handlers between idle UI operations so fixes
     # do not discard the operator's signed-in browser. This performs no Hub
     # action; ordinary installed builds never reload modules.
@@ -177,13 +177,16 @@ def collect_batch(hub, drafts, jobs, media_root, *, cancelled=lambda: False, pro
                     hub._select_all_listing_types = MethodType(module.ReadOnlyHub._select_all_listing_types, hub)
                     hub.close = MethodType(module.ReadOnlyHub.close, hub)
     collected = []
+    ready = []
+    fresh_jobs = set()
     for job in jobs:
         if cancelled():
-            break
+            return collected
         if job.get('state') != 'queued':
             continue
         saved = latest_collection(drafts, job['id'])
         if saved:
+            progress(f"{job['rxcu']}: using the saved listing and photo backup")
             if saved['capture'].get('download_needs_review'):
                 from .downloads import reviewed_archive_receipt
                 media = saved['capture'].get('media', {})
@@ -200,13 +203,25 @@ def collect_batch(hub, drafts, jobs, media_root, *, cancelled=lambda: False, pro
                 # Preserve the original observation and all source/address IDs.
                 saved = drafts.get_capture(drafts.save_capture(job['id'], reviewed))
             collected.append(saved)
-            if after_collection is not None:
-                after_collection(job, saved['capture'], freshly_collected=False)
+            ready.append((job, saved['capture']))
             continue
         result = collect_listing(hub, drafts, job, media_root, cancelled=cancelled, progress=progress)
         collected.append(result)
         if result['capture'].get('download_needs_review'):
             raise CollectionStopped('The listing and its original photos were saved. Review the completed download before continuing the batch.')
-        if after_collection is not None:
-            after_collection(job, result['capture'], freshly_collected=True)
+        ready.append((job, result['capture']))
+        fresh_jobs.add(job['id'])
+    # Nothing may archive until every eligible backup and preflight has passed.
+    # A fresh capture is no longer the current editor after collecting a batch.
+    if preflight_collection is not None:
+        for job, capture in ready:
+            if cancelled():
+                return collected
+            progress(f"{job['rxcu']}: checking the backed-up listing before the batch can start withdrawals")
+            preflight_collection(job, capture, freshly_collected=job['id'] in fresh_jobs)
+    if after_collection is not None:
+        for job, capture in ready:
+            if cancelled():
+                return collected
+            after_collection(job, capture, freshly_collected=False)
     return collected

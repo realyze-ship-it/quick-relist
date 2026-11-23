@@ -43,7 +43,7 @@ def display_status(run):
 def removal_can_be_checked(run):
     actions = (run or {}).get('actions', [])
     states = {a['action']:a['state'] for a in actions}
-    return states == {'remove_portals':'uncertain'} or (
+    return (set(states) == {'remove_portals'} and states['remove_portals'] in ('started','uncertain')) or (
         states.get('remove_portals') == 'done' and set(states) <= {'remove_portals','archive'}
         and states.get('archive') in (None, 'uncertain', 'retry_ready'))
 
@@ -103,6 +103,72 @@ class RelistRunner:
                 break
         return results
 
+    def require_new_write_session(self, job_id, action):
+        # A completed receipt is returned by perform_once without another write.
+        # Keep read-only verification/reconciliation available in stopped runs.
+        previous = self.runs.get(job_id)
+        if any(a['action'] == action and a['state'] == 'done'
+               for a in (previous or {}).get('actions', [])):
+            return
+        self.provider.require_resolved_editor_session()
+
+    def remove_original(self, run_id, plan, resuming=False):
+        return self.provider.unpublish(plan, lambda key, ident:self.runs.record_portal_intent(run_id, key, ident), resuming)
+
+    def check_removal(self, previous, collection, plan, *, preflight=False):
+        actions = {a['action']:a['state'] for a in previous['actions']}
+        unfinished = set(actions) == {'remove_portals'} and actions['remove_portals'] in ('started','uncertain')
+        receipt = self.provider.check_removed_source(collection, plan, unfinished)
+        remaining = set(receipt.get('remaining', []))
+        attempted = {e['data']['destination'] for e in previous['events'] if e['kind'] == 'portal_unpublish_intent'}
+        blocked = sorted(remaining & attempted)
+        if blocked:
+            raise RunNeedsReview('Hub still shows a previously requested withdrawal as live: ' + ', '.join(blocked))
+        if not unfinished or preflight:
+            return
+        if remaining:
+            self.provider.require_resolved_editor_session()
+            receipt = self.remove_original(previous['id'], plan, resuming=True)
+            receipt['reconciled_by'] = 'fresh_source_and_portal_read'
+        self.runs.reconcile_removal(previous['id'], receipt)
+
+    def preflight_archive_collection(self, job, collection, *, freshly_collected=False):
+        """Read-only batch barrier; never start/reconcile a run or change Hub."""
+        from .address import propose_address_fields
+        from .relist_dates import date_policy
+        if not job.get('archive_before_review') or collection['rxcu'] != job['rxcu']:
+            raise RunNeedsReview('This batch was not started for early archiving.')
+        self.runs.assert_source_available(job['id'], collection['rxcu'], collection['listing_id'])
+        original = {f['path']:f['field'] for f in propose_address_fields(collection['source'])['fields'].values()}
+        plan = build_relist_plan(collection, {'original':original, 'edited':original})
+        date_policy(plan['particulars'], self.today())
+        previous = self.runs.get(job['id'])
+        expected = {'source_capture_id':collection['source_capture_id'], 'address_revision_id':None,
+                    'reference':job['rxcu'], 'listing_id':collection['listing_id'], 'archive_before_review':True}
+        if previous and previous['binding'] != expected:
+            raise RunNeedsReview('The saved source changed after this run. Check its existing outcome.')
+        if archived_for_review(previous):
+            return
+        states = {a['action']:a['state'] for a in (previous or {}).get('actions', [])}
+        if set(states) - {'remove_portals','archive'} or any(
+                e['kind']=='manual_recovery' for e in (previous or {}).get('events', [])):
+            raise RunNeedsReview('This listing has a later relist action. Check its existing outcome.')
+        if self.cancelled():
+            raise CopyStopped('Stopped during batch preflight. No new original was changed.')
+        if 'archive' in states:
+            receipt = self.provider.inspect_archive(plan)
+            if receipt['archived']:
+                return
+        if 'remove_portals' in states:
+            self.check_removal(previous, collection, plan, preflight=True)
+            self.provider.require_resolved_editor_session()
+        else:
+            self.provider.require_resolved_editor_session()
+            if freshly_collected and not previous:
+                self.provider.check_collected_portals(collection, plan)
+            else:
+                self.provider.check_source(collection, plan)
+
     def archive_collected(self, job, collection, *, freshly_collected):
         """Use the saved source as-is for backup validation. No address approval is recorded here."""
         from .address import propose_address_fields
@@ -131,19 +197,20 @@ class RelistRunner:
                     return
                 self.runs.reconcile_archive_not_applied(run_id, receipt)
             if 'remove_portals' in states:
-                receipt = self.provider.check_removed_source(collection, plan)
-                if states['remove_portals'] != 'done':
-                    self.runs.reconcile_removal(run_id, receipt)
+                self.check_removal(previous, collection, plan)
             elif freshly_collected:
                 self.provider.use_collected_source(collection)
             else:
+                self.progress(job['rxcu'] + ': verifying the original against its saved backup')
                 self.provider.check_source(collection, plan)
             self.progress(job['rxcu'] + ': removing the original from its portals')
-            self.runs.perform_once(run_id, 'remove_portals', lambda:self.provider.unpublish(plan))
+            self.require_new_write_session(job['id'], 'remove_portals')
+            self.runs.perform_once(run_id, 'remove_portals', lambda:self.remove_original(run_id, plan))
             self.runs.note(run_id, 'status', {'state':'portals_removed'})
             if self.cancelled():
                 raise CopyStopped('Stopped after portal removal. Resume the archive step in this batch.')
             self.progress(job['rxcu'] + ': archiving the original')
+            self.require_new_write_session(job['id'], 'archive')
             self.runs.perform_once(run_id, 'archive', lambda:self.provider.archive(plan))
             self.runs.note(run_id, 'status', {'state':'archived','original_archived':True})
         except Exception:
@@ -202,10 +269,8 @@ class RelistRunner:
             raise CopyStopped('Stopped before saving the replacement.')
         if previous and not (resuming_copy or archived):
             self.progress(job['rxcu'] + ': checking the recorded removal before continuing')
-            receipt = self.provider.check_removed_source(data, plan)
+            self.check_removal(previous, data, plan)
             actions = {a['action']:a['state'] for a in previous['actions']}
-            if actions['remove_portals'] == 'uncertain':
-                self.runs.reconcile_removal(previous['id'], receipt)
             if actions.get('archive') in ('uncertain', 'retry_ready'):
                 archive_state = self.provider.check_unarchived_source(plan)
                 self.runs.reconcile_archive_not_applied(previous['id'], archive_state)
@@ -229,10 +294,12 @@ class RelistRunner:
             if self.cancelled():
                 raise CopyStopped('Stopped between steps. Check the saved progress before resuming.')
             self.progress(job['rxcu'] + ': ' + message)
+            if action != 'verify_content':
+                self.require_new_write_session(job['id'], action)
             return self.runs.perform_once(run_id, action, operation)
         try:
             if not resuming_copy and not archived:
-                step('remove_portals', lambda: self.provider.unpublish(plan), 'removing the original from its portals')
+                step('remove_portals', lambda: self.remove_original(run_id, plan), 'removing the original from its portals')
                 record('portals_removed')
                 step('archive', lambda: self.provider.archive(plan), 'archiving the original as ' +
                      ('withdrawn' if plan.get('particulars',{}).get('mode') == 'rent' else 'mandate expired'))
@@ -241,6 +308,7 @@ class RelistRunner:
                 target = step('create', lambda: self.provider.create(prepared, plan), 'saving the reviewed replacement')
             record('created', target_reference=target['reference'], target_listing_id=target['listing_id'])
             if not target.get('content_already_submitted'):
+                self.provider.require_resolved_editor_session()
                 self.progress(job['rxcu'] + ': copying descriptions and checking every photo')
                 self.provider.copy_content(target, plan, self.runs, run_id)
             verified = step('verify_content', lambda: self.provider.verify_content(target, plan), 'checking the saved replacement against the original')

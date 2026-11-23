@@ -101,16 +101,18 @@ def test_protected_row_stops_batch_but_local_cancel_preserves_later_order(monkey
     def collect(hub, store, job, root, **kwargs):
         calls.append(('collect', job['id']))
         return {'capture': {}}
-    def archive(job, data, **kwargs):
-        calls.append(('archive', job['id']))
+    def preflight(job, data, **kwargs):
+        calls.append(('check', job['id']))
         if job['id'] == '0':
             raise CopyStopped('Synthetic protected row')
+    def archive(job, data, **kwargs):
+        calls.append(('archive', job['id']))
     monkeypatch.setattr(collection, 'collect_listing', collect)
     with pytest.raises(CopyStopped):
-        collection.collect_batch(None, drafts, jobs, None, after_collection=archive)
-    assert calls == [('archive', '0')]
+        collection.collect_batch(None, drafts, jobs, None, after_collection=archive, preflight_collection=preflight)
+    assert calls == [('collect','1'),('collect','2'),('check','0')]
     jobs[0]['state'] = 'cancelled'  # The separately guarded local cancellation path.
     calls.clear()
-    collection.collect_batch(None, drafts, jobs, None, after_collection=archive)
-    assert calls == [('collect', '1'), ('archive', '1'), ('collect', '2'), ('archive', '2')]
+    collection.collect_batch(None, drafts, jobs, None, after_collection=archive, preflight_collection=preflight)
+    assert calls == [('collect','1'),('collect','2'),('check','1'),('check','2'),('archive','1'),('archive','2')]
     assert drafts.get_capture(saved_id)

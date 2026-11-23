@@ -708,7 +708,7 @@ def test_new_live_batch_collects_archives_then_opens_local_review(window, applic
         seen.add(job['id'])
         return {'capture':{'rxcu':job['rxcu']}}
     def archive(runner, job, data, *, freshly_collected):
-        assert freshly_collected and data['rxcu'] == job['rxcu']
+        assert freshly_collected is False and data['rxcu'] == job['rxcu']
         rid = runner.runs.start(job['id'],source_capture_id='capture',reference=job['rxcu'],
             listing_id=job['rxcu'][4:],archive_before_review=True,address_revision_id=None)
         for action in ('remove_portals','archive'):
@@ -716,13 +716,28 @@ def test_new_live_batch_collects_archives_then_opens_local_review(window, applic
         events.append('archive ' + job['rxcu'])
     monkeypatch.setattr(collection,'collect_listing',collect)
     monkeypatch.setattr(relist_runner.RelistRunner,'archive_collected',archive)
+    monkeypatch.setattr(relist_runner.RelistRunner,'preflight_archive_collection',
+        lambda runner,job,data,**kwargs:events.append('preflight '+job['rxcu']))
     monkeypatch.setattr(window,'_verify_captured_address',lambda:events.append('address review'))
     window.rxcu_input.setPlainText('RXCU123456\nRXCU123457')
     window.create_button.click()
     _finish_worker(application,window)
-    assert events == ['login','collect RXCU123456','archive RXCU123456','collect RXCU123457','archive RXCU123457','address review']
+    assert events == ['login','collect RXCU123456','collect RXCU123457','preflight RXCU123456','preflight RXCU123457','archive RXCU123456','archive RXCU123457','address review']
     assert window._review_rows == [0,1] and not window.relist_batch_button.isEnabled()
     window.runs.close()
+
+
+def test_reviewed_relist_stops_before_preflight_or_confirmation_with_unresolved_editor(window, monkeypatch):
+    window.runs = SimpleNamespace()
+    window.hub = SimpleNamespace(has_unresolved_editor_opening=lambda: True)
+    window.relist_batch_button.setEnabled(True)
+    monkeypatch.setattr(window, '_run_operation', lambda *args, **kwargs: pytest.fail('No worker should start'))
+    monkeypatch.setattr(QtWidgets.QMessageBox, 'exec', lambda *args: pytest.fail('No relist confirmation should open'))
+    window._relist_reviewed_batch()
+    assert len(window.test_errors) == 1
+    assert 'earlier Hub editor opening is unresolved' in window.test_errors[0][1]
+    assert 'check that copy rather than start another' in window.test_errors[0][1]
+    window.runs = None
 
 
 def test_invalid_or_credential_bearing_hub_urls_are_rejected(window):

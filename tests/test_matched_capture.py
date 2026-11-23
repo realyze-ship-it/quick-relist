@@ -568,7 +568,7 @@ def test_room_capture_not_enabled_implicitly(setup, monkeypatch):
 
 @pytest.mark.parametrize('rental', [False, True])
 @pytest.mark.parametrize('start', ['details', 'media', 'portals'])
-def test_collect_and_archive_finishes_on_portals_after_one_read_of_each_page(setup, monkeypatch, tmp_path, rental, start):
+def test_collect_hands_saved_capture_to_deferred_archive_after_one_read_of_each_page(setup, monkeypatch, tmp_path, rental, start):
     from quick_relist import collection, portal_ui
     from quick_relist.drafts import DraftStore
     hub, driver, _ = setup
@@ -596,7 +596,7 @@ def test_collect_and_archive_finishes_on_portals_after_one_read_of_each_page(set
         visited.append('portals')
         return {'published':True}
     def archive(job, data, *, freshly_collected):
-        assert driver.current_url == URLS[3] and freshly_collected and data['media_count'] == 1
+        assert driver.current_url == URLS[3] and freshly_collected is False and data['media_count'] == 1
         visited.append('archive')
     monkeypatch.setattr(collection, '_backup_media', backup)
     monkeypatch.setattr(portal_ui, 'read_portals', portals)

@@ -63,7 +63,8 @@ def test_placeholder_id_does_not_count_as_published():
 def test_missing_final_cell_does_not_hide_confirmed_removal_or_invent_a_flow_status():
     data=raw()
     data.update(published='Is published? No', ids=['Portals IDs','','','','','','',None])
-    data['columns'][1]={'text':'Publish to RE/MAX website','buttons':[{'text':'Publish to RE/MAX website','enabled':True}]}
+    for i, (_, publish, _) in enumerate(PORTALS.values(), 1):
+        data['columns'][i]={'text':publish,'buttons':[{'text':publish,'enabled':True}]}
     state=normalize_portals(data)
     assert not state['published']
     assert all(state['portals'][d]['state']=='unpublished' for d in ('website','p24','pp','global'))

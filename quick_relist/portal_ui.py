@@ -59,12 +59,15 @@ def normalize_portals(raw):
         valid_id = isinstance(ident, str) and bool(re.fullmatch(r'[A-Za-z0-9-]{3,80}', ident))
         active = valid_id and republish.casefold() in labels and any(s.startswith('unpublish ') for s in labels)
         result['portals'][key] = {'id': ident if valid_id else None,
-            'state': 'pending' if pending else 'published' if active else 'unpublished' if ident == '' else 'unknown',
+            'state': 'pending' if pending else 'published' if active else 'unpublished' if ident == ''
+                     and not any(s.startswith(('unpublish ', 'republish ')) for s in labels) else 'unknown',
             'can_publish': publish.casefold() in labels and not pending,
             'can_republish': republish.casefold() in labels and not pending}
         if ((ident or '').strip().casefold() == 'in moderation'
                 or re.match(r'^in moderation\b', column['text'].strip(), re.I)):
             result['portals'][key]['pending_reason'] = 'moderation'
+        if ident is None:
+            result['portals'][key]['id_cell_omitted'] = True
     return result
 
 
@@ -97,3 +100,21 @@ def active_destinations(state):
     if not state['published'] or not active:
         raise CopyStopped('This source is not a confirmed active listing. Review it before relisting.')
     return active
+
+
+def remaining_destinations(state, plan):
+    """Only original, positively identified publications can still be withdrawn."""
+    remaining = []
+    for key, portal in state['portals'].items():
+        if portal['state'] == 'unpublished':
+            continue
+        # Hub can omit the unused trailing ID cell when the website is offline.
+        if (key == 'flow' and key not in plan['destinations'] and portal['state'] == 'unknown'
+                and portal.get('id_cell_omitted') and portal['can_publish'] and not portal['can_republish']
+                and not state['published']):
+            continue
+        if (portal['state'] != 'published' or key not in plan['destinations']
+                or portal['id'] != plan['source_portal_ids'][key]):
+            raise CopyStopped(f'The {key} portal status or ID changed. Check the original in Hub.')
+        remaining.append(key)
+    return remaining
