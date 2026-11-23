@@ -4,7 +4,7 @@ import time
 from .collection import latest_collection
 from .form_copy import CopyStopped
 from .relist_plan import build_relist_plan
-from .run_store import RunNeedsReview
+from .run_store import RunNeedsReview, can_open_portal_prompt
 from .brochure_review import apply_review
 from .relist_dates import apply_relist_dates, relist_today
 from .portal_ui import only_moderation_pending
@@ -113,15 +113,17 @@ class RelistRunner:
         self.provider.require_resolved_editor_session()
 
     def remove_original(self, run_id, plan, resuming=False):
-        return self.provider.unpublish(plan, lambda key, ident:self.runs.record_portal_intent(run_id, key, ident), resuming)
+        def record(key, ident, stage='open'):
+            self.runs.record_portal_intent(run_id, key, ident, stage)
+        return self.provider.unpublish(plan, record, resuming)
 
     def check_removal(self, previous, collection, plan, *, preflight=False):
         actions = {a['action']:a['state'] for a in previous['actions']}
         unfinished = set(actions) == {'remove_portals'} and actions['remove_portals'] in ('started','uncertain')
         receipt = self.provider.check_removed_source(collection, plan, unfinished)
         remaining = set(receipt.get('remaining', []))
-        attempted = {e['data']['destination'] for e in previous['events'] if e['kind'] == 'portal_unpublish_intent'}
-        blocked = sorted(remaining & attempted)
+        blocked = sorted(key for key in remaining if not can_open_portal_prompt(
+            previous['events'], key, plan['source_portal_ids'][key]))
         if blocked:
             raise RunNeedsReview('Hub still shows a previously requested withdrawal as live: ' + ', '.join(blocked))
         if not unfinished or preflight:
